@@ -1,0 +1,11 @@
+{
+  "name": "hotel-system",
+  "private": true,
+  "scripts": {
+    "dev:api": "npm run dev --prefix apps/api",
+    "dev:web": "npm run dev --prefix apps/web",
+    "build": "npm run build --prefix apps/api && npm run build --prefix apps/web",
+    "db:migrate": "npm run db:migrate --prefix apps/api",
+    "db:seed": "npm run db:seed --prefix apps/api"
+  }
+}
