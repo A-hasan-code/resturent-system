@@ -1,4 +1,4 @@
-services:
+﻿services:
   postgres:
     image: postgres:16-alpine
     container_name: hotel-postgres
@@ -18,6 +18,7 @@ services:
       retries: 10
 
   api:
+    image: hotel-system-api:1.0.0
     build:
       context: ..
       dockerfile: docker/api.Dockerfile
@@ -35,6 +36,7 @@ services:
       - "${API_PORT:-4000}:4000"
 
   web:
+    image: hotel-system-web:1.0.0
     build:
       context: ..
       dockerfile: docker/web.Dockerfile

@@ -8,3 +8,5 @@ apps/api/prisma/*.db
 apps/web/dist
 docker/data
 .turbo
+client-pack/
+releases/
