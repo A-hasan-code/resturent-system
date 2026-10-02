@@ -652,6 +652,10 @@ export const ur: Record<MessageKey, string> = {
   "users.empty": "کوئی یوزر نہیں ملا",
   "users.footer":
     "یوزرز حذف نہیں ہوتے — سائن اِن روکنے کے لیے اکاؤنٹ غیر فعال کریں۔ تاریخ محفوظ رہتی ہے۔",
+  "users.billPrinter": "بل پرنٹر",
+  "users.billPrinterHint":
+    "صنعتی سیٹ اپ: اس کیشئر کے کاؤنٹر کا نیٹ ورک پرنٹر منتخب کریں۔ ان کے بل مین سرور کے ذریعے اسی پرنٹر پر جائیں گے۔",
+  "users.billPrinterDefault": "ڈیفالٹ (پہلا / نیٹ ورک بل پرنٹر)",
   "users.helpAdmin": "مکمل رسائی — سیٹنگز، یوزرز، رپورٹس، سب کچھ۔",
   "users.helpManager": "فلور کنٹرول — آرڈرز، بلنگ، حوالے، زیادہ تر رپورٹس۔",
   "users.helpCashier": "ادائیگیاں لیتا ہے اور کیش حوالے کی تصدیق کرتا ہے۔",
@@ -733,7 +737,14 @@ export const ur: Record<MessageKey, string> = {
   "settings.kotFields": "کچن سلپ فیلڈز",
   "settings.kotFooter": "کچن سلپ فوٹر (اختیاری)",
   "settings.printers": "پرنٹرز",
-  "settings.printersHint": "ہر پرنٹ درخواست مماثل پرنٹر کو جاتی ہے۔",
+  "settings.printersHint": "ہر پرنٹ درخواست مین سرور پر مماثل پرنٹر کو جاتی ہے۔",
+  "settings.printersIndustrial":
+    "کاؤنٹرز: ہر بلنگ پرنٹر LAN (IP:9100) شامل کریں، اسٹیشن لکھیں، بل ٹک کریں، پھر یوزرز → بل پرنٹر سے منسلک کریں۔",
+  "settings.station": "اسٹیشن / کاؤنٹر",
+  "settings.stationPh": "جیسے Cashier 1",
+  "settings.stationHint": "کاؤنٹر کا لیبل — کیشئر تفویض کرتے وقت دکھتا ہے۔",
+  "settings.networkPrinterHint":
+    "پرنٹر اسی LAN پر نیٹ ورک موڈ میں ہو۔ صرف کیشئر PC پر USB کام نہیں کرے گا۔",
   "settings.addPrinter": "+ پرنٹر شامل",
   "settings.target": "ٹارگٹ",
   "settings.kitchenSlip": "کچن سلپ",

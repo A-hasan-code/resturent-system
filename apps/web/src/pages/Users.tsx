@@ -12,12 +12,15 @@ type StaffUser = {
   username: string;
   active: boolean;
   hasPin: boolean;
+  billPrinterId: string | null;
+  billPrinterName: string | null;
   roleCode: string;
   roleName: string;
   createdAt: string;
 };
 
 type Role = { code: string; name: string };
+type BillPrinter = { id: string; name: string; station: string; printsBill: boolean; active: boolean };
 
 type Draft = {
   id?: string;
@@ -29,6 +32,7 @@ type Draft = {
   removePin: boolean;
   active: boolean;
   hasPin: boolean;
+  billPrinterId: string;
 };
 
 const ROLE_HELP: Record<string, MessageKey> = {
@@ -49,6 +53,7 @@ const EMPTY: Draft = {
   removePin: false,
   active: true,
   hasPin: false,
+  billPrinterId: "",
 };
 
 function errMsg(e: unknown, fallback: string) {
@@ -65,6 +70,7 @@ export function UsersPage() {
   const t = useT();
   const [users, setUsers] = useState<StaffUser[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
+  const [billPrinters, setBillPrinters] = useState<BillPrinter[]>([]);
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
@@ -72,9 +78,14 @@ export function UsersPage() {
 
   const load = useCallback(async () => {
     try {
-      const [u, r] = await Promise.all([api<StaffUser[]>("/users"), api<Role[]>("/users/roles")]);
+      const [u, r, printers] = await Promise.all([
+        api<StaffUser[]>("/users"),
+        api<Role[]>("/users/roles"),
+        api<BillPrinter[]>("/printers").catch(() => [] as BillPrinter[]),
+      ]);
       setUsers(u);
       setRoles(r);
+      setBillPrinters(printers.filter((p) => p.active && p.printsBill));
     } catch (e) {
       toast.push(errMsg(e, t("users.loadFailed")), "err");
     }
@@ -98,6 +109,7 @@ export function UsersPage() {
       removePin: false,
       active: u.active,
       hasPin: u.hasPin,
+      billPrinterId: u.billPrinterId ?? "",
     });
   }
 
@@ -112,6 +124,7 @@ export function UsersPage() {
           username: draft.username,
           roleCode: draft.roleCode,
           active: draft.active,
+          billPrinterId: draft.billPrinterId || null,
         };
         if (draft.password) body.password = draft.password;
         if (draft.removePin) body.pin = null;
@@ -127,6 +140,7 @@ export function UsersPage() {
             roleCode: draft.roleCode,
             password: draft.password,
             pin: draft.pin || undefined,
+            billPrinterId: draft.billPrinterId || undefined,
           }),
         });
         toast.push(t("users.created", { name: draft.username }), "ok");
@@ -183,6 +197,7 @@ export function UsersPage() {
               <th>{t("common.name")}</th>
               <th>{t("users.username")}</th>
               <th>{t("users.role")}</th>
+              <th>{t("users.billPrinter")}</th>
               <th>{t("users.pinLogin")}</th>
               <th>{t("common.status")}</th>
               <th />
@@ -197,6 +212,7 @@ export function UsersPage() {
                 </td>
                 <td>@{u.username}</td>
                 <td>{roleLabel(u.roleCode, u.roleName)}</td>
+                <td className="tiny">{u.billPrinterName || "—"}</td>
                 <td>{u.hasPin ? <span className="badge paid">{t("users.set")}</span> : <span className="tiny muted">—</span>}</td>
                 <td>
                   <span className={`badge ${u.active ? "ready" : "unpaid"}`}>
@@ -222,7 +238,7 @@ export function UsersPage() {
             ))}
             {!shown.length && (
               <tr>
-                <td colSpan={6} className="empty">
+                <td colSpan={7} className="empty">
                   {t("users.empty")}
                 </td>
               </tr>
@@ -344,6 +360,26 @@ export function UsersPage() {
                   </span>
                 </label>
               )}
+            </section>
+
+            <section className="form-section">
+              <h3>{t("users.billPrinter")}</h3>
+              <p className="hint">{t("users.billPrinterHint")}</p>
+              <div className="field">
+                <label htmlFor="u-bill-printer">{t("users.billPrinter")}</label>
+                <select
+                  id="u-bill-printer"
+                  value={draft.billPrinterId}
+                  onChange={(e) => setDraft({ ...draft, billPrinterId: e.target.value })}
+                >
+                  <option value="">{t("users.billPrinterDefault")}</option>
+                  {billPrinters.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.station ? `${p.name} · ${p.station}` : p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </section>
 
             {draft.id && draft.id !== user?.id && (

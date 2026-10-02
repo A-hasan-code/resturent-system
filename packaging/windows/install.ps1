@@ -81,8 +81,22 @@ function Set-FirewallRule([string]$name, [string[]]$ruleArgs) {
 }
 
 function Get-LanAddresses {
+  # Prefer real Wi-Fi / Ethernet; push Hyper-V / WSL / Docker / VPN to the end (QR uses first URL).
+  $virtual = 'vEthernet|Hyper-V|WSL|VMware|VirtualBox|vBox|Docker|VPN|ZeroTier|Hamachi|TAP-Windows|Bluetooth|Loopback|Pseudo|isatap|Teredo|Wi-Fi Direct|Hosted Network|Virtual'
   Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
     Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" -and $_.AddressState -eq "Preferred" } |
+    Sort-Object @{
+      Expression = {
+        $score = 0
+        if ($_.InterfaceAlias -match $virtual) { $score += 1000 }
+        if ($_.IPAddress -like "192.168.*") { $score += 0 }
+        elseif ($_.IPAddress -like "10.*") { $score += 10 }
+        elseif ($_.IPAddress -match '^172\.(1[6-9]|2\d|3[0-1])\.') { $score += 20 }
+        else { $score += 50 }
+        if ($_.InterfaceAlias -match 'Wi-?Fi|WLAN|Wireless|Ethernet|Local Area Connection') { $score -= 5 }
+        $score
+      }
+    }, IPAddress |
     Select-Object -ExpandProperty IPAddress
 }
 

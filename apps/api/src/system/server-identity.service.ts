@@ -44,7 +44,8 @@ export class ServerIdentityService implements OnModuleInit {
         out.push({ iface, ip: a.address, broadcast: broadcastOf(a.address, a.netmask) });
       }
     }
-    return out;
+    // Prefer real Wi-Fi / Ethernet over Hyper-V, WSL, Docker, etc. (QR + tablet URLs use [0]).
+    return out.sort((a, b) => lanRank(a) - lanRank(b) || a.ip.localeCompare(b.ip));
   }
 
   identity() {
@@ -84,4 +85,24 @@ function broadcastOf(ip: string, mask: string) {
   const a = ip.split(".").map(Number);
   const m = mask.split(".").map(Number);
   return a.map((o, i) => (o & m[i]) | (~m[i] & 255)).join(".");
+}
+
+/** Lower score = better for tablets / QR (real LAN first). */
+function lanRank(a: LanAddress): number {
+  let score = 0;
+  const iface = a.iface.toLowerCase();
+  if (
+    /vethernet|hyper-?v|wsl|vmware|virtualbox|vbox|docker|vpn|zerotier|hamachi|tap-windows|bluetooth|loopback|pseudo|isatap|teredo|wi-?fi direct|hosted network|virtual/.test(
+      iface
+    )
+  ) {
+    score += 1000;
+  }
+  if (a.ip.startsWith("192.168.")) score += 0;
+  else if (/^10\./.test(a.ip)) score += 10;
+  else if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(a.ip)) score += 20;
+  else score += 50;
+
+  if (/wi-?fi|wlan|wireless|ethernet|local area connection|^eth\d|^en\d/.test(iface)) score -= 5;
+  return score;
 }

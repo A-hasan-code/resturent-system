@@ -126,13 +126,76 @@ if (-not $iscc) {
 }
 
 New-Item -ItemType Directory -Force -Path $Releases | Out-Null
+$versionDir = Join-Path $Releases "v$Version"
+if (Test-Path $versionDir) { Remove-Item $versionDir -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $versionDir | Out-Null
+
 $withDesktop = if ($SkipDesktop) { "0" } else { "1" }
 Invoke-Checked $iscc @(
   "/Q",
   "/DAppVersion=$Version",
   "/DStageDir=$Stage",
   "/DWithDesktop=$withDesktop",
-  "/O$Releases",
+  "/O$versionDir",
   (Join-Path $PSScriptRoot "HotelSystem.iss")
 )
-Write-Host "`nInstaller: $(Join-Path $Releases "HotelSystem-Setup-$Version.exe")" -ForegroundColor Green
+
+$setupExe = Join-Path $versionDir "HotelSystem-Setup-$Version.exe"
+if (-not (Test-Path $setupExe)) { throw "Installer missing: $setupExe" }
+
+$apkSrc = Join-Path $Releases "android\hotel-system.apk"
+if (Test-Path $apkSrc) {
+  Copy-Item $apkSrc (Join-Path $versionDir "hotel-system.apk") -Force
+}
+
+$readme = @"
+Hotel System v$Version — client package
+=====================================
+
+SEND TO CLIENT
+--------------
+1) HotelSystem-Setup-$Version.exe   (main installer — required)
+2) hotel-system.apk                 (optional; also inside the server after install)
+3) See docs in the product: INDUSTRIAL-SETUP (main server + counter printers)
+
+INSTALL — INDUSTRIAL PATTERN
+----------------------------
+• Main / server PC (ONE only, often in a back room):
+  run the exe → "Main PC: server + desktop app"
+  Reserve this PC's IP in the router (DHCP reservation).
+
+• Cashier / kitchen / other PCs (same LAN or Wi-Fi):
+  run the same exe → "Additional PC: desktop app only"
+  UI only — finds the main server automatically.
+
+• Each cashier COUNTER billing printer:
+  Use NETWORK mode (Wi-Fi or Ethernet), fixed IP, port 9100.
+  On the server: Settings → Printers → Add LAN printer, tick Bill,
+  set Station (e.g. Cashier 1), Test print.
+  Users → edit cashier → Bill printer → assign that printer.
+
+• Tablets / phones: same Wi-Fi → scan QR or install hotel-system.apk
+
+DEMO LOGIN (change after install)
+--------------------------------
+admin / admin123
+
+NOTES
+-----
+• Prefer the 192.168.x address for tablets (ignore virtual 10.x / 172.x).
+• USB printers must be on the MAIN SERVER PC, or use network printers at counters.
+"@
+Set-Content -Path (Join-Path $versionDir "README.txt") -Value $readme -Encoding utf8
+
+# Ship industrial setup guide next to the installer
+$industrialDoc = Join-Path $Root "docs\INDUSTRIAL-SETUP.md"
+if (Test-Path $industrialDoc) {
+  Copy-Item $industrialDoc (Join-Path $versionDir "INDUSTRIAL-SETUP.md") -Force
+}
+
+$exeMb = [math]::Round(((Get-Item $setupExe).Length / 1MB), 1)
+Write-Host "`nRelease folder: $versionDir" -ForegroundColor Green
+Write-Host "Installer: $setupExe ($exeMb MB)" -ForegroundColor Green
+if (Test-Path (Join-Path $versionDir "hotel-system.apk")) {
+  Write-Host "APK: $(Join-Path $versionDir 'hotel-system.apk')" -ForegroundColor Green
+}

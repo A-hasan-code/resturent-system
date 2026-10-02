@@ -650,6 +650,10 @@ export const en = {
   "users.empty": "No users found",
   "users.footer":
     "Users are never deleted — disable an account to block sign-in. History stays intact.",
+  "users.billPrinter": "Bill printer",
+  "users.billPrinterHint":
+    "Industrial setup: assign this cashier’s counter network printer. Bills they print go to that printer via the main server.",
+  "users.billPrinterDefault": "Default (first / network bill printer)",
   "users.helpAdmin": "Full access — settings, users, reports, everything.",
   "users.helpManager": "Floor control — orders, billing, handovers, most reports.",
   "users.helpCashier": "Takes payments and confirms cash handed over.",
@@ -731,7 +735,14 @@ export const en = {
   "settings.kotFields": "Kitchen slip fields",
   "settings.kotFooter": "Kitchen slip footer (optional)",
   "settings.printers": "Printers",
-  "settings.printersHint": "Every print request is routed to the matching printer.",
+  "settings.printersHint": "Every print request is routed to the matching printer on the main server.",
+  "settings.printersIndustrial":
+    "Counters: add each billing printer as LAN (IP:9100), set Station, tick Bill, then assign it under Users → Bill printer.",
+  "settings.station": "Station / counter",
+  "settings.stationPh": "e.g. Cashier 1",
+  "settings.stationHint": "Label for this counter — shown when assigning cashiers.",
+  "settings.networkPrinterHint":
+    "Printer must be on the same LAN in network mode. USB on a cashier-only PC will not work.",
   "settings.addPrinter": "+ Add printer",
   "settings.target": "Target",
   "settings.kitchenSlip": "Kitchen slip",

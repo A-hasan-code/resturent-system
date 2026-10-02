@@ -152,6 +152,8 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     const printers = await this.prisma.printer.findMany({ where: { active: true, printsBill: true } });
     if (!printers.length) return [await this.noPrinterJob("BILL", orderId, requestedById, order.orderNo)];
 
+    const printerId = await this.resolveBillPrinterId(printers, requestedById);
+
     const cashier = order.cashier?.name ?? null;
     const collectors = [...new Set(order.payments.map((p) => p.collectedBy.name))].filter((n) => n !== cashier);
     const billOpts = await this.tips.printBillOpts();
@@ -182,8 +184,24 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       showTip: billOpts.showTip,
       footer: billOpts.footer,
     };
-    // One bill copy, on the first bill printer.
-    return [await this.createJob("BILL", printers[0].id, payload, orderId, requestedById)];
+    return [await this.createJob("BILL", printerId, payload, orderId, requestedById)];
+  }
+
+  /** Cashier's assigned bill printer → else prefer NETWORK → else first bill printer. */
+  private async resolveBillPrinterId(
+    printers: { id: string; kind: Printer["kind"] }[],
+    requestedById?: string | null
+  ) {
+    if (requestedById) {
+      const user = await this.prisma.user.findUnique({
+        where: { id: requestedById },
+        select: { billPrinterId: true },
+      });
+      if (user?.billPrinterId && printers.some((p) => p.id === user.billPrinterId)) {
+        return user.billPrinterId;
+      }
+    }
+    return printers.find((p) => p.kind === "NETWORK")?.id ?? printers[0].id;
   }
 
   async enqueueTest(printerId: string, requestedById?: string | null) {

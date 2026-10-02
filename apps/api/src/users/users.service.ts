@@ -18,7 +18,7 @@ export class UsersService {
 
   async list() {
     const users = await this.prisma.user.findMany({
-      include: { role: true },
+      include: { role: true, billPrinter: { select: { id: true, name: true, station: true } } },
       orderBy: [{ active: "desc" }, { name: "asc" }],
     });
     return users.map((u) => this.toDto(u));
@@ -45,8 +45,9 @@ export class UsersService {
         passwordHash: await bcrypt.hash(dto.password, 10),
         pinHash: dto.pin ? await bcrypt.hash(dto.pin, 10) : null,
         roleId: role.id,
+        billPrinterId: dto.billPrinterId ? await this.assertBillPrinter(dto.billPrinterId) : null,
       },
-      include: { role: true },
+      include: { role: true, billPrinter: { select: { id: true, name: true, station: true } } },
     });
     return this.toDto(user);
   }
@@ -69,6 +70,9 @@ export class UsersService {
     }
     if (dto.password) data.passwordHash = await bcrypt.hash(dto.password, 10);
     if (dto.pin !== undefined) data.pinHash = dto.pin ? await bcrypt.hash(dto.pin, 10) : null;
+    if (dto.billPrinterId !== undefined) {
+      data.billPrinterId = dto.billPrinterId ? await this.assertBillPrinter(dto.billPrinterId) : null;
+    }
 
     let newRoleCode = user.role.code;
     if (dto.roleCode !== undefined && dto.roleCode !== user.role.code) {
@@ -89,8 +93,18 @@ export class UsersService {
       if (admins <= 1) throw new BadRequestException("At least one active admin account is required");
     }
 
-    const updated = await this.prisma.user.update({ where: { id }, data, include: { role: true } });
+    const updated = await this.prisma.user.update({
+      where: { id },
+      data,
+      include: { role: true, billPrinter: { select: { id: true, name: true, station: true } } },
+    });
     return this.toDto(updated);
+  }
+
+  private async assertBillPrinter(id: string) {
+    const p = await this.prisma.printer.findFirst({ where: { id, active: true, printsBill: true } });
+    if (!p) throw new BadRequestException("Choose an active bill printer");
+    return p.id;
   }
 
   private assertCanAssign(actor: AuthUser, roleCode: string) {
@@ -111,6 +125,8 @@ export class UsersService {
     username: string;
     active: boolean;
     pinHash: string | null;
+    billPrinterId?: string | null;
+    billPrinter?: { id: string; name: string; station: string } | null;
     createdAt: Date;
     role: { code: string; name: string };
   }) {
@@ -120,6 +136,12 @@ export class UsersService {
       username: u.username,
       active: u.active,
       hasPin: !!u.pinHash,
+      billPrinterId: u.billPrinterId ?? null,
+      billPrinterName: u.billPrinter
+        ? u.billPrinter.station
+          ? `${u.billPrinter.name} (${u.billPrinter.station})`
+          : u.billPrinter.name
+        : null,
       roleCode: u.role.code,
       roleName: u.role.name,
       createdAt: u.createdAt,

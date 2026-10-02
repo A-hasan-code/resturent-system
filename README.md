@@ -10,7 +10,8 @@ Offline restaurant POS for a single site: table orders from waiter tablets, kitc
 - **Staff:** every user has their own login (username + password, or a quick PIN on shared tablets). The name of whoever took an order is printed at the bottom of its kitchen slip.
 - **Printing:** every print request goes to the server, which prints on its USB printer or a network printer. Tablets need no drivers. Managers and cashiers can preview a kitchen slip on screen before printing it.
 
-How devices find each other, and what happens when the server's IP changes: **[docs/NETWORKING.md](docs/NETWORKING.md)**.
+How devices find each other, and what happens when the server's IP changes: **[docs/NETWORKING.md](docs/NETWORKING.md)**.  
+Industrial layout (main server + counter network printers): **[docs/INDUSTRIAL-SETUP.md](docs/INDUSTRIAL-SETUP.md)**.
 
 ## Repository layout
 

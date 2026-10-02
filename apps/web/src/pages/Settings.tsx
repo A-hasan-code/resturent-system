@@ -39,6 +39,7 @@ type Printer = {
   paperWidth: number;
   printsKot: boolean;
   printsBill: boolean;
+  station: string;
   categories: string;
   active: boolean;
 };
@@ -69,11 +70,12 @@ const BACKUP_KIND_KEY: Record<string, MessageKey> = {
 
 const EMPTY_PRINTER: Omit<Printer, "id"> = {
   name: "",
-  kind: "WINDOWS",
+  kind: "NETWORK",
   target: "",
   paperWidth: 80,
-  printsKot: true,
-  printsBill: false,
+  printsKot: false,
+  printsBill: true,
+  station: "",
   categories: "",
   active: true,
 };
@@ -171,7 +173,10 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
     }
   }
 
-  const mainUrl = info?.urls[0] ?? (serverOrigin() || location.origin);
+  const mainUrl =
+    info?.urls.find((u) => /:\/\/192\.168\./.test(u)) ??
+    info?.urls[0] ??
+    (serverOrigin() || location.origin);
 
   return (
     <div className="settings-grid">
@@ -524,6 +529,9 @@ function PrintersSection() {
           <p className="tiny muted" style={{ margin: "0.2rem 0 0" }}>
             {t("settings.printersHint")}
           </p>
+          <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
+            {t("settings.printersIndustrial")}
+          </p>
         </div>
         <button type="button" className="btn sm" onClick={() => void openEditor()}>
           {t("settings.addPrinter")}
@@ -533,6 +541,7 @@ function PrintersSection() {
         <thead>
           <tr>
             <th>{t("common.name")}</th>
+            <th>{t("settings.station")}</th>
             <th>{t("common.type")}</th>
             <th>{t("settings.target")}</th>
             <th>{t("settings.kitchenSlip")}</th>
@@ -548,6 +557,7 @@ function PrintersSection() {
                 {p.name}
                 {p.categories && <div className="tiny muted">{t("settings.only")} {p.categories}</div>}
               </td>
+              <td className="tiny">{p.station || "—"}</td>
               <td>{kindLabel(p.kind)}</td>
               <td className="tiny">{p.target || (p.kind === "FILE" ? "data/prints" : "—")}</td>
               <td>
@@ -574,7 +584,7 @@ function PrintersSection() {
           ))}
           {!printers.length && (
             <tr>
-              <td colSpan={7} className="empty">
+              <td colSpan={8} className="empty">
                 {t("settings.noPrinters")}
               </td>
             </tr>
@@ -590,10 +600,19 @@ function PrintersSection() {
               <input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} required />
             </div>
             <div className="field">
+              <label>{t("settings.station")}</label>
+              <input
+                value={edit.station}
+                onChange={(e) => setEdit({ ...edit, station: e.target.value })}
+                placeholder={t("settings.stationPh")}
+              />
+              <p className="tiny muted">{t("settings.stationHint")}</p>
+            </div>
+            <div className="field">
               <label>{t("settings.connOptions")}</label>
               <select value={edit.kind} onChange={(e) => setEdit({ ...edit, kind: e.target.value as Printer["kind"], target: "" })}>
-                <option value="WINDOWS">{t("settings.usb")}</option>
                 <option value="NETWORK">{t("settings.lan")}</option>
+                <option value="WINDOWS">{t("settings.usb")}</option>
                 <option value="FILE">{t("settings.previewFile")}</option>
               </select>
             </div>
@@ -616,7 +635,13 @@ function PrintersSection() {
             {edit.kind === "NETWORK" && (
               <div className="field">
                 <label>{t("settings.printerIp")}</label>
-                <input value={edit.target} onChange={(e) => setEdit({ ...edit, target: e.target.value })} placeholder="192.168.1.50:9100" required />
+                <input
+                  value={edit.target}
+                  onChange={(e) => setEdit({ ...edit, target: e.target.value })}
+                  placeholder="192.168.100.51:9100"
+                  required
+                />
+                <p className="tiny muted">{t("settings.networkPrinterHint")}</p>
               </div>
             )}
             {edit.kind === "FILE" && (

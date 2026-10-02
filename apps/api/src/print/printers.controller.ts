@@ -26,6 +26,7 @@ class PrinterDto {
   @IsOptional() @IsIn([58, 80]) paperWidth?: number;
   @IsOptional() @IsBoolean() printsKot?: boolean;
   @IsOptional() @IsBoolean() printsBill?: boolean;
+  @IsOptional() @IsString() @MaxLength(60) station?: string;
   @IsOptional() @IsString() @MaxLength(300) categories?: string;
   @IsOptional() @IsBoolean() active?: boolean;
 }
@@ -37,6 +38,7 @@ class UpdatePrinterDto {
   @IsOptional() @IsIn([58, 80]) paperWidth?: number;
   @IsOptional() @IsBoolean() printsKot?: boolean;
   @IsOptional() @IsBoolean() printsBill?: boolean;
+  @IsOptional() @IsString() @MaxLength(60) station?: string;
   @IsOptional() @IsString() @MaxLength(300) categories?: string;
   @IsOptional() @IsBoolean() active?: boolean;
 }

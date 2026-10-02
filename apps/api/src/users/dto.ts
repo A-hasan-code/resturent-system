@@ -32,6 +32,10 @@ export class CreateUserDto {
   @IsOptional()
   @Matches(PIN_PATTERN, { message: "PIN must be 4 to 6 digits" })
   pin?: string;
+
+  @IsOptional()
+  @IsString()
+  billPrinterId?: string;
 }
 
 export class UpdateUserDto {
@@ -64,4 +68,10 @@ export class UpdateUserDto {
   @ValidateIf((_, v) => v !== null)
   @Matches(PIN_PATTERN, { message: "PIN must be 4 to 6 digits" })
   pin?: string | null;
+
+  /** Default bill printer for this user; null clears. */
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsString()
+  billPrinterId?: string | null;
 }
