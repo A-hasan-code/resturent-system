@@ -53,6 +53,8 @@ export const ur: Record<MessageKey, string> = {
   "common.close": "بند کریں",
   "common.search": "تلاش",
   "common.clearSearch": "تلاش صاف کریں",
+  "common.clear": "صاف",
+  "common.today": "آج",
   "common.confirm": "تصدیق",
   "common.retry": "دوبارہ کوشش",
   "common.refresh": "ریفریش",
@@ -129,6 +131,8 @@ export const ur: Record<MessageKey, string> = {
   "login.ok": "OK",
   "login.digitsEntered": "{n} ہندسے درج",
   "login.builtBy": "تیار کردہ",
+  "login.poweredBy": "Powered by",
+  "login.copyright": "© {year}",
   "login.usernamePh": "جیسے admin",
   "login.heroAlt": "ہوٹل ریسٹورنٹ",
 

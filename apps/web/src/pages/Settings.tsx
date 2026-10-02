@@ -585,6 +585,7 @@ function PrintersSection() {
       <Modal open={!!edit} title={edit?.id ? t("settings.editPrinter") : t("settings.addPrinterTitle")} onClose={() => setEdit(null)}>
         {edit && (
           <form onSubmit={save}>
+            <div className="modal-scroll">
             <div className="field">
               <label>{t("common.name")}</label>
               <input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} required />
@@ -647,7 +648,8 @@ function PrintersSection() {
               <label>{t("settings.categoriesHint")}</label>
               <input value={edit.categories} onChange={(e) => setEdit({ ...edit, categories: e.target.value })} />
             </div>
-            <div className="row">
+            </div>
+            <div className="form-actions">
               <button className="btn" type="submit">
                 {t("common.save")}
               </button>
@@ -766,7 +768,9 @@ function JobsSection() {
         </tbody>
       </table>
       <Modal open={preview != null} title={t("settings.printPreview")} onClose={() => setPreview(null)}>
-        <pre className="print-preview">{preview}</pre>
+        <div className="modal-scroll">
+          <pre className="print-preview">{preview}</pre>
+        </div>
       </Modal>
     </div>
   );
@@ -818,10 +822,14 @@ function TablesSection() {
   return (
     <div className="panel panel-pad settings-block">
       <h2 className="settings-h">{t("settings.tables")}</h2>
-      <form className="row" onSubmit={add}>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("settings.tableNamePh")} />
-        <input value={area} onChange={(e) => setArea(e.target.value)} placeholder={t("settings.areaPh")} />
-        <button className="btn sm" type="submit">
+      <form className="row tables-add" onSubmit={add}>
+        <div className="field" style={{ margin: 0, flex: "1 1 140px" }}>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("settings.tableNamePh")} />
+        </div>
+        <div className="field" style={{ margin: 0, flex: "1 1 140px" }}>
+          <input value={area} onChange={(e) => setArea(e.target.value)} placeholder={t("settings.areaPh")} />
+        </div>
+        <button className="btn" type="submit" style={{ minHeight: "2.6rem" }}>
           {t("settings.addTable")}
         </button>
       </form>

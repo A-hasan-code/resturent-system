@@ -345,7 +345,6 @@ export function OrdersPage() {
                       −
                     </button>
                     <input
-                      style={{ width: 64, textAlign: "center" }}
                       value={l.quantity}
                       onChange={(e) =>
                         setQty(l.menuItemId, Number(e.target.value) || 0)
@@ -404,62 +403,64 @@ export function OrdersPage() {
           <div className="empty">{t("orders.noPending")}</div>
         ) : (
           <>
-            <table>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>{t("common.items")}</th>
-                  <th>{t("common.status")}</th>
-                  <th>{t("orders.pay")}</th>
-                  <th>{t("common.total")}</th>
-                  <th>{t("orders.slips")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pageOrders.map((o) => (
-                  <tr key={o.id}>
-                    <td>{o.orderNo}</td>
-                    <td>
-                      {o.items
-                        .map((i) => `${i.quantity} ${unitLabel(i.sellUnit)} ${i.name}`)
-                        .join(", ")}
-                      {o.waiter && (
-                        <div className="tiny muted">
-                          {t("orders.orderBy")} {o.waiter}
-                        </div>
-                      )}
-                    </td>
-                    <td>
-                      <span className={`badge ${o.status === "PENDING" ? "pending" : "ready"}`}>
-                        {ts(o.status)}
-                      </span>
-                    </td>
-                    <td>
-                      <span className={`badge ${o.paymentStatus === "PAID" ? "paid" : "unpaid"}`}>
-                        {ts(o.paymentStatus)}
-                      </span>
-                    </td>
-                    <td>{money(o.total)}</td>
-                    <td className="row">
-                      <button
-                        type="button"
-                        className="btn ghost sm"
-                        onClick={() => setKot({ orderId: o.id, reprint: true })}
-                      >
-                        {t("orders.kitchenSlip")}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn ghost sm"
-                        onClick={() => setBill({ order: o, mode: "customer" })}
-                      >
-                        {t("orders.customerBill")}
-                      </button>
-                    </td>
+            <div className="table-wrap wide">
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>{t("common.items")}</th>
+                    <th>{t("common.status")}</th>
+                    <th>{t("orders.pay")}</th>
+                    <th>{t("common.total")}</th>
+                    <th>{t("orders.slips")}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {pageOrders.map((o) => (
+                    <tr key={o.id}>
+                      <td>{o.orderNo}</td>
+                      <td>
+                        {o.items
+                          .map((i) => `${i.quantity} ${unitLabel(i.sellUnit)} ${i.name}`)
+                          .join(", ")}
+                        {o.waiter && (
+                          <div className="tiny muted">
+                            {t("orders.orderBy")} {o.waiter}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <span className={`badge ${o.status === "PENDING" ? "pending" : "ready"}`}>
+                          {ts(o.status)}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={`badge ${o.paymentStatus === "PAID" ? "paid" : "unpaid"}`}>
+                          {ts(o.paymentStatus)}
+                        </span>
+                      </td>
+                      <td>{money(o.total)}</td>
+                      <td className="row">
+                        <button
+                          type="button"
+                          className="btn ghost sm"
+                          onClick={() => setKot({ orderId: o.id, reprint: true })}
+                        >
+                          {t("orders.kitchenSlip")}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn ghost sm"
+                          onClick={() => setBill({ order: o, mode: "customer" })}
+                        >
+                          {t("orders.customerBill")}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
             <Pagination
               page={orderPage}
               pageSize={ORDER_PAGE}
@@ -477,8 +478,10 @@ export function OrdersPage() {
       >
         {bill && (
           <>
-            <BillPreview order={bill.order} mode={bill.mode} />
-            <div className="row no-print" style={{ marginTop: "1rem" }}>
+            <div className="modal-scroll">
+              <BillPreview order={bill.order} mode={bill.mode} />
+            </div>
+            <div className="form-footer no-print">
               {bill.order.id && (
                 <button
                   type="button"

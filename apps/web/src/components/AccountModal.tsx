@@ -52,15 +52,16 @@ export function AccountModal({ open, onClose }: { open: boolean; onClose: () => 
 
   return (
     <Modal open={open} title={t("account.title")} onClose={close}>
-      <div className="login-tabs" role="tablist">
-        <button type="button" className={tab === "password" ? "active" : ""} onClick={() => setTab("password")}>
-          {t("account.changePassword")}
-        </button>
-        <button type="button" className={tab === "pin" ? "active" : ""} onClick={() => setTab("pin")}>
-          {t("account.setPin")}
-        </button>
-      </div>
       <form onSubmit={submit}>
+        <div className="modal-scroll">
+          <div className="login-tabs" role="tablist">
+            <button type="button" className={tab === "password" ? "active" : ""} onClick={() => setTab("password")}>
+              {t("account.changePassword")}
+            </button>
+            <button type="button" className={tab === "pin" ? "active" : ""} onClick={() => setTab("pin")}>
+              {t("account.setPin")}
+            </button>
+          </div>
         <div className="field">
           <label>{t("account.currentPassword")}</label>
           <input
@@ -112,12 +113,13 @@ export function AccountModal({ open, onClose }: { open: boolean; onClose: () => 
             <p className="tiny muted">{t("account.pinHelp")}</p>
           </div>
         )}
-        <div className="row">
-          <button className="btn" type="submit" disabled={busy}>
-            {busy ? t("common.saving") : t("common.save")}
-          </button>
+        </div>
+        <div className="form-footer">
           <button className="btn ghost" type="button" onClick={close}>
             {t("common.cancel")}
+          </button>
+          <button className="btn" type="submit" disabled={busy}>
+            {busy ? t("common.saving") : t("common.save")}
           </button>
         </div>
       </form>

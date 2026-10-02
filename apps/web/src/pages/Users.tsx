@@ -242,6 +242,7 @@ export function UsersPage() {
       >
         {draft && (
           <form onSubmit={save} className="user-form">
+            <div className="modal-scroll">
             <section className="form-section">
               <h3>{t("users.profile")}</h3>
               <div className="grid-2">
@@ -365,6 +366,7 @@ export function UsersPage() {
               </section>
             )}
 
+            </div>
             <div className="form-footer">
               <button className="btn ghost" type="button" onClick={() => setDraft(null)}>
                 {t("common.cancel")}

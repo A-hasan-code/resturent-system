@@ -7,7 +7,6 @@ export function LanguageSwitcher({ compact = false }: { compact?: boolean }) {
 
   return (
     <div className={`lang-switch${compact ? " compact" : ""}`} role="group" aria-label={t("shell.language")}>
-      {!compact && <span className="lang-switch-label">{t("shell.language")}</span>}
       <div className="lang-switch-btns">
         {OPTIONS.map((code) => (
           <button

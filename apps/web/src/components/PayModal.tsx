@@ -99,6 +99,7 @@ export function PayModal({
     <Modal open={!!order} title={payTitle} onClose={onClose}>
       {order && (
         <form onSubmit={submit}>
+          <div className="modal-scroll">
           <div className="pay-summary">
             <span>{t("pay.table")}</span>
             <strong>{order.tableNo || "—"}</strong>
@@ -224,6 +225,7 @@ export function PayModal({
             </label>
           )}
 
+          </div>
           <div className="form-footer">
             <button type="button" className="btn ghost" onClick={onClose}>
               {t("common.cancel")}

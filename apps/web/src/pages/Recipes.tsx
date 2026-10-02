@@ -368,6 +368,7 @@ export function RecipesPage() {
         wide
       >
         <form className="form" onSubmit={submit}>
+          <div className="modal-scroll">
           <div className="grid-2">
             <div className="field">
               <label>{t("recipes.recipeName")}</label>
@@ -517,6 +518,7 @@ export function RecipesPage() {
           >
             {t("recipes.addIng")}
           </button>
+          </div>
 
           <div className="form-actions">
             <button className="btn" type="submit" disabled={busy}>
@@ -546,6 +548,7 @@ export function RecipesPage() {
         onClose={() => setCatOpen(false)}
       >
         <form onSubmit={addCategory}>
+          <div className="modal-scroll">
           <div className="field">
             <label>{t("recipes.newCat")}</label>
             <input
@@ -555,20 +558,23 @@ export function RecipesPage() {
               required
             />
           </div>
-          <button className="btn" type="submit" disabled={busy}>
-            {t("recipes.addCat")}
-          </button>
-        </form>
-        <div style={{ marginTop: "1rem" }}>
-          <p className="muted tiny">{t("recipes.existing")}</p>
-          <div className="chips">
-            {recipeCats.map((c) => (
-              <span key={c.id} className="chip active">
-                {c.name}
-              </span>
-            ))}
+          <div style={{ marginTop: "1rem" }}>
+            <p className="muted tiny">{t("recipes.existing")}</p>
+            <div className="chips">
+              {recipeCats.map((c) => (
+                <span key={c.id} className="chip active">
+                  {c.name}
+                </span>
+              ))}
+            </div>
           </div>
-        </div>
+          </div>
+          <div className="form-actions">
+            <button className="btn" type="submit" disabled={busy}>
+              {t("recipes.addCat")}
+            </button>
+          </div>
+        </form>
       </Modal>
     </div>
   );

@@ -59,8 +59,10 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
         size="sm"
       >
         {pending && (
-          <div className="confirm-body">
-            <p>{pending.body}</p>
+          <>
+            <div className="modal-scroll confirm-body">
+              <p>{pending.body}</p>
+            </div>
             <div className="form-footer">
               <button type="button" className="btn ghost" onClick={() => close(false)}>
                 {pending.cancelLabel ?? t("common.cancel")}
@@ -74,7 +76,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
                 {pending.confirmLabel ?? t("common.confirm")}
               </button>
             </div>
-          </div>
+          </>
         )}
       </Modal>
     </Ctx.Provider>
