@@ -139,7 +139,7 @@ export class StoreService {
     const onHand = toNumber(item.quantityOnHand);
     if (dto.quantity > onHand) {
       throw new BadRequestException(
-        `Stock kam hai. Available: ${onHand} ${item.unit}`
+        `Not enough stock. Available: ${onHand} ${item.unit}`
       );
     }
     const updated = await this.prisma.storeItem.update({

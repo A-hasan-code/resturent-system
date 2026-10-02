@@ -36,6 +36,74 @@ enum StockMoveType {
   SALE
 }
 
+enum PrinterKind {
+  WINDOWS
+  NETWORK
+  FILE
+}
+
+enum PrintJobType {
+  KOT
+  BILL
+  TEST
+}
+
+enum PrintJobStatus {
+  PENDING
+  PRINTING
+  DONE
+  FAILED
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model RestaurantTable {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  area      String?
+  seats     Int      @default(4)
+  sortOrder Int      @default(0)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model Printer {
+  id         String     @id @default(cuid())
+  name       String
+  kind       PrinterKind
+  /// Windows printer name, "ip:port" for NETWORK, or folder for FILE
+  target     String
+  paperWidth Int        @default(80)
+  printsKot  Boolean    @default(true)
+  printsBill Boolean    @default(false)
+  /// Comma separated menu categories for KOT routing; empty = all
+  categories String     @default("")
+  active     Boolean    @default(true)
+  jobs       PrintJob[]
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+}
+
+model PrintJob {
+  id            String         @id @default(cuid())
+  type          PrintJobType
+  status        PrintJobStatus @default(PENDING)
+  orderId       String?
+  order         Order?         @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  printerId     String?
+  printer       Printer?       @relation(fields: [printerId], references: [id], onDelete: SetNull)
+  payload       Json
+  attempts      Int            @default(0)
+  lastError     String?
+  requestedById String?
+  createdAt     DateTime       @default(now())
+  printedAt     DateTime?
+}
+
 model Role {
   id          String           @id @default(cuid())
   code        String           @unique
@@ -65,10 +133,15 @@ model User {
   name         String
   username     String   @unique
   passwordHash String
+  pinHash      String?
   active       Boolean  @default(true)
   roleId       String
   role         Role     @relation(fields: [roleId], references: [id])
   orders       Order[]  @relation("OrderCashier")
+  waiterOrders Order[]  @relation("OrderWaiter")
+  itemsAdded   OrderItem[] @relation("OrderItemAddedBy")
+  paymentsCollected Payment[] @relation("PaymentCollectedBy")
+  cashReceived      Payment[] @relation("PaymentHandedTo")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
@@ -172,10 +245,34 @@ model Order {
   costTotal     Decimal         @default(0) @db.Decimal(14, 2)
   cashierId     String?
   cashier       User?           @relation("OrderCashier", fields: [cashierId], references: [id])
+  waiterId      String?
+  waiter        User?           @relation("OrderWaiter", fields: [waiterId], references: [id])
+  kotRounds     Int             @default(1)
+  billRequestedAt DateTime?
   items         OrderItem[]
   stockMoves    StockMovement[]
+  printJobs     PrintJob[]
+  payments      Payment[]
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
+}
+
+/// One payment taken for an order. Staff without a cash drawer (managers) hand the cash
+/// to a cashier: handedTo is that cashier, who confirms when the money is received.
+model Payment {
+  id            String    @id @default(cuid())
+  orderId       String
+  order         Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amount        Decimal   @db.Decimal(14, 2)
+  collectedById String
+  collectedBy   User      @relation("PaymentCollectedBy", fields: [collectedById], references: [id])
+  handedToId    String?
+  handedTo      User?     @relation("PaymentHandedTo", fields: [handedToId], references: [id])
+  confirmedAt   DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([createdAt])
+  @@index([handedToId, confirmedAt])
 }
 
 model OrderItem {
@@ -192,4 +289,8 @@ model OrderItem {
   unitCost        Decimal   @default(0) @db.Decimal(14, 2)
   costAmount      Decimal   @default(0) @db.Decimal(14, 2)
   notes           String?
+  kotRound        Int       @default(1)
+  addedById       String?
+  addedBy         User?     @relation("OrderItemAddedBy", fields: [addedById], references: [id])
+  createdAt       DateTime  @default(now())
 }

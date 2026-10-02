@@ -11,12 +11,22 @@ export class MenuService {
     private readonly costing: CostingService
   ) {}
 
-  async list() {
+  async list(showCost = true) {
     const items = await this.prisma.menuItem.findMany({
       where: { active: true },
       include: { recipe: true },
       orderBy: { name: "asc" },
     });
+
+    if (!showCost) {
+      return items.map((m) => ({
+        id: m.id,
+        name: m.name,
+        category: m.category,
+        sellUnit: m.sellUnit,
+        sellingPrice: toNumber(m.sellingPrice),
+      }));
+    }
 
     const out = [];
     for (const m of items) {

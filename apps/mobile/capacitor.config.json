@@ -1,0 +1,13 @@
+{
+  "appId": "com.pixalbotics.hotelsystem",
+  "appName": "Hotel System",
+  "webDir": "../web/dist",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true,
+    "backgroundColor": "#101820"
+  }
+}

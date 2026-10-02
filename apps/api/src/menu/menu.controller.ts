@@ -11,7 +11,7 @@ import {
 import { MenuService } from "./menu.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
-import { RequirePerms } from "../common/decorators";
+import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
 import { CreateMenuItemDto, UpdateMenuItemDto } from "./dto";
 
 @Controller("menu")
@@ -21,8 +21,11 @@ export class MenuController {
 
   @Get()
   @RequirePerms("menu.view", "order.create")
-  list() {
-    return this.menu.list();
+  list(@CurrentUser() user: AuthUser) {
+    const showCost = ["menu.manage", "reports.view", "recipe.manage"].some((p) =>
+      user.permissions.includes(p)
+    );
+    return this.menu.list(showCost);
   }
 
   @Post()

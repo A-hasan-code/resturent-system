@@ -17,20 +17,69 @@ const PERMS = [
   ["kitchen.update", "Update kitchen status"],
   ["reports.view", "View reports"],
   ["users.manage", "Manage users"],
+  ["order.addItems", "Add items to open order"],
+  ["order.viewOwn", "View own orders"],
+  ["bill.request", "Request bill"],
+  ["print.kot", "Print kitchen slip"],
+  ["print.bill", "Print customer bill"],
+  ["printers.manage", "Manage printers"],
+  ["tables.manage", "Manage tables"],
+  ["system.manage", "Server settings & backups"],
+  ["cash.keep", "Keeps the cash drawer (receives handovers)"],
+  ["payments.view", "View payment & cash handover records"],
 ] as const;
 
 const ROLE_PERMS: Record<string, string[]> = {
   ADMIN: PERMS.map(([c]) => c),
+  // Floor manager: takes orders and payments, prints bills, hands the cash to a cashier.
+  MANAGER: [
+    "order.create",
+    "order.addItems",
+    "order.pay",
+    "bill.view",
+    "bill.request",
+    "print.kot",
+    "print.bill",
+  ],
   STORE: ["store.view", "store.manage"],
   CASHIER: [
     "menu.view",
     "order.create",
+    "order.addItems",
     "order.pay",
     "bill.view",
+    "bill.request",
     "kitchen.view",
     "reports.view",
+    "print.kot",
+    "print.bill",
+    "cash.keep",
   ],
-  KITCHEN: ["kitchen.view", "kitchen.update"],
+  KITCHEN: ["kitchen.view", "kitchen.update", "print.kot"],
+  WAITER: [
+    "order.create",
+    "order.addItems",
+    "order.viewOwn",
+    "bill.request",
+    "print.kot",
+  ],
+};
+
+const ROLES = [
+  { code: "ADMIN", name: "Admin" },
+  { code: "MANAGER", name: "Manager" },
+  { code: "STORE", name: "Store" },
+  { code: "CASHIER", name: "Cashier" },
+  { code: "KITCHEN", name: "Kitchen" },
+  { code: "WAITER", name: "Waiter" },
+];
+
+const DEFAULT_SETTINGS: Record<string, string> = {
+  "restaurant.name": "Hotel System",
+  "restaurant.tagline": "Fine Dining · BBQ · Karahi",
+  "restaurant.address": "Pakistan",
+  "restaurant.phone": "0300-0000000",
+  "restaurant.accent": "#0f7a6c",
 };
 
 async function upsertItem(
@@ -64,12 +113,7 @@ async function main() {
     });
   }
 
-  for (const r of [
-    { code: "ADMIN", name: "Admin" },
-    { code: "STORE", name: "Store" },
-    { code: "CASHIER", name: "Cashier" },
-    { code: "KITCHEN", name: "Kitchen" },
-  ]) {
+  for (const r of ROLES) {
     const role = await prisma.role.upsert({
       where: { code: r.code },
       update: { name: r.name },
@@ -87,29 +131,71 @@ async function main() {
     }
   }
 
-  const adminRole = await prisma.role.findUniqueOrThrow({ where: { code: "ADMIN" } });
-  const cashierRole = await prisma.role.findUniqueOrThrow({ where: { code: "CASHIER" } });
-  const kitchenRole = await prisma.role.findUniqueOrThrow({ where: { code: "KITCHEN" } });
-  const storeRole = await prisma.role.findUniqueOrThrow({ where: { code: "STORE" } });
+  const roleId = async (code: string) => (await prisma.role.findUniqueOrThrow({ where: { code } })).id;
 
+  // Demo accounts are only created when missing; existing users (and their passwords) are never touched.
   const users = [
-    { username: "admin", name: "Admin", pass: "admin123", roleId: adminRole.id },
-    { username: "cashier", name: "Cashier Ali", pass: "cashier123", roleId: cashierRole.id },
-    { username: "kitchen", name: "Kitchen Staff", pass: "kitchen123", roleId: kitchenRole.id },
-    { username: "store", name: "Store Keeper", pass: "store123", roleId: storeRole.id },
+    { username: "admin", name: "Admin", pass: "admin123", role: "ADMIN" },
+    { username: "manager", name: "Manager Usman", pass: "manager123", pin: "2222", role: "MANAGER" },
+    { username: "cashier", name: "Cashier Ali", pass: "cashier123", role: "CASHIER" },
+    { username: "kitchen", name: "Kitchen Staff", pass: "kitchen123", role: "KITCHEN" },
+    { username: "store", name: "Store Keeper", pass: "store123", role: "STORE" },
+    { username: "waiter", name: "Waiter Ahmed", pass: "waiter123", pin: "1111", role: "WAITER" },
+    { username: "waiter2", name: "Waiter Bilal", pass: "waiter123", pin: "1112", role: "WAITER" },
   ];
   for (const u of users) {
-    await prisma.user.upsert({
-      where: { username: u.username },
-      update: { name: u.name, roleId: u.roleId },
-      create: {
+    const exists = await prisma.user.findUnique({ where: { username: u.username } });
+    if (exists) continue;
+    await prisma.user.create({
+      data: {
         username: u.username,
         name: u.name,
         passwordHash: await bcrypt.hash(u.pass, 10),
-        roleId: u.roleId,
+        pinHash: u.pin ? await bcrypt.hash(u.pin, 10) : null,
+        roleId: await roleId(u.role),
       },
     });
   }
+
+  for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+    await prisma.setting.upsert({ where: { key }, update: {}, create: { key, value } });
+  }
+
+  if ((await prisma.restaurantTable.count()) === 0) {
+    await prisma.restaurantTable.createMany({
+      data: Array.from({ length: 12 }, (_, i) => ({
+        name: `T-${i + 1}`,
+        area: i < 8 ? "Hall" : "Family",
+        sortOrder: i + 1,
+      })),
+    });
+  }
+
+  if ((await prisma.printer.count()) === 0) {
+    await prisma.printer.create({
+      data: {
+        name: "Preview (no printer yet)",
+        kind: "FILE",
+        target: "",
+        printsKot: true,
+        printsBill: true,
+      },
+    });
+  }
+
+  for (const name of ["Karahi", "BBQ", "Sweet", "Drinks", "Rice", "Curry", "General"]) {
+    await prisma.recipeCategory.upsert({ where: { name }, update: {}, create: { name } });
+  }
+
+  if ((await prisma.storeItem.count()) > 0) {
+    console.log("Seed OK — roles/permissions/settings updated (existing data kept)");
+    return;
+  }
+  await seedDemoData();
+  console.log("Seed OK — users, inventory, recipes, menu, demo orders");
+}
+
+async function seedDemoData() {
 
   for (const c of [
     { code: "FRESH", name: "Fresh", sortOrder: 1 },
@@ -241,6 +327,9 @@ async function main() {
     const cashier = await prisma.user.findUniqueOrThrow({
       where: { username: "cashier" },
     });
+    const manager = await prisma.user.findUniqueOrThrow({
+      where: { username: "manager" },
+    });
     const mk = await prisma.menuItem.findUniqueOrThrow({
       where: { id: "seed-chicken-karahi" },
     });
@@ -345,6 +434,9 @@ async function main() {
           costAmount,
         });
       }
+      const paid = d.paymentStatus === "PAID";
+      // Demo: the takeaway bill was collected by the manager and handed to the cashier (still unconfirmed).
+      const viaManager = paid && d.tableNo === "Takeaway";
       await prisma.order.create({
         data: {
           tableNo: d.tableNo,
@@ -352,10 +444,18 @@ async function main() {
           paymentStatus: d.paymentStatus,
           subtotal,
           total: subtotal,
-          paidAmount: d.paymentStatus === "PAID" ? subtotal : 0,
+          paidAmount: paid ? subtotal : 0,
           costTotal,
-          cashierId: cashier.id,
-          items: { create: lines },
+          cashierId: paid ? cashier.id : null,
+          waiterId: viaManager ? manager.id : cashier.id,
+          items: { create: lines.map((l) => ({ ...l, addedById: viaManager ? manager.id : cashier.id })) },
+          payments: paid
+            ? {
+                create: viaManager
+                  ? { amount: subtotal, collectedById: manager.id, handedToId: cashier.id }
+                  : { amount: subtotal, collectedById: cashier.id },
+              }
+            : undefined,
         },
       });
     }
@@ -386,24 +486,6 @@ async function main() {
       },
     });
   }
-
-  for (const name of [
-    "Karahi",
-    "BBQ",
-    "Sweet",
-    "Drinks",
-    "Rice",
-    "Curry",
-    "General",
-  ]) {
-    await prisma.recipeCategory.upsert({
-      where: { name },
-      update: {},
-      create: { name },
-    });
-  }
-
-  console.log("Seed OK — users, inventory, recipes, menu, demo orders");
 }
 
 main()

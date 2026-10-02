@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api, money, unitLabel } from "../api";
 import { useToast } from "../toast";
 import { useAuth } from "../auth";
+import { MessageKey, useI18n, useT } from "../i18n";
 
 type LowItem = {
   name: string;
@@ -65,13 +66,16 @@ type Stats = {
   unpaidOrders: DashOrder[];
 };
 
-function waitLabel(mins: number) {
-  if (mins < 1) return "just now";
-  if (mins === 1) return "1 min";
-  if (mins < 60) return `${mins} min`;
+function waitLabel(
+  mins: number,
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string,
+) {
+  if (mins < 1) return t("dash.justNow");
+  if (mins === 1) return t("dash.min1");
+  if (mins < 60) return t("dash.minN", { n: mins });
   const h = Math.floor(mins / 60);
   const m = mins % 60;
-  return m ? `${h}h ${m}m` : `${h}h`;
+  return m ? t("dash.hm", { h, m }) : t("dash.hOnly", { h });
 }
 
 function itemsLine(o: DashOrder) {
@@ -83,6 +87,7 @@ function itemsLine(o: DashOrder) {
 export function DashboardPage() {
   const { user, can } = useAuth();
   const toast = useToast();
+  const t = useT();
   const [data, setData] = useState<Stats | null>(null);
   const role = (user?.roleCode || data?.role || "").toUpperCase();
 
@@ -90,24 +95,26 @@ export function DashboardPage() {
     try {
       setData(await api<Stats>("/dashboard"));
     } catch (e) {
-      toast.push(e instanceof Error ? e.message : "Dashboard failed", "err");
+      toast.push(e instanceof Error ? e.message : t("dash.failed"), "err");
     }
   }
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 12000);
-    return () => clearInterval(t);
+    const timer = setInterval(load, 12000);
+    return () => clearInterval(timer);
   }, []);
 
   const title =
     role === "CASHIER"
-      ? "Cashier dashboard"
+      ? t("dash.titleCashier")
       : role === "KITCHEN"
-        ? "Kitchen dashboard"
+        ? t("dash.titleKitchen")
         : role === "STORE"
-          ? "Store dashboard"
-          : "Admin dashboard";
+          ? t("dash.titleStore")
+          : role === "MANAGER"
+            ? t("dash.titleManager")
+            : t("dash.titleAdmin");
 
   return (
     <div>
@@ -116,11 +123,11 @@ export function DashboardPage() {
           <h1>{title}</h1>
           <p>
             {user?.name} · {user?.roleCode}
-            {data ? ` · auto refresh` : ""}
+            {data ? ` · ${t("dash.autoRefresh")}` : ""}
           </p>
         </div>
         <button type="button" className="btn ghost sm" onClick={load}>
-          Refresh
+          {t("common.refresh")}
         </button>
       </div>
 
@@ -142,13 +149,14 @@ function AdminDash({
   data: Stats | null;
   can: (...p: string[]) => boolean;
 }) {
+  const t = useT();
   return (
     <>
       <StaleAlert
         orders={data?.staleOrders ?? []}
         minutes={data?.staleMinutes ?? 10}
         link="/kitchen"
-        linkLabel="Open kitchen"
+        linkLabel={t("dash.openKitchen")}
       />
       {(data?.lowStockCount ?? 0) > 0 && (
         <LowStockAlert items={data?.lowStock ?? []} count={data?.lowStockCount ?? 0} />
@@ -156,32 +164,32 @@ function AdminDash({
 
       <div className="stats">
         <div className="panel stat">
-          <span>Orders today</span>
+          <span>{t("dash.ordersToday")}</span>
           <strong>{data?.ordersToday ?? "—"}</strong>
           <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            placed today
+            {t("dash.hintPlacedToday")}
           </span>
         </div>
         <div className="panel stat">
-          <span>Order amount today</span>
+          <span>{t("dash.orderAmountToday")}</span>
           <strong>
             {data ? money(data.orderAmountToday ?? data.salesToday) : "—"}
           </strong>
           <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            bill total of those orders
+            {t("dash.hintBillTotal")}
           </span>
         </div>
         <div className="panel stat">
-          <span>Stock used today</span>
+          <span>{t("dash.stockUsedToday")}</span>
           <strong>
             {data ? money(data.stockUsedToday ?? data.costToday) : "—"}
           </strong>
           <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            recipe cost from inventory
+            {t("dash.hintRecipeCost")}
           </span>
         </div>
         <div className="panel stat">
-          <span>Profit today</span>
+          <span>{t("dash.profitToday")}</span>
           <strong
             style={{
               color:
@@ -191,28 +199,28 @@ function AdminDash({
             {data ? money(data.profitToday) : "—"}
           </strong>
           <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            amount − stock used
+            {t("dash.hintProfit")}
           </span>
         </div>
       </div>
 
       <div className="stats">
         <div className="panel stat">
-          <span>Total orders</span>
+          <span>{t("dash.totalOrders")}</span>
           <strong>{data?.totalOrders ?? "—"}</strong>
           <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            all time
+            {t("dash.hintAllTime")}
           </span>
         </div>
         <div className="panel stat">
-          <span>Collected today</span>
+          <span>{t("dash.collectedToday")}</span>
           <strong>{data ? money(data.revenueToday) : "—"}</strong>
           <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            paid bills today
+            {t("dash.hintPaidToday")}
           </span>
         </div>
         <div className="panel stat">
-          <span>Unpaid</span>
+          <span>{t("dash.unpaid")}</span>
           <strong>
             {data?.unpaidCount ?? "—"}
             <span className="tiny muted" style={{ display: "block", fontWeight: 500 }}>
@@ -221,7 +229,7 @@ function AdminDash({
           </strong>
         </div>
         <div className="panel stat">
-          <span>Low stock</span>
+          <span>{t("dash.lowStock")}</span>
           <strong
             style={{
               color: (data?.lowStockCount ?? 0) ? "var(--danger)" : undefined,
@@ -234,14 +242,14 @@ function AdminDash({
 
       <div className="dash-grid">
         <OrderList
-          title="Active kitchen"
-          empty="No active kitchen orders"
+          title={t("dash.activeKitchen")}
+          empty={t("dash.emptyKitchen")}
           orders={(data?.kitchenQueue ?? []).slice(0, 8)}
           showTotal
         />
         <OrderList
-          title="Unpaid bills"
-          empty="No unpaid bills"
+          title={t("dash.unpaidBills")}
+          empty={t("dash.emptyUnpaid")}
           orders={(data?.unpaidOrders ?? []).slice(0, 8)}
           showTotal
         />
@@ -259,19 +267,20 @@ function CashierDash({
   data: Stats | null;
   can: (...p: string[]) => boolean;
 }) {
+  const t = useT();
   return (
     <>
       <StaleAlert
         orders={data?.staleOrders ?? []}
         minutes={data?.staleMinutes ?? 10}
         link="/orders"
-        linkLabel="Open POS"
-        message="These orders have been waiting a long time — check kitchen / payment."
+        linkLabel={t("dash.openPos")}
+        message={t("dash.delayedWaiting")}
       />
 
       <div className="stats">
         <div className="panel stat">
-          <span>Unpaid bills</span>
+          <span>{t("dash.unpaidBills")}</span>
           <strong style={{ color: (data?.unpaidCount ?? 0) ? "var(--danger)" : undefined }}>
             {data?.unpaidCount ?? "—"}
             <span className="tiny muted" style={{ display: "block", fontWeight: 500 }}>
@@ -280,53 +289,53 @@ function CashierDash({
           </strong>
         </div>
         <div className="panel stat">
-          <span>Ready to serve</span>
+          <span>{t("dash.readyToServe")}</span>
           <strong style={{ color: (data?.ready ?? 0) ? "var(--ok)" : undefined }}>
             {data?.ready ?? "—"}
           </strong>
         </div>
         <div className="panel stat">
-          <span>Orders today</span>
+          <span>{t("dash.ordersToday")}</span>
           <strong>{data?.ordersToday ?? "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>Sales today</span>
+          <span>{t("dash.salesToday")}</span>
           <strong>{data ? money(data.salesToday || data.orderAmountToday || data.revenueToday) : "—"}</strong>
           <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            {data?.ordersToday ?? 0} orders · order amount
+            {t("dash.hintNOrders", { n: data?.ordersToday ?? 0 })} · {t("dash.hintOrderAmount")}
           </span>
         </div>
       </div>
 
       <div className="stats">
         <div className="panel stat">
-          <span>Pending kitchen</span>
+          <span>{t("dash.pendingKitchen")}</span>
           <strong>{data?.pendingKitchen ?? "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>Preparing</span>
+          <span>{t("dash.preparing")}</span>
           <strong>{data?.preparing ?? "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>Ready</span>
+          <span>{t("dash.ready")}</span>
           <strong>{data?.ready ?? "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>Completed</span>
+          <span>{t("dash.completed")}</span>
           <strong>{data?.completed ?? "—"}</strong>
         </div>
       </div>
 
       <div className="dash-grid">
         <OrderList
-          title="Collect payment"
-          empty="No unpaid orders"
+          title={t("dash.collectPayment")}
+          empty={t("dash.emptyUnpaidOrders")}
           orders={data?.unpaidOrders ?? []}
           showTotal
         />
         <OrderList
-          title="Long waits"
-          empty="No delayed orders"
+          title={t("dash.longWaits")}
+          empty={t("dash.emptyDelayed")}
           orders={data?.staleOrders ?? []}
         />
       </div>
@@ -343,14 +352,15 @@ function KitchenDash({
   data: Stats | null;
   can: (...p: string[]) => boolean;
 }) {
+  const t = useT();
   return (
     <>
       <StaleAlert
         orders={data?.staleOrders ?? []}
         minutes={data?.staleMinutes ?? 10}
         link="/kitchen"
-        linkLabel="Open kitchen board"
-        message="Orders waiting too long — start or finish them now."
+        linkLabel={t("dash.openKitchenBoard")}
+        message={t("dash.delayedWaiting")}
       />
 
       {(data?.newOrders?.length ?? 0) > 0 && (
@@ -358,14 +368,14 @@ function KitchenDash({
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
               <strong style={{ color: "var(--accent)" }}>
-                New orders · {data?.newOrders.length}
+                {t("dash.newOrders")} · {data?.newOrders.length}
               </strong>
               <p className="muted" style={{ margin: "0.25rem 0 0" }}>
-                Fresh tickets waiting in kitchen.
+                {t("dash.newTickets")}
               </p>
             </div>
             <Link className="btn sm" to="/kitchen">
-              Open kitchen
+              {t("dash.openKitchen")}
             </Link>
           </div>
         </div>
@@ -373,23 +383,23 @@ function KitchenDash({
 
       <div className="stats">
         <div className="panel stat">
-          <span>New / pending</span>
+          <span>{t("dash.newPending")}</span>
           <strong style={{ color: (data?.pendingKitchen ?? 0) ? "var(--danger)" : undefined }}>
             {data?.pendingKitchen ?? "—"}
           </strong>
         </div>
         <div className="panel stat">
-          <span>Preparing</span>
+          <span>{t("dash.preparing")}</span>
           <strong>{data?.preparing ?? "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>Ready</span>
+          <span>{t("dash.ready")}</span>
           <strong style={{ color: (data?.ready ?? 0) ? "var(--ok)" : undefined }}>
             {data?.ready ?? "—"}
           </strong>
         </div>
         <div className="panel stat">
-          <span>Delayed (&gt;{data?.staleMinutes ?? 10}m)</span>
+          <span>{t("dash.delayed", { n: data?.staleMinutes ?? 10 })}</span>
           <strong style={{ color: (data?.staleOrders.length ?? 0) ? "var(--danger)" : undefined }}>
             {data?.staleOrders.length ?? "—"}
           </strong>
@@ -398,14 +408,14 @@ function KitchenDash({
 
       <div className="dash-grid">
         <OrderList
-          title="New tickets"
-          empty="No new pending orders"
+          title={t("dash.newOrders")}
+          empty={t("dash.emptyNew")}
           orders={data?.newOrders ?? []}
           highlightNew
         />
         <OrderList
-          title="Kitchen queue"
-          empty="Queue clear"
+          title={t("dash.kitchenQueue")}
+          empty={t("dash.queueClear")}
           orders={data?.kitchenQueue ?? []}
         />
       </div>
@@ -422,6 +432,7 @@ function StoreDash({
   data: Stats | null;
   can: (...p: string[]) => boolean;
 }) {
+  const t = useT();
   const usage = data?.recentUsage ?? [];
   return (
     <>
@@ -429,46 +440,46 @@ function StoreDash({
         <LowStockAlert items={data?.lowStock ?? []} count={data?.lowStockCount ?? 0} />
       ) : (
         <div className="panel panel-pad" style={{ marginBottom: "1rem" }}>
-          <strong style={{ color: "var(--ok)" }}>Stock levels OK</strong>
+          <strong style={{ color: "var(--ok)" }}>{t("dash.stockOk")}</strong>
           <p className="muted" style={{ margin: "0.25rem 0 0" }}>
-            No items below reorder level right now.
+            {t("dash.stockOkBody")}
           </p>
         </div>
       )}
 
       <div className="stats">
         <div className="panel stat">
-          <span>Low stock items</span>
+          <span>{t("dash.lowStockItems")}</span>
           <strong style={{ color: (data?.lowStockCount ?? 0) ? "var(--danger)" : undefined }}>
             {data?.lowStockCount ?? "—"}
           </strong>
         </div>
         <div className="panel stat">
-          <span>Inventory value</span>
+          <span>{t("dash.inventoryValue")}</span>
           <strong>{data ? money(data.stockValue) : "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>Active items</span>
+          <span>{t("dash.activeItems")}</span>
           <strong>{data?.itemCount ?? "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>Recent usage rows</span>
+          <span>{t("dash.recentUsage")}</span>
           <strong>{usage.length}</strong>
         </div>
       </div>
 
       <div className="panel panel-pad" style={{ marginBottom: "1rem" }}>
-        <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>Recent stock used by orders</h2>
+        <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>{t("dash.recentStockUsed")}</h2>
         {!usage.length ? (
-          <div className="empty">No recent order usage</div>
+          <div className="empty">{t("dash.emptyUsage")}</div>
         ) : (
           <table>
             <thead>
               <tr>
-                <th>When</th>
-                <th>Item</th>
-                <th>Qty</th>
-                <th>Order</th>
+                <th>{t("common.when")}</th>
+                <th>{t("common.item")}</th>
+                <th>{t("common.qty")}</th>
+                <th>{t("common.order")}</th>
               </tr>
             </thead>
             <tbody>
@@ -510,17 +521,18 @@ function StaleAlert({
   linkLabel: string;
   message?: string;
 }) {
+  const t = useT();
+  const { ts } = useI18n();
   if (!orders.length) return null;
   return (
     <div className="panel panel-pad alert-stale" style={{ marginBottom: "1rem" }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <div>
           <strong style={{ color: "var(--danger)" }}>
-            Delayed order alert · {orders.length}
+            {t("dash.delayedAlert")} · {orders.length}
           </strong>
           <p className="muted" style={{ margin: "0.25rem 0 0" }}>
-            {message ||
-              `Orders pending / preparing for more than ${minutes} minutes.`}
+            {message || t("dash.delayedBody", { n: minutes })}
           </p>
         </div>
         <Link className="btn warn sm" to={link}>
@@ -531,11 +543,11 @@ function StaleAlert({
         {orders.slice(0, 6).map((o) => (
           <li key={o.id}>
             <strong>
-              #{o.orderNo} · {o.tableNo || "Walk-in"}
+              #{o.orderNo} · {o.tableNo || t("common.walkIn")}
             </strong>
             <span className="muted">
               {" "}
-              — {o.status} · waiting {waitLabel(o.waitMinutes)} · {itemsLine(o)}
+              — {ts(o.status)} · {t("dash.waiting")} {waitLabel(o.waitMinutes, t)} · {itemsLine(o)}
             </span>
           </li>
         ))}
@@ -545,19 +557,20 @@ function StaleAlert({
 }
 
 function LowStockAlert({ items, count }: { items: LowItem[]; count: number }) {
+  const t = useT();
   return (
     <div className="panel panel-pad alert-low" style={{ marginBottom: "1rem" }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <div>
           <strong style={{ color: "var(--danger)" }}>
-            Low stock alert · {count} item(s)
+            {t("dash.lowStockAlert")} · {t("dash.lowStockCount", { n: count })}
           </strong>
           <p className="muted" style={{ margin: "0.25rem 0 0" }}>
-            These items are at or below reorder level — stock them in.
+            {t("dash.lowStockBody")}
           </p>
         </div>
         <Link className="btn warn sm" to="/store">
-          Open inventory
+          {t("dash.openInventory")}
         </Link>
       </div>
       <ul className="low-list">
@@ -566,8 +579,8 @@ function LowStockAlert({ items, count }: { items: LowItem[]; count: number }) {
             <strong>{i.name}</strong>
             <span className="muted">
               {" "}
-              ({i.category}) — {i.quantityOnHand} {unitLabel(i.unit)} left
-              (reorder ≤ {i.reorderLevel})
+              ({i.category}) — {i.quantityOnHand} {unitLabel(i.unit)}{" "}
+              {t("dash.leftReorder", { n: i.reorderLevel })}
             </span>
           </li>
         ))}
@@ -589,6 +602,8 @@ function OrderList({
   showTotal?: boolean;
   highlightNew?: boolean;
 }) {
+  const t = useT();
+  const { ts } = useI18n();
   return (
     <div className="panel panel-pad">
       <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>{title}</h2>
@@ -600,9 +615,9 @@ function OrderList({
             <li key={o.id} className={o.stale ? "is-stale" : highlightNew ? "is-new" : ""}>
               <div className="row" style={{ justifyContent: "space-between" }}>
                 <strong>
-                  #{o.orderNo} · {o.tableNo || "Walk-in"}
+                  #{o.orderNo} · {o.tableNo || t("common.walkIn")}
                 </strong>
-                <span className="tiny muted">{waitLabel(o.waitMinutes)}</span>
+                <span className="tiny muted">{waitLabel(o.waitMinutes, t)}</span>
               </div>
               <div className="tiny muted">{itemsLine(o)}</div>
               <div className="row" style={{ marginTop: "0.25rem", gap: "0.35rem" }}>
@@ -611,10 +626,10 @@ function OrderList({
                     o.status === "READY" ? "ready" : "pending"
                   }`}
                 >
-                  {o.status}
+                  {ts(o.status)}
                 </span>
                 {showTotal && <span className="tiny">{money(o.total)}</span>}
-                {o.stale && <span className="badge unpaid">DELAYED</span>}
+                {o.stale && <span className="badge unpaid">{ts("DELAYED")}</span>}
               </div>
             </li>
           ))}
@@ -631,31 +646,32 @@ function Shortcuts({
   can: (...p: string[]) => boolean;
   focus?: Array<"orders" | "bills" | "kitchen" | "store">;
 }) {
+  const t = useT();
   const show = (key: "orders" | "bills" | "kitchen" | "store") =>
     !focus || focus.includes(key);
 
   return (
     <div className="panel panel-pad">
-      <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>Shortcuts</h2>
+      <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>{t("dash.shortcuts")}</h2>
       <div className="row">
         {show("orders") && can("order.create") && (
           <Link className="btn" to="/orders">
-            New order
+            {t("dash.newOrder")}
           </Link>
         )}
         {show("bills") && can("bill.view") && (
           <Link className="btn ghost" to="/bills">
-            Billing
+            {t("dash.billing")}
           </Link>
         )}
         {show("kitchen") && can("kitchen.view") && (
           <Link className="btn ghost" to="/kitchen">
-            Kitchen
+            {t("dash.kitchen")}
           </Link>
         )}
         {show("store") && can("store.view", "store.manage") && (
           <Link className="btn ghost" to="/store">
-            Inventory
+            {t("dash.inventory")}
           </Link>
         )}
       </div>

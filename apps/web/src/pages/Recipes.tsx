@@ -1,8 +1,10 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, money, unitLabel } from "../api";
 import { useAuth } from "../auth";
+import { useT } from "../i18n";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
+import { useConfirm } from "../components/ConfirmModal";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 
@@ -41,6 +43,8 @@ type IngForm = { storeItemId: string; quantity: string; unit: string };
 export function RecipesPage() {
   const { can } = useAuth();
   const toast = useToast();
+  const t = useT();
+  const ask = useConfirm();
   const [rows, setRows] = useState<Recipe[]>([]);
   const [items, setItems] = useState<StoreItem[]>([]);
   const [recipeCats, setRecipeCats] = useState<RecipeCat[]>([]);
@@ -91,7 +95,7 @@ export function RecipesPage() {
         );
       }
     } catch (e) {
-      toast.push(e instanceof Error ? e.message : "Failed to load recipes", "err");
+      toast.push(e instanceof Error ? e.message : t("recipes.loadFailed"), "err");
     }
   }
 
@@ -169,7 +173,7 @@ export function RecipesPage() {
         unit: i.unit,
       }));
     if (!ingredients.length) {
-      toast.push("Add at least 1 ingredient", "err");
+      toast.push(t("recipes.needIng"), "err");
       return;
     }
     setBusy(true);
@@ -186,33 +190,33 @@ export function RecipesPage() {
           method: "PATCH",
           body: JSON.stringify(body),
         });
-        toast.push("Recipe updated", "ok");
+        toast.push(t("recipes.updated"), "ok");
       } else {
         await api("/recipes", {
           method: "POST",
           body: JSON.stringify(body),
         });
-        toast.push("Recipe saved", "ok");
+        toast.push(t("recipes.saved"), "ok");
       }
       setOpen(false);
       resetForm();
       await load();
     } catch (err) {
-      toast.push(err instanceof Error ? err.message : "Save failed", "err");
+      toast.push(err instanceof Error ? err.message : t("recipes.saveFailed"), "err");
     } finally {
       setBusy(false);
     }
   }
 
   async function removeRecipe(r: Recipe) {
-    if (!window.confirm(`Delete recipe "${r.name}"?`)) return;
+    if (!(await ask({ title: t("recipes.deleteTitle"), body: t("recipes.deleteConfirm", { name: r.name }), danger: true }))) return;
     setBusy(true);
     try {
       await api(`/recipes/${r.id}`, { method: "DELETE" });
-      toast.push("Recipe deleted", "ok");
+      toast.push(t("recipes.deleted"), "ok");
       await load();
     } catch (err) {
-      toast.push(err instanceof Error ? err.message : "Delete failed", "err");
+      toast.push(err instanceof Error ? err.message : t("recipes.deleteFailed"), "err");
     } finally {
       setBusy(false);
     }
@@ -227,11 +231,11 @@ export function RecipesPage() {
         method: "POST",
         body: JSON.stringify({ name: newCatName.trim() }),
       });
-      toast.push("Category added", "ok");
+      toast.push(t("recipes.catAdded"), "ok");
       setNewCatName("");
       await load();
     } catch (err) {
-      toast.push(err instanceof Error ? err.message : "Category failed", "err");
+      toast.push(err instanceof Error ? err.message : t("recipes.catFailed"), "err");
     } finally {
       setBusy(false);
     }
@@ -241,16 +245,16 @@ export function RecipesPage() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Recipes</h1>
-          <p>Categories · quantities only · rates from inventory</p>
+          <h1>{t("recipes.title")}</h1>
+          <p>{t("recipes.subtitle")}</p>
         </div>
         {can("recipe.manage") && (
           <div className="row">
             <button type="button" className="btn ghost" onClick={() => setCatOpen(true)}>
-              + Category
+              {t("recipes.addCategory")}
             </button>
             <button type="button" className="btn" onClick={openCreate}>
-              + New recipe
+              {t("recipes.addRecipe")}
             </button>
           </div>
         )}
@@ -264,7 +268,7 @@ export function RecipesPage() {
             className={`chip ${filter === c ? "active" : ""}`}
             onClick={() => setFilter(c)}
           >
-            {c}
+            {c === "ALL" ? t("common.all") : c}
           </button>
         ))}
       </div>
@@ -273,13 +277,13 @@ export function RecipesPage() {
         <SearchField
           value={q}
           onChange={setQ}
-          placeholder="Search recipes / ingredients…"
+          placeholder={t("recipes.search")}
         />
       </div>
 
       <div className="stack" style={{ display: "grid", gap: "0.85rem" }}>
         {!shown.length && (
-          <div className="panel panel-pad empty">No recipes yet</div>
+          <div className="panel panel-pad empty">{t("recipes.empty")}</div>
         )}
         {pageRows.map((r) => (
           <div className="panel panel-pad" key={r.id}>
@@ -291,7 +295,7 @@ export function RecipesPage() {
               <div className="row" style={{ alignItems: "flex-start", gap: "0.5rem" }}>
                 <div style={{ textAlign: "right" }}>
                   <div className="muted tiny">
-                    Cost / {r.baseQty} {unitLabel(r.baseUnit)}
+                    {t("recipes.cost")} / {r.baseQty} {unitLabel(r.baseUnit)}
                   </div>
                   <strong style={{ fontSize: "1.2rem" }}>
                     {money(r.costPerBase)}
@@ -305,7 +309,7 @@ export function RecipesPage() {
                       onClick={() => openEdit(r)}
                       disabled={busy}
                     >
-                      Edit
+                      {t("common.edit")}
                     </button>
                     <button
                       type="button"
@@ -313,7 +317,7 @@ export function RecipesPage() {
                       onClick={() => removeRecipe(r)}
                       disabled={busy}
                     >
-                      Delete
+                      {t("common.delete")}
                     </button>
                   </div>
                 )}
@@ -322,10 +326,10 @@ export function RecipesPage() {
             <table>
               <thead>
                 <tr>
-                  <th>Ingredient</th>
-                  <th>Store cat</th>
-                  <th>Qty</th>
-                  <th>Today rate</th>
+                  <th>{t("recipes.ingredient")}</th>
+                  <th>{t("recipes.storeCat")}</th>
+                  <th>{t("common.qty")}</th>
+                  <th>{t("recipes.todayRate")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -356,7 +360,7 @@ export function RecipesPage() {
 
       <Modal
         open={open}
-        title={editId ? "Edit recipe" : "Add recipe"}
+        title={editId ? t("recipes.editTitle") : t("recipes.addTitle")}
         onClose={() => {
           setOpen(false);
           resetForm();
@@ -366,16 +370,16 @@ export function RecipesPage() {
         <form className="form" onSubmit={submit}>
           <div className="grid-2">
             <div className="field">
-              <label>Recipe name</label>
+              <label>{t("recipes.recipeName")}</label>
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="Chicken Karahi / Kheer / Lassi"
+                placeholder={t("recipes.namePh")}
                 required
               />
             </div>
             <div className="field">
-              <label>Category</label>
+              <label>{t("common.category")}</label>
               <select
                 value={category}
                 onChange={(e) => {
@@ -394,11 +398,11 @@ export function RecipesPage() {
             </div>
           </div>
           <p className="tiny muted" style={{ margin: "-0.45rem 0 0.85rem" }}>
-            Missing a category? Create one with “+ Category” first.
+            {t("recipes.missingCat")}
           </p>
           <div className="grid-2">
             <div className="field">
-              <label>Base unit</label>
+              <label>{t("recipes.baseUnit")}</label>
               <select
                 value={baseUnit}
                 onChange={(e) => setBaseUnit(e.target.value)}
@@ -411,7 +415,7 @@ export function RecipesPage() {
               </select>
             </div>
             <div className="field">
-              <label>Base qty (usually 1)</label>
+              <label>{t("recipes.baseQty")}</label>
               <input
                 value={baseQty}
                 onChange={(e) => setBaseQty(e.target.value)}
@@ -420,12 +424,12 @@ export function RecipesPage() {
             </div>
           </div>
 
-          <h3 style={{ margin: "0.5rem 0" }}>Ingredients from store</h3>
+          <h3 style={{ margin: "0.5rem 0" }}>{t("recipes.ingredients")}</h3>
           <div className="ing-table">
             <div className="ing-head">
-              <span>Store item</span>
-              <span>Qty</span>
-              <span>Unit</span>
+              <span>{t("recipes.storeItem")}</span>
+              <span>{t("common.qty")}</span>
+              <span>{t("common.unit")}</span>
               <span />
             </div>
             {ings.map((ing, idx) => (
@@ -448,9 +452,9 @@ export function RecipesPage() {
                     );
                   }}
                   required
-                  aria-label="Store item"
+                  aria-label={t("recipes.storeItem")}
                 >
-                  <option value="">Select…</option>
+                  <option value="">{t("recipes.select")}</option>
                   {items.map((it) => (
                     <option key={it.id} value={it.id}>
                       {it.category} · {it.name} ({money(it.ratePerUnit)}/
@@ -468,7 +472,7 @@ export function RecipesPage() {
                     )
                   }
                   required
-                  aria-label="Quantity"
+                  aria-label={t("store.quantity")}
                 />
                 <select
                   value={ing.unit}
@@ -479,7 +483,7 @@ export function RecipesPage() {
                       )
                     )
                   }
-                  aria-label="Unit"
+                  aria-label={t("common.unit")}
                 >
                   {UNITS.map((u) => (
                     <option key={u} value={u}>
@@ -495,7 +499,7 @@ export function RecipesPage() {
                   }
                   disabled={ings.length === 1}
                 >
-                  Remove
+                  {t("recipes.removeIng")}
                 </button>
               </div>
             ))}
@@ -511,12 +515,16 @@ export function RecipesPage() {
               ])
             }
           >
-            + Ingredient
+            {t("recipes.addIng")}
           </button>
 
           <div className="form-actions">
             <button className="btn" type="submit" disabled={busy}>
-              {busy ? "Saving…" : editId ? "Update recipe" : "Save recipe"}
+              {busy
+                ? t("common.saving")
+                : editId
+                  ? t("recipes.update")
+                  : t("recipes.save")}
             </button>
             <button
               type="button"
@@ -526,7 +534,7 @@ export function RecipesPage() {
                 resetForm();
               }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         </form>
@@ -534,25 +542,25 @@ export function RecipesPage() {
 
       <Modal
         open={catOpen}
-        title="Recipe categories"
+        title={t("recipes.categories")}
         onClose={() => setCatOpen(false)}
       >
         <form onSubmit={addCategory}>
           <div className="field">
-            <label>New category name</label>
+            <label>{t("recipes.newCat")}</label>
             <input
               value={newCatName}
               onChange={(e) => setNewCatName(e.target.value)}
-              placeholder="e.g. BBQ, Chinese, Fast Food"
+              placeholder={t("recipes.catPh")}
               required
             />
           </div>
           <button className="btn" type="submit" disabled={busy}>
-            Add category
+            {t("recipes.addCat")}
           </button>
         </form>
         <div style={{ marginTop: "1rem" }}>
-          <p className="muted tiny">Existing</p>
+          <p className="muted tiny">{t("recipes.existing")}</p>
           <div className="chips">
             {recipeCats.map((c) => (
               <span key={c.id} className="chip active">

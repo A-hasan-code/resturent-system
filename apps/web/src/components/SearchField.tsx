@@ -1,3 +1,5 @@
+import { useT } from "../i18n";
+
 type Props = {
   value: string;
   onChange: (v: string) => void;
@@ -5,6 +7,7 @@ type Props = {
 };
 
 export function SearchField({ value, onChange, placeholder }: Props) {
+  const t = useT();
   return (
     <div className="search-field">
       <span className="search-ico" aria-hidden>
@@ -14,8 +17,8 @@ export function SearchField({ value, onChange, placeholder }: Props) {
         type="search"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder || "Search…"}
-        aria-label="Search"
+        placeholder={placeholder || t("common.search")}
+        aria-label={t("common.search")}
         autoComplete="off"
       />
       {value ? (
@@ -23,7 +26,7 @@ export function SearchField({ value, onChange, placeholder }: Props) {
           type="button"
           className="search-clear"
           onClick={() => onChange("")}
-          aria-label="Clear search"
+          aria-label={t("common.clearSearch")}
         >
           ×
         </button>
@@ -44,5 +47,5 @@ export function matchesSearch(
     .join(" ")
     .replace(/\s+/g, " ");
   const tokens = raw.split(/\s+/).filter(Boolean);
-  return tokens.every((t) => hay.includes(t));
+  return tokens.every((tok) => hay.includes(tok));
 }

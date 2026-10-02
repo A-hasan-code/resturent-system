@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+    <title>Hotel System</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: linear-gradient(160deg, #101820, #0f3d37);
+        color: #e8eef3;
+      }
+      main {
+        height: 100%;
+        display: grid;
+        place-items: center;
+        text-align: center;
+      }
+      h1 {
+        font-size: 1.6rem;
+        margin: 1.25rem 0 0.4rem;
+      }
+      p {
+        color: #a9bac7;
+        margin: 0.3rem 0;
+      }
+      #status {
+        min-height: 1.4em;
+        font-size: 0.9rem;
+      }
+      .spin {
+        width: 54px;
+        height: 54px;
+        margin: 0 auto;
+        border-radius: 50%;
+        border: 5px solid rgba(255, 255, 255, 0.15);
+        border-top-color: #2bb3a0;
+        animation: s 0.9s linear infinite;
+      }
+      @keyframes s {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      button {
+        margin-top: 1.2rem;
+        padding: 0.6rem 1.1rem;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        background: transparent;
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div>
+        <div class="spin"></div>
+        <h1>Hotel System</h1>
+        <p>Connecting to the restaurant server…</p>
+        <p id="status"></p>
+        <button id="retry" type="button">Retry now</button>
+      </div>
+    </main>
+    <script>
+      const el = document.getElementById("status");
+      window.hotelDesktop?.onStatus((t) => (el.textContent = t));
+      document.getElementById("retry").onclick = () => window.hotelDesktop?.reconnect();
+    </script>
+  </body>
+</html>

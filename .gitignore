@@ -1,12 +1,27 @@
+# Dependencies and build output
 node_modules
 dist
 build
+releases/
+*.tsbuildinfo
+
+# Local config and data
 .env
+.dev/
+data/
+
+# Downloaded third-party binaries (Node, PostgreSQL, WinSW)
+packaging/cache/
+
+# Android release signing key (keep a private backup; updates need the same key)
+packaging/android/keystore.properties
+*.jks
+*.keystore
+
+# Legacy artifacts
+client-pack/
+
+# OS / tooling
 *.log
 .DS_Store
-apps/api/prisma/*.db
-apps/web/dist
-docker/data
 .turbo
-client-pack/
-releases/

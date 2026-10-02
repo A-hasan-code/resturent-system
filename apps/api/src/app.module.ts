@@ -1,25 +1,37 @@
 import { Module } from "@nestjs/common";
 import { PrismaModule } from "./prisma/prisma.module";
 import { CommonModule } from "./common/common.module";
+import { SystemModule } from "./system/system.module";
+import { RealtimeModule } from "./realtime/realtime.module";
+import { PrintModule } from "./print/print.module";
 import { AuthModule } from "./auth/auth.module";
 import { StoreModule } from "./store/store.module";
 import { RecipesModule } from "./recipes/recipes.module";
 import { MenuModule } from "./menu/menu.module";
+import { TablesModule } from "./tables/tables.controller";
 import { OrdersModule } from "./orders/orders.module";
 import { DashboardModule } from "./dashboard/dashboard.module";
-import { HealthController } from "./health.controller";
+import { UsersModule } from "./users/users.controller";
+import { PaymentsModule } from "./payments/payments.controller";
+import { AuditModule } from "./audit/audit.controller";
 
 @Module({
   imports: [
     PrismaModule,
     CommonModule,
+    SystemModule,
+    RealtimeModule,
+    PrintModule,
     AuthModule,
     StoreModule,
     RecipesModule,
     MenuModule,
+    TablesModule,
     OrdersModule,
     DashboardModule,
+    UsersModule,
+    PaymentsModule,
+    AuditModule,
   ],
-  controllers: [HealthController],
 })
 export class AppModule {}

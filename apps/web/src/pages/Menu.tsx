@@ -1,8 +1,10 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, money, unitLabel } from "../api";
 import { useAuth } from "../auth";
+import { useT } from "../i18n";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
+import { useConfirm } from "../components/ConfirmModal";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 
@@ -26,6 +28,8 @@ const PAGE_SIZE = 10;
 export function MenuPage() {
   const { can } = useAuth();
   const toast = useToast();
+  const t = useT();
+  const ask = useConfirm();
   const [rows, setRows] = useState<MenuItem[]>([]);
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [cats, setCats] = useState<RecipeCat[]>([]);
@@ -56,7 +60,7 @@ export function MenuPage() {
         setRecipes(await api<Recipe[]>("/recipes"));
       }
     } catch (e) {
-      toast.push(e instanceof Error ? e.message : "Menu load failed", "err");
+      toast.push(e instanceof Error ? e.message : t("menu.loadFailed"), "err");
     }
   }
 
@@ -115,7 +119,7 @@ export function MenuPage() {
           method: "PATCH",
           body: JSON.stringify(body),
         });
-        toast.push("Menu item updated", "ok");
+        toast.push(t("menu.updated"), "ok");
       } else {
         await api("/menu", {
           method: "POST",
@@ -124,27 +128,27 @@ export function MenuPage() {
             recipeId: recipeId || undefined,
           }),
         });
-        toast.push("Menu item added", "ok");
+        toast.push(t("menu.added"), "ok");
       }
       setOpen(false);
       resetForm();
       await load();
     } catch (err) {
-      toast.push(err instanceof Error ? err.message : "Save failed", "err");
+      toast.push(err instanceof Error ? err.message : t("menu.saveFailed"), "err");
     } finally {
       setBusy(false);
     }
   }
 
   async function removeItem(m: MenuItem) {
-    if (!window.confirm(`Delete menu item "${m.name}"?`)) return;
+    if (!(await ask({ title: t("menu.deleteTitle"), body: t("menu.deleteConfirm", { name: m.name }), danger: true }))) return;
     setBusy(true);
     try {
       await api(`/menu/${m.id}`, { method: "DELETE" });
-      toast.push("Menu item deleted", "ok");
+      toast.push(t("menu.deleted"), "ok");
       await load();
     } catch (err) {
-      toast.push(err instanceof Error ? err.message : "Delete failed", "err");
+      toast.push(err instanceof Error ? err.message : t("menu.deleteFailed"), "err");
     } finally {
       setBusy(false);
     }
@@ -159,11 +163,11 @@ export function MenuPage() {
         method: "POST",
         body: JSON.stringify({ name: newCatName.trim() }),
       });
-      toast.push("Category added", "ok");
+      toast.push(t("menu.catAdded"), "ok");
       setNewCatName("");
       await load();
     } catch (err) {
-      toast.push(err instanceof Error ? err.message : "Failed", "err");
+      toast.push(err instanceof Error ? err.message : t("common.failed"), "err");
     } finally {
       setBusy(false);
     }
@@ -173,8 +177,8 @@ export function MenuPage() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Menu Rates</h1>
-          <p>Selling price · categories · recipe link · edit / delete</p>
+          <h1>{t("menu.title")}</h1>
+          <p>{t("menu.subtitle")}</p>
         </div>
         {can("menu.manage") && (
           <div className="row">
@@ -183,37 +187,37 @@ export function MenuPage() {
               className="btn ghost"
               onClick={() => setCatOpen(true)}
             >
-              + Category
+              {t("menu.addCategory")}
             </button>
             <button type="button" className="btn" onClick={openCreate}>
-              + Menu item
+              {t("menu.addItem")}
             </button>
           </div>
         )}
       </div>
 
       <div className="row" style={{ marginBottom: "0.85rem" }}>
-        <SearchField value={q} onChange={setQ} placeholder="Search menu…" />
+        <SearchField value={q} onChange={setQ} placeholder={t("menu.search")} />
       </div>
 
       <div className="panel panel-pad">
         <table>
           <thead>
             <tr>
-              <th>Item</th>
-              <th>Category</th>
-              <th>Sell unit</th>
-              <th>Sell rate</th>
-              <th>Cost</th>
-              <th>Profit</th>
-              {can("menu.manage") && <th>Action</th>}
+              <th>{t("common.item")}</th>
+              <th>{t("common.category")}</th>
+              <th>{t("menu.sellUnit")}</th>
+              <th>{t("menu.sellRate")}</th>
+              <th>{t("menu.cost")}</th>
+              <th>{t("menu.profit")}</th>
+              {can("menu.manage") && <th>{t("menu.action")}</th>}
             </tr>
           </thead>
           <tbody>
             {!pageRows.length && (
               <tr>
                 <td colSpan={can("menu.manage") ? 7 : 6} className="empty">
-                  No menu items
+                  {t("menu.empty")}
                 </td>
               </tr>
             )}
@@ -225,7 +229,9 @@ export function MenuPage() {
                 <td>
                   <span className="badge">{m.category || "—"}</span>
                 </td>
-                <td>per {unitLabel(m.sellUnit)}</td>
+                <td>
+                  {t("menu.per")} {unitLabel(m.sellUnit)}
+                </td>
                 <td>{money(m.sellingPrice)}</td>
                 <td>{money(m.costPerUnit)}</td>
                 <td
@@ -245,7 +251,7 @@ export function MenuPage() {
                         onClick={() => openEdit(m)}
                         disabled={busy}
                       >
-                        Edit
+                        {t("common.edit")}
                       </button>
                       <button
                         type="button"
@@ -253,7 +259,7 @@ export function MenuPage() {
                         onClick={() => removeItem(m)}
                         disabled={busy}
                       >
-                        Delete
+                        {t("common.delete")}
                       </button>
                     </div>
                   </td>
@@ -273,7 +279,7 @@ export function MenuPage() {
 
       <Modal
         open={open}
-        title={editId ? "Edit menu item" : "Add menu item"}
+        title={editId ? t("menu.editTitle") : t("menu.addTitle")}
         onClose={() => {
           setOpen(false);
           resetForm();
@@ -281,7 +287,7 @@ export function MenuPage() {
       >
         <form onSubmit={submit}>
           <div className="field">
-            <label>Name</label>
+            <label>{t("common.name")}</label>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -289,7 +295,7 @@ export function MenuPage() {
             />
           </div>
           <div className="field">
-            <label>Category</label>
+            <label>{t("common.category")}</label>
             <select
               value={category}
               onChange={(e) => setCategory(e.target.value)}
@@ -304,7 +310,7 @@ export function MenuPage() {
           </div>
           <div className="grid-2">
             <div className="field">
-              <label>Sell unit</label>
+              <label>{t("menu.sellUnit")}</label>
               <select
                 value={sellUnit}
                 onChange={(e) => setSellUnit(e.target.value)}
@@ -317,7 +323,7 @@ export function MenuPage() {
               </select>
             </div>
             <div className="field">
-              <label>Selling rate (PKR)</label>
+              <label>{t("menu.sellingRate")}</label>
               <input
                 value={price}
                 onChange={(e) => setPrice(e.target.value)}
@@ -326,12 +332,12 @@ export function MenuPage() {
             </div>
           </div>
           <div className="field">
-            <label>Link recipe (auto cost)</label>
+            <label>{t("menu.linkRecipe")}</label>
             <select
               value={recipeId}
               onChange={(e) => setRecipeId(e.target.value)}
             >
-              <option value="">None</option>
+              <option value="">{t("menu.none")}</option>
               {recipes.map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.category} · {r.name}
@@ -341,7 +347,11 @@ export function MenuPage() {
           </div>
           <div className="form-actions">
             <button className="btn" type="submit" disabled={busy}>
-              {busy ? "Saving…" : editId ? "Update" : "Save"}
+              {busy
+                ? t("common.saving")
+                : editId
+                  ? t("menu.update")
+                  : t("menu.save")}
             </button>
             <button
               type="button"
@@ -351,25 +361,25 @@ export function MenuPage() {
                 resetForm();
               }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         </form>
       </Modal>
 
-      <Modal open={catOpen} title="Add category" onClose={() => setCatOpen(false)}>
+      <Modal open={catOpen} title={t("menu.addCatTitle")} onClose={() => setCatOpen(false)}>
         <form onSubmit={addCategory}>
           <div className="field">
-            <label>Category name</label>
+            <label>{t("menu.catName")}</label>
             <input
               value={newCatName}
               onChange={(e) => setNewCatName(e.target.value)}
-              placeholder="Karahi, BBQ, Chinese…"
+              placeholder={t("menu.catPh")}
               required
             />
           </div>
           <button className="btn" type="submit" disabled={busy}>
-            Save category
+            {t("menu.saveCat")}
           </button>
         </form>
         <div className="chips" style={{ marginTop: "1rem" }}>

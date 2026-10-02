@@ -9,11 +9,22 @@ import { MenuPage } from "./pages/Menu";
 import { OrdersPage } from "./pages/Orders";
 import { BillsPage } from "./pages/Bills";
 import { KitchenPage } from "./pages/Kitchen";
+import { WaiterPage } from "./pages/Waiter";
+import { SettingsPage } from "./pages/Settings";
+import { UsersPage } from "./pages/Users";
+import { PaymentsPage } from "./pages/Payments";
+import { AuditPage } from "./pages/Audit";
 
 function Private({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   if (!user) return <Navigate to="/login" replace />;
   return children;
+}
+
+function Home() {
+  const { user } = useAuth();
+  if (user?.roleCode === "WAITER" || user?.roleCode === "MANAGER") return <Navigate to="/waiter" replace />;
+  return <DashboardPage />;
 }
 
 export function App() {
@@ -28,13 +39,18 @@ export function App() {
           </Private>
         }
       >
-        <Route index element={<DashboardPage />} />
+        <Route index element={<Home />} />
+        <Route path="waiter" element={<WaiterPage />} />
         <Route path="store" element={<StorePage />} />
         <Route path="recipes" element={<RecipesPage />} />
         <Route path="menu" element={<MenuPage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="bills" element={<BillsPage />} />
         <Route path="kitchen" element={<KitchenPage />} />
+        <Route path="settings" element={<SettingsPage />} />
+        <Route path="users" element={<UsersPage />} />
+        <Route path="payments" element={<PaymentsPage />} />
+        <Route path="audit" element={<AuditPage />} />
       </Route>
     </Routes>
   );

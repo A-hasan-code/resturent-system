@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, money, unitLabel } from "../api";
 import { useAuth } from "../auth";
+import { useI18n, useT, type MessageKey } from "../i18n";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
 import { SearchField, matchesSearch } from "../components/SearchField";
@@ -59,17 +60,20 @@ type UsageRow = {
 type FlatItem = Item & { category: string; categoryCode: string };
 
 const UNITS = ["KG", "G", "L", "ML", "PCS"] as const;
-const OUT_REASONS = [
-  "Wastage / spoilage",
-  "Kitchen issue",
-  "Staff meal",
-  "Transfer",
-  "Other",
+
+const OUT_REASONS: { value: string; key: MessageKey }[] = [
+  { value: "Wastage / spoilage", key: "store.outWastage" },
+  { value: "Kitchen issue", key: "store.outKitchen" },
+  { value: "Staff meal", key: "store.outStaff" },
+  { value: "Transfer", key: "store.outTransfer" },
+  { value: "Other", key: "store.outOther" },
 ];
 
 export function StorePage() {
   const { can } = useAuth();
   const toast = useToast();
+  const t = useT();
+  const { ts } = useI18n();
   const [tab, setTab] = useState<"stock" | "moves" | "usage" | "alerts">("stock");
   const [cats, setCats] = useState<Cat[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -92,7 +96,7 @@ export function StorePage() {
   const [qty, setQty] = useState("");
   const [rate, setRate] = useState("");
   const [note, setNote] = useState("");
-  const [outReason, setOutReason] = useState(OUT_REASONS[0]);
+  const [outReason, setOutReason] = useState(OUT_REASONS[0].value);
 
   const [newName, setNewName] = useState("");
   const [newCat, setNewCat] = useState("");
@@ -117,7 +121,7 @@ export function StorePage() {
       setUsage(u);
       if (!newCat && c[0]) setNewCat(c[0].id);
     } catch (e) {
-      toast.push(e instanceof Error ? e.message : "Inventory load failed", "err");
+      toast.push(e instanceof Error ? e.message : t("store.loadFailed"), "err");
     }
   }
 
@@ -160,7 +164,7 @@ export function StorePage() {
     setQty("");
     setRate(item ? String(item.ratePerUnit) : "");
     setNote("");
-    setOutReason(OUT_REASONS[0]);
+    setOutReason(OUT_REASONS[0].value);
   }
 
   function openRateEdit(item: FlatItem) {
@@ -182,12 +186,12 @@ export function StorePage() {
           reorderLevel: Number(editReorder),
         }),
       });
-      toast.push("Rate / reorder updated", "ok");
+      toast.push(t("store.rateUpdated"), "ok");
       setRateOpen(false);
       setEditItem(null);
       await load();
     } catch (err) {
-      toast.push(err instanceof Error ? err.message : "Update failed", "err");
+      toast.push(err instanceof Error ? err.message : t("common.failed"), "err");
     } finally {
       setBusy(false);
     }
@@ -196,17 +200,19 @@ export function StorePage() {
   async function submitMove(e: FormEvent) {
     e.preventDefault();
     if (!moveOpen || !itemId) {
-      toast.push("Select an item", "err");
+      toast.push(t("store.pickItem"), "err");
       return;
     }
     const amount = Number(qty);
     if (!(amount >= 0) || (moveOpen !== "ADJUST" && !(amount > 0))) {
-      toast.push("Sahi quantity likhein", "err");
+      toast.push(t("store.badQty"), "err");
       return;
     }
     if (moveOpen === "OUT" && selected && amount > selected.quantityOnHand) {
       toast.push(
-        `Stock kam hai. Available: ${selected.quantityOnHand} ${unitLabel(selected.unit)}`,
+        t("store.notEnough", {
+          n: `${selected.quantityOnHand} ${unitLabel(selected.unit)}`,
+        }),
         "err"
       );
       return;
@@ -240,13 +246,13 @@ export function StorePage() {
         });
       }
       toast.push(
-        moveOpen === "OUT" ? "Stock out saved" : "Inventory updated",
+        moveOpen === "OUT" ? t("store.outSaved") : t("store.updated"),
         "ok"
       );
       setMoveOpen(null);
       await load();
     } catch (err) {
-      toast.push(err instanceof Error ? err.message : "Update failed", "err");
+      toast.push(err instanceof Error ? err.message : t("common.failed"), "err");
     } finally {
       setBusy(false);
     }
@@ -267,14 +273,14 @@ export function StorePage() {
           reorderLevel: Number(newReorder) || 0,
         }),
       });
-      toast.push("Item added", "ok");
+      toast.push(t("store.itemAdded"), "ok");
       setAddOpen(false);
       setNewName("");
       setNewRate("");
       setNewQty("0");
       await load();
     } catch (err) {
-      toast.push(err instanceof Error ? err.message : "Add failed", "err");
+      toast.push(err instanceof Error ? err.message : t("store.addFailed"), "err");
     } finally {
       setBusy(false);
     }
@@ -322,7 +328,7 @@ export function StorePage() {
         Status: i.lowStock ? "LOW" : "OK",
       }))
     );
-    toast.push("Stock Excel downloaded", "ok");
+    toast.push(t("store.excelOk"), "ok");
   }
 
   function exportMoves() {
@@ -342,7 +348,7 @@ export function StorePage() {
         Reason: m.note ?? "",
       }))
     );
-    toast.push("Movements Excel downloaded", "ok");
+    toast.push(t("store.excelOk"), "ok");
   }
 
   function exportUsage() {
@@ -358,43 +364,53 @@ export function StorePage() {
         OrderNos: u.orderNos,
       }))
     );
-    toast.push("Usage Excel downloaded", "ok");
+    toast.push(t("store.excelOk"), "ok");
   }
+
+  const moveTitle =
+    moveOpen === "IN"
+      ? t("store.modalIn")
+      : moveOpen === "OUT"
+        ? t("store.modalOut")
+        : t("store.modalAdjust");
 
   return (
     <div>
       <div className="page-head">
         <div>
-          <h1>Inventory</h1>
-          <p>Stock in · Stock out · Adjust · Ledger · Search</p>
+          <h1>{t("store.title")}</h1>
+          <p>
+            {t("store.stockIn")} · {t("store.stockOut")} · {t("store.adjust")} ·{" "}
+            {t("store.ledger")} · {t("common.search")}
+          </p>
         </div>
         <div className="row">
           {(can("store.view") || can("store.manage")) && (
             <>
               <button type="button" className="btn ghost sm" onClick={exportStock}>
-                Excel · Stock
+                {t("common.excel")} · {t("store.tabList")}
               </button>
               <button type="button" className="btn ghost sm" onClick={exportMoves}>
-                Excel · Moves
+                {t("common.excel")} · {t("store.tabMoves")}
               </button>
               <button type="button" className="btn ghost sm" onClick={exportUsage}>
-                Excel · Used
+                {t("common.excel")} · {t("store.tabUsed")}
               </button>
             </>
           )}
           {can("store.manage") && (
             <>
               <button type="button" className="btn ok sm" onClick={() => openMove("IN")}>
-                Stock in
+                {t("store.stockIn")}
               </button>
               <button type="button" className="btn warn sm" onClick={() => openMove("OUT")}>
-                Stock out
+                {t("store.stockOut")}
               </button>
               <button type="button" className="btn ghost sm" onClick={() => openMove("ADJUST")}>
-                Adjust
+                {t("store.adjust")}
               </button>
               <button type="button" className="btn sm" onClick={() => setAddOpen(true)}>
-                + Item
+                {t("store.addItem")}
               </button>
             </>
           )}
@@ -403,43 +419,43 @@ export function StorePage() {
 
       <div className="stats">
         <div className="panel stat">
-          <span>Items</span>
+          <span>{t("common.items")}</span>
           <strong>{summary?.itemCount ?? "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>Stock value</span>
+          <span>{t("store.stockValue")}</span>
           <strong>{summary ? money(summary.totalValue) : "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>Low stock</span>
+          <span>{t("store.lowStock")}</span>
           <strong>{summary?.lowStockCount ?? "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>Movements</span>
+          <span>{t("store.movements")}</span>
           <strong>{moves.length}</strong>
         </div>
       </div>
 
       <div className="row" style={{ marginBottom: "0.85rem" }}>
-        <SearchField value={q} onChange={setQ} placeholder="Search item, category, movement…" />
+        <SearchField value={q} onChange={setQ} placeholder={t("store.search")} />
       </div>
 
       <div className="chips">
         {(
           [
-            ["stock", "Stock list"],
-            ["moves", "Movements"],
-            ["usage", "Used by orders"],
-            ["alerts", "Low stock"],
+            ["stock", "store.tabList"],
+            ["moves", "store.tabMoves"],
+            ["usage", "store.tabUsed"],
+            ["alerts", "store.tabLow"],
           ] as const
-        ).map(([k, label]) => (
+        ).map(([k, key]) => (
           <button
             key={k}
             type="button"
             className={`chip ${tab === k ? "active" : ""}`}
             onClick={() => setTab(k)}
           >
-            {label}
+            {t(key)}
           </button>
         ))}
       </div>
@@ -452,7 +468,7 @@ export function StorePage() {
               className={`chip ${filter === "ALL" ? "active" : ""}`}
               onClick={() => setFilter("ALL")}
             >
-              All
+              {t("common.all")}
             </button>
             {cats.map((c) => (
               <button
@@ -469,13 +485,13 @@ export function StorePage() {
             <table>
               <thead>
                 <tr>
-                  <th>Category</th>
-                  <th>Item</th>
-                  <th>On hand</th>
-                  <th>Rate</th>
-                  <th>Value</th>
-                  <th>Status</th>
-                  {can("store.manage") && <th>Actions</th>}
+                  <th>{t("common.category")}</th>
+                  <th>{t("common.item")}</th>
+                  <th>{t("store.onHand")}</th>
+                  <th>{t("common.rate")}</th>
+                  <th>{t("common.value")}</th>
+                  <th>{t("common.status")}</th>
+                  {can("store.manage") && <th>{t("common.actions")}</th>}
                 </tr>
               </thead>
               <tbody>
@@ -494,9 +510,9 @@ export function StorePage() {
                     <td>{money(i.stockValue)}</td>
                     <td>
                       {i.lowStock ? (
-                        <span className="badge unpaid">LOW</span>
+                        <span className="badge unpaid">{ts("LOW")}</span>
                       ) : (
-                        <span className="badge paid">OK</span>
+                        <span className="badge paid">{ts("OK")}</span>
                       )}
                     </td>
                     {can("store.manage") && (
@@ -507,21 +523,21 @@ export function StorePage() {
                             className="btn ok sm"
                             onClick={() => openMove("IN", i)}
                           >
-                            Stock in
+                            {t("store.stockIn")}
                           </button>
                           <button
                             type="button"
                             className="btn warn sm"
                             onClick={() => openMove("OUT", i)}
                           >
-                            Stock out
+                            {t("store.stockOut")}
                           </button>
                           <button
                             type="button"
                             className="btn ghost sm"
                             onClick={() => openRateEdit(i)}
                           >
-                            Edit rate
+                            {t("store.editRate")}
                           </button>
                         </div>
                       </td>
@@ -530,7 +546,7 @@ export function StorePage() {
                 ))}
               </tbody>
             </table>
-            {!shown.length && <div className="empty">No matching items</div>}
+            {!shown.length && <div className="empty">{t("store.noItems")}</div>}
           </div>
         </>
       )}
@@ -540,12 +556,12 @@ export function StorePage() {
           <table>
             <thead>
               <tr>
-                <th>When</th>
-                <th>Type</th>
-                <th>Item</th>
-                <th>Qty</th>
-                <th>Order</th>
-                <th>Reason</th>
+                <th>{t("common.when")}</th>
+                <th>{t("common.type")}</th>
+                <th>{t("common.item")}</th>
+                <th>{t("common.qty")}</th>
+                <th>{t("common.order")}</th>
+                <th>{t("store.reason")}</th>
               </tr>
             </thead>
             <tbody>
@@ -564,7 +580,7 @@ export function StorePage() {
                             : "pending"
                       }`}
                     >
-                      {m.type}
+                      {ts(m.type)}
                     </span>
                   </td>
                   <td>
@@ -590,23 +606,23 @@ export function StorePage() {
               ))}
             </tbody>
           </table>
-          {!filteredMoves.length && <div className="empty">No movements</div>}
+          {!filteredMoves.length && <div className="empty">{t("store.noMoves")}</div>}
         </div>
       )}
 
       {tab === "usage" && (
         <div className="panel panel-pad">
           <p className="muted" style={{ marginTop: 0 }}>
-            Stock used automatically from orders (SALE). Download Excel anytime.
+            {t("store.usedHint")}
           </p>
           <table>
             <thead>
               <tr>
-                <th>Item</th>
-                <th>Used</th>
-                <th>Value</th>
-                <th>Orders</th>
-                <th>Order #s</th>
+                <th>{t("common.item")}</th>
+                <th>{t("store.used")}</th>
+                <th>{t("common.value")}</th>
+                <th>{t("store.orders")}</th>
+                <th>{t("store.orderNos")}</th>
               </tr>
             </thead>
             <tbody>
@@ -627,7 +643,7 @@ export function StorePage() {
             </tbody>
           </table>
           {!filteredUsage.length && (
-            <div className="empty">No stock used from orders yet</div>
+            <div className="empty">{t("store.noUsed")}</div>
           )}
         </div>
       )}
@@ -635,14 +651,14 @@ export function StorePage() {
       {tab === "alerts" && (
         <div className="panel panel-pad">
           {!filteredLow.length ? (
-            <div className="empty">All items above reorder level</div>
+            <div className="empty">{t("store.allOk")}</div>
           ) : (
             <table>
               <thead>
                 <tr>
-                  <th>Item</th>
-                  <th>On hand</th>
-                  <th>Reorder</th>
+                  <th>{t("common.item")}</th>
+                  <th>{t("store.onHand")}</th>
+                  <th>{t("store.reorder")}</th>
                   <th />
                 </tr>
               </thead>
@@ -674,7 +690,7 @@ export function StorePage() {
                             })
                           }
                         >
-                          Stock in
+                          {t("store.stockIn")}
                         </button>
                       )}
                     </td>
@@ -693,27 +709,17 @@ export function StorePage() {
         onChange={setPage}
       />
 
-      <Modal
-        open={!!moveOpen}
-        title={
-          moveOpen === "IN"
-            ? "Stock in (purchase)"
-            : moveOpen === "OUT"
-              ? "Stock out"
-              : "Adjust count"
-        }
-        onClose={() => setMoveOpen(null)}
-      >
+      <Modal open={!!moveOpen} title={moveTitle} onClose={() => setMoveOpen(null)}>
         <form onSubmit={submitMove}>
           <div className="field">
-            <label>Search & select item</label>
+            <label>{t("store.selectItem")}</label>
             <input
               value={itemSearch}
               onChange={(e) => {
                 setItemSearch(e.target.value);
                 setItemId("");
               }}
-              placeholder="Type chicken, oil…"
+              placeholder={t("store.selectPh")}
             />
             <div className="suggest-list">
               {moveItems.slice(0, 8).map((i) => (
@@ -738,60 +744,63 @@ export function StorePage() {
           </div>
           {selected && (
             <p className="muted tiny">
-              Available: <strong>{selected.quantityOnHand} {unitLabel(selected.unit)}</strong>
+              {t("store.available")}{" "}
+              <strong>
+                {selected.quantityOnHand} {unitLabel(selected.unit)}
+              </strong>
             </p>
           )}
           <div className="field">
             <label>
-              {moveOpen === "ADJUST" ? "New quantity" : "Quantity"}
+              {moveOpen === "ADJUST" ? t("store.newQty") : t("store.quantity")}
             </label>
             <input value={qty} onChange={(e) => setQty(e.target.value)} required />
           </div>
           {moveOpen === "IN" && (
             <div className="field">
-              <label>Purchase rate (today rate)</label>
+              <label>{t("store.purchaseRate")}</label>
               <input value={rate} onChange={(e) => setRate(e.target.value)} />
             </div>
           )}
           {moveOpen === "OUT" && (
             <div className="field">
-              <label>Reason</label>
+              <label>{t("store.reason")}</label>
               <select
                 value={outReason}
                 onChange={(e) => setOutReason(e.target.value)}
               >
                 {OUT_REASONS.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
+                  <option key={r.value} value={r.value}>
+                    {t(r.key)}
                   </option>
                 ))}
               </select>
             </div>
           )}
           <div className="field">
-            <label>Note</label>
+            <label>{t("store.note")}</label>
             <input
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              placeholder="Optional detail"
+              placeholder={t("store.notePh")}
             />
           </div>
           <div className="form-actions">
             <button className="btn" type="submit" disabled={busy || !itemId}>
-              {busy ? "Saving…" : "Save"}
+              {busy ? t("common.saving") : t("common.save")}
             </button>
           </div>
         </form>
       </Modal>
 
-      <Modal open={addOpen} title="Add inventory item" onClose={() => setAddOpen(false)}>
+      <Modal open={addOpen} title={t("store.addTitle")} onClose={() => setAddOpen(false)}>
         <form onSubmit={addItem}>
           <div className="field">
-            <label>Name</label>
+            <label>{t("common.name")}</label>
             <input value={newName} onChange={(e) => setNewName(e.target.value)} required />
           </div>
           <div className="field">
-            <label>Category</label>
+            <label>{t("common.category")}</label>
             <select value={newCat} onChange={(e) => setNewCat(e.target.value)} required>
               {cats.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -802,7 +811,7 @@ export function StorePage() {
           </div>
           <div className="grid-2">
             <div className="field">
-              <label>Unit</label>
+              <label>{t("common.unit")}</label>
               <select value={newUnit} onChange={(e) => setNewUnit(e.target.value)}>
                 {UNITS.map((u) => (
                   <option key={u} value={u}>
@@ -812,23 +821,23 @@ export function StorePage() {
               </select>
             </div>
             <div className="field">
-              <label>Reorder level</label>
+              <label>{t("store.reorder")}</label>
               <input value={newReorder} onChange={(e) => setNewReorder(e.target.value)} />
             </div>
           </div>
           <div className="grid-2">
             <div className="field">
-              <label>Opening qty</label>
+              <label>{t("store.openingQty")}</label>
               <input value={newQty} onChange={(e) => setNewQty(e.target.value)} />
             </div>
             <div className="field">
-              <label>Today rate</label>
+              <label>{t("store.todayRate")}</label>
               <input value={newRate} onChange={(e) => setNewRate(e.target.value)} required />
             </div>
           </div>
           <div className="form-actions">
             <button className="btn" type="submit" disabled={busy}>
-              Add item
+              {t("store.addItemBtn")}
             </button>
           </div>
         </form>
@@ -836,7 +845,11 @@ export function StorePage() {
 
       <Modal
         open={rateOpen}
-        title={editItem ? `Edit rate · ${editItem.name}` : "Edit rate"}
+        title={
+          editItem
+            ? `${t("store.editRateTitle")} · ${editItem.name}`
+            : t("store.editRateTitle")
+        }
         onClose={() => {
           setRateOpen(false);
           setEditItem(null);
@@ -845,13 +858,13 @@ export function StorePage() {
         <form className="form" onSubmit={saveRate}>
           {editItem && (
             <p className="muted">
-              {editItem.category} · Current stock {editItem.quantityOnHand}{" "}
+              {editItem.category} · {t("store.currentStock")} {editItem.quantityOnHand}{" "}
               {unitLabel(editItem.unit)}
             </p>
           )}
           <div className="grid-2">
             <div className="field">
-              <label>Rate per {editItem ? unitLabel(editItem.unit) : "unit"} (Rs)</label>
+              <label>{t("store.ratePerUnit")}</label>
               <input
                 value={editRate}
                 onChange={(e) => setEditRate(e.target.value)}
@@ -862,7 +875,7 @@ export function StorePage() {
               />
             </div>
             <div className="field">
-              <label>Low stock alert level</label>
+              <label>{t("store.reorderLevel")}</label>
               <input
                 value={editReorder}
                 onChange={(e) => setEditReorder(e.target.value)}
@@ -875,7 +888,7 @@ export function StorePage() {
           </div>
           <div className="form-actions">
             <button className="btn" type="submit" disabled={busy}>
-              Save rate
+              {t("store.saveRate")}
             </button>
           </div>
         </form>

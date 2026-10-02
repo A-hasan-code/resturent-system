@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { useT } from "../i18n";
 
 type Props = {
   page: number;
@@ -8,6 +9,7 @@ type Props = {
 };
 
 export function Pagination({ page, pageSize, total, onChange }: Props) {
+  const t = useT();
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   useEffect(() => {
@@ -24,7 +26,7 @@ export function Pagination({ page, pageSize, total, onChange }: Props) {
   return (
     <div className="pagination">
       <span className="muted tiny">
-        {from}–{to} of {total}
+        {t("common.rangeOf", { from, to, total })}
       </span>
       <div className="row" style={{ gap: "0.4rem" }}>
         <button
@@ -33,7 +35,7 @@ export function Pagination({ page, pageSize, total, onChange }: Props) {
           disabled={safePage <= 1}
           onClick={() => onChange(safePage - 1)}
         >
-          Prev
+          {t("common.prev")}
         </button>
         <span
           className="tiny"
@@ -47,7 +49,7 @@ export function Pagination({ page, pageSize, total, onChange }: Props) {
           disabled={safePage >= totalPages}
           onClick={() => onChange(safePage + 1)}
         >
-          Next
+          {t("common.next")}
         </button>
       </div>
     </div>

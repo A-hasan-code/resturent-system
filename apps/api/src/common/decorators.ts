@@ -5,6 +5,7 @@ export const RequirePerms = (...perms: string[]) => SetMetadata(PERMS_KEY, perms
 
 export type AuthUser = {
   id: string;
+  name: string;
   username: string;
   roleCode: string;
   permissions: string[];

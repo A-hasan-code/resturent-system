@@ -1,10 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, money, unitLabel } from "../api";
+import { useAuth } from "../auth";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
 import { BillPreview, printBill, type BillOrder } from "../components/BillPreview";
+import { KotPreviewModal, type KotTarget } from "../components/KotPreviewModal";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
+import { serverPrint, useKotPreviewPref } from "../printing";
+import { useSocketEvent } from "../socket";
+import { useI18n, useT } from "../i18n";
 
 type MenuItem = {
   id: string;
@@ -25,6 +30,8 @@ type CartLine = {
 type Order = BillOrder & {
   id: string;
   status: string;
+  kotRounds: number;
+  waiter: string | null;
   items: BillOrder["items"];
 };
 
@@ -33,6 +40,12 @@ const ORDER_PAGE = 10;
 
 export function OrdersPage() {
   const toast = useToast();
+  const t = useT();
+  const { ts } = useI18n();
+  const { user, can } = useAuth();
+  const [previewFirst, setPreviewFirst] = useKotPreviewPref(user);
+  const [kot, setKot] = useState<KotTarget | null>(null);
+  const closeKot = useCallback(() => setKot(null), []);
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [cat, setCat] = useState("ALL");
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -57,13 +70,17 @@ export function OrdersPage() {
       setMenu(m);
       setOrders(o);
     } catch (e) {
-      toast.push(e instanceof Error ? e.message : "Load failed", "err");
+      toast.push(e instanceof Error ? e.message : t("common.loadFailed"), "err");
     }
   }
 
   useEffect(() => {
     load();
   }, []);
+
+  useSocketEvent("orders.changed", () => {
+    api<Order[]>("/orders").then(setOrders).catch(() => undefined);
+  });
 
   const categories = useMemo(() => {
     const set = new Set(
@@ -148,30 +165,50 @@ export function OrdersPage() {
     );
   }
 
+  async function sendToPrinter(orderId: string, mode: "kitchen" | "customer") {
+    try {
+      await serverPrint(mode === "kitchen" ? "kot" : "bill", orderId);
+      toast.push(
+        mode === "kitchen" ? t("orders.printingKot") : t("orders.printingBill"),
+        "ok"
+      );
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("common.printFailed"), "err");
+    }
+  }
+
   async function placeOrder() {
     if (!cart.length) {
-      toast.push("Add items from the menu first", "err");
+      toast.push(t("orders.addItemsFirst"), "err");
       return;
     }
     setBusy(true);
+    const preview = previewFirst && can("print.kot");
     try {
       const created = await api<Order>("/orders", {
         method: "POST",
         body: JSON.stringify({
           tableNo: tableNo || undefined,
           notes: notes || undefined,
+          printKot: !preview,
           items: cart.map((c) => ({
             menuItemId: c.menuItemId,
             quantity: c.quantity,
           })),
         }),
       });
-      toast.push(`Order #${created.orderNo} placed`, "ok");
       setCart([]);
       setNotes("");
       await load();
+      if (preview) {
+        toast.push(t("orders.placed", { n: created.orderNo }), "ok");
+        setKot({ orderId: created.id, round: created.kotRounds, reprint: false });
+        return;
+      }
+      toast.push(t("orders.placedKot", { n: created.orderNo }), "ok");
       setBill({
         order: {
+          id: created.id,
           orderNo: created.orderNo,
           tableNo: created.tableNo,
           paymentStatus: created.paymentStatus,
@@ -188,18 +225,24 @@ export function OrdersPage() {
         mode: "kitchen",
       });
     } catch (e) {
-      toast.push(e instanceof Error ? e.message : "Order failed", "err");
+      toast.push(e instanceof Error ? e.message : t("orders.failed"), "err");
     } finally {
       setBusy(false);
     }
+  }
+
+  function catLabel(c: string) {
+    if (c === "ALL") return t("common.all");
+    if (c === "General") return t("common.general");
+    return c;
   }
 
   return (
     <div>
       <div className="page-head">
         <div>
-          <h1>Orders / POS</h1>
-          <p>Left: menu · Right: cart · Bills open inside app</p>
+          <h1>{t("orders.title")}</h1>
+          <p>{t("orders.subtitle")}</p>
         </div>
       </div>
 
@@ -208,7 +251,7 @@ export function OrdersPage() {
           <SearchField
             value={menuQ}
             onChange={setMenuQ}
-            placeholder="Search menu (karahi, lassi…)"
+            placeholder={t("orders.searchMenu")}
           />
           <div className="chips" style={{ marginTop: "0.75rem" }}>
             {categories.map((c) => (
@@ -218,12 +261,12 @@ export function OrdersPage() {
                 className={`chip ${cat === c ? "active" : ""}`}
                 onClick={() => setCat(c)}
               >
-                {c}
+                {catLabel(c)}
               </button>
             ))}
           </div>
           {!shown.length ? (
-            <div className="empty">No menu items</div>
+            <div className="empty">{t("orders.noMenu")}</div>
           ) : (
             <>
               <div className="menu-grid">
@@ -235,7 +278,11 @@ export function OrdersPage() {
                     onClick={() => addItem(m)}
                   >
                     <h3>{m.name}</h3>
-                    <div className="tiny muted">{m.category || "General"}</div>
+                    <div className="tiny muted">
+                      {m.category === "General" || !m.category
+                        ? t("common.general")
+                        : m.category}
+                    </div>
                     <div className="price">
                       {money(m.sellingPrice)}
                       <span className="tiny muted"> / {unitLabel(m.sellUnit)}</span>
@@ -254,26 +301,28 @@ export function OrdersPage() {
         </section>
 
         <aside className="panel panel-pad cart">
-          <h2 style={{ margin: "0 0 0.75rem", fontSize: "1.15rem" }}>Current order</h2>
+          <h2 style={{ margin: "0 0 0.75rem", fontSize: "1.15rem" }}>
+            {t("orders.currentOrder")}
+          </h2>
           <div className="field">
-            <label>Table / token</label>
+            <label>{t("orders.tableToken")}</label>
             <input
               value={tableNo}
               onChange={(e) => setTableNo(e.target.value)}
-              placeholder="e.g. T-4 / 21"
+              placeholder={t("orders.tablePh")}
             />
           </div>
           <div className="field">
-            <label>Notes</label>
+            <label>{t("common.notes")}</label>
             <input
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              placeholder="Less oil, spicy…"
+              placeholder={t("orders.notesPh")}
             />
           </div>
 
           <div className="cart-lines">
-            {!cart.length && <div className="empty">Tap menu items to add</div>}
+            {!cart.length && <div className="empty">{t("orders.tapToAdd")}</div>}
             {cart.map((l) => (
               <div className="cart-line" key={l.menuItemId}>
                 <div>
@@ -306,7 +355,7 @@ export function OrdersPage() {
           </div>
 
           <div className="cart-total">
-            <span>Total</span>
+            <span>{t("common.total")}</span>
             <span>{money(total)}</span>
           </div>
           <button
@@ -316,38 +365,44 @@ export function OrdersPage() {
             disabled={busy}
             onClick={placeOrder}
           >
-            {busy ? "Placing…" : "Place order"}
+            {busy ? t("orders.placing") : t("orders.placeOrder")}
           </button>
+          {can("print.kot") && (
+            <label className="check tiny muted" style={{ marginTop: "0.5rem" }}>
+              <input type="checkbox" checked={previewFirst} onChange={(e) => setPreviewFirst(e.target.checked)} />
+              {t("orders.previewKot")}
+            </label>
+          )}
         </aside>
       </div>
 
       <div className="panel panel-pad" style={{ marginTop: "1rem" }}>
         <div className="row" style={{ justifyContent: "space-between", marginBottom: "0.75rem" }}>
           <div>
-            <h2 style={{ margin: 0, fontSize: "1.1rem" }}>Pending orders</h2>
+            <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("orders.pendingOrders")}</h2>
             <p className="muted tiny" style={{ margin: "0.2rem 0 0" }}>
-              Active kitchen orders only · {pendingOrders.length} pending
+              {t("orders.activeKitchenOnly")} · {t("orders.nPending", { n: pendingOrders.length })}
             </p>
           </div>
           <SearchField
             value={orderQ}
             onChange={setOrderQ}
-            placeholder="Search pending orders…"
+            placeholder={t("orders.searchPending")}
           />
         </div>
         {!recent.length ? (
-          <div className="empty">No pending orders</div>
+          <div className="empty">{t("orders.noPending")}</div>
         ) : (
           <>
             <table>
               <thead>
                 <tr>
                   <th>#</th>
-                  <th>Items</th>
-                  <th>Status</th>
-                  <th>Pay</th>
-                  <th>Total</th>
-                  <th>Slips</th>
+                  <th>{t("common.items")}</th>
+                  <th>{t("common.status")}</th>
+                  <th>{t("orders.pay")}</th>
+                  <th>{t("common.total")}</th>
+                  <th>{t("orders.slips")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -358,15 +413,20 @@ export function OrdersPage() {
                       {o.items
                         .map((i) => `${i.quantity} ${unitLabel(i.sellUnit)} ${i.name}`)
                         .join(", ")}
+                      {o.waiter && (
+                        <div className="tiny muted">
+                          {t("orders.orderBy")} {o.waiter}
+                        </div>
+                      )}
                     </td>
                     <td>
                       <span className={`badge ${o.status === "PENDING" ? "pending" : "ready"}`}>
-                        {o.status}
+                        {ts(o.status)}
                       </span>
                     </td>
                     <td>
                       <span className={`badge ${o.paymentStatus === "PAID" ? "paid" : "unpaid"}`}>
-                        {o.paymentStatus}
+                        {ts(o.paymentStatus)}
                       </span>
                     </td>
                     <td>{money(o.total)}</td>
@@ -374,16 +434,16 @@ export function OrdersPage() {
                       <button
                         type="button"
                         className="btn ghost sm"
-                        onClick={() => setBill({ order: o, mode: "kitchen" })}
+                        onClick={() => setKot({ orderId: o.id, reprint: true })}
                       >
-                        Kitchen
+                        {t("orders.kitchenSlip")}
                       </button>
                       <button
                         type="button"
                         className="btn ghost sm"
                         onClick={() => setBill({ order: o, mode: "customer" })}
                       >
-                        Customer
+                        {t("orders.customerBill")}
                       </button>
                     </td>
                   </tr>
@@ -402,18 +462,27 @@ export function OrdersPage() {
 
       <Modal
         open={!!bill}
-        title={bill?.mode === "kitchen" ? "Kitchen slip" : "Customer bill"}
+        title={bill?.mode === "kitchen" ? t("orders.kitchenSlip") : t("orders.customerBill")}
         onClose={() => setBill(null)}
       >
         {bill && (
           <>
             <BillPreview order={bill.order} mode={bill.mode} />
             <div className="row no-print" style={{ marginTop: "1rem" }}>
-              <button type="button" className="btn" onClick={printBill}>
-                Print
+              {bill.order.id && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => void sendToPrinter(bill.order.id!, bill.mode)}
+                >
+                  {t("common.printOnPrinter")}
+                </button>
+              )}
+              <button type="button" className="btn ghost" onClick={printBill}>
+                {t("common.browserPrint")}
               </button>
               <button type="button" className="btn ghost" onClick={() => setBill(null)}>
-                Close
+                {t("common.close")}
               </button>
               {bill.mode === "kitchen" && (
                 <button
@@ -421,13 +490,14 @@ export function OrdersPage() {
                   className="btn ghost"
                   onClick={() => setBill({ ...bill, mode: "customer" })}
                 >
-                  Show customer bill
+                  {t("orders.showCustomerBill")}
                 </button>
               )}
             </div>
           </>
         )}
       </Modal>
+      <KotPreviewModal target={kot} onClose={closeKot} />
     </div>
   );
 }

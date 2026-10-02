@@ -243,7 +243,7 @@ export class DashboardService {
       unpaid: unpaidCount,
     };
 
-    if (role === "KITCHEN") {
+    if (role === "KITCHEN" || role === "WAITER") {
       return {
         ...common,
         revenueToday: 0,
@@ -295,6 +295,27 @@ export class DashboardService {
         pending: 0,
         unpaid: 0,
         paidToday: 0,
+      };
+    }
+
+    if (role === "MANAGER") {
+      return {
+        ...common,
+        revenueToday: 0,
+        paidToday: 0,
+        paidProfitToday: 0,
+        revenueAll: 0,
+        profitToday: 0,
+        profitAll: 0,
+        costToday: 0,
+        stockUsedToday: 0,
+        salesToday: 0,
+        orderAmountToday: 0,
+        lowStockCount: 0,
+        lowStock: emptyLow,
+        stockValue: 0,
+        itemCount: 0,
+        recentUsage: emptyUsage,
       };
     }
 
