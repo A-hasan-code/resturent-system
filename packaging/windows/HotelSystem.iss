@@ -36,6 +36,14 @@ WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
+; SignTool name "HotelSign" is defined at compile time by Build-Release.ps1:
+;   ISCC /SHotelSign="signtool.exe sign ... $f" ...
+; When signing is configured, both the outer Setup.exe and the extracted
+; uninstaller / inner stub are Authenticode-signed (required for Smart App Control).
+SignedUninstaller=yes
+SignTool=HotelSign $f
+SignToolRetryCount=3
+SignToolRetryDelay=2000
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

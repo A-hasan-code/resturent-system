@@ -1,4 +1,5 @@
 // Finds the Hotel System server on the LAN: saved address → this PC → UDP beacon/probe → mDNS → subnet scan.
+// Prefer real Wi-Fi/Ethernet (192.168.x) over Hyper-V / WSL / Docker virtual adapters (often 172.28.x).
 const dgram = require("dgram");
 const os = require("os");
 
@@ -22,28 +23,70 @@ async function probe(origin, timeoutMs = 1500) {
   }
 }
 
+/** Lower = better for restaurant LAN tablets / cashier PCs. */
+function lanRank(ip, iface = "") {
+  let score = 0;
+  const name = String(iface).toLowerCase();
+  if (
+    /vethernet|hyper-?v|wsl|vmware|virtualbox|vbox|docker|vpn|zerotier|hamachi|tap-windows|bluetooth|loopback|pseudo|isatap|teredo|wi-?fi direct|hosted network|virtual/.test(
+      name
+    )
+  ) {
+    score += 1000;
+  }
+  if (ip.startsWith("192.168.")) score += 0;
+  else if (/^10\./.test(ip)) score += 10;
+  else if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) score += 200; // often Hyper-V Default Switch
+  else score += 50;
+  if (/wi-?fi|wlan|wireless|ethernet|local area connection|^eth\d|^en\d/.test(name)) score -= 5;
+  return score;
+}
+
+function sortHosts(hosts) {
+  return [...new Set(hosts.filter((h) => /^\d+\.\d+\.\d+\.\d+$/.test(h)))].sort(
+    (a, b) => lanRank(a) - lanRank(b) || a.localeCompare(b)
+  );
+}
+
 function localNets() {
   const out = [];
-  for (const list of Object.values(os.networkInterfaces())) {
+  for (const [iface, list] of Object.entries(os.networkInterfaces())) {
     for (const a of list || []) {
       if (a.family !== "IPv4" || a.internal || a.address.startsWith("169.254.")) continue;
       const ip = a.address.split(".").map(Number);
       const mask = a.netmask.split(".").map(Number);
       const broadcast = ip.map((o, i) => (o & mask[i]) | (~mask[i] & 255)).join(".");
-      out.push({ ip: a.address, prefix: ip.slice(0, 3).join("."), broadcast });
+      out.push({
+        ip: a.address,
+        iface,
+        prefix: ip.slice(0, 3).join("."),
+        broadcast,
+        rank: lanRank(a.address, iface),
+      });
     }
   }
-  return out;
+  return out.sort((a, b) => a.rank - b.rank || a.ip.localeCompare(b.ip));
 }
 
 function matches(h, wantedId) {
   return !!h && (!wantedId || h.serverId === wantedId);
 }
 
+/** Try HTTP health on candidate hosts (best LAN IP first). */
+async function pickReachable(hosts, port, wantedId, timeoutMs = 1500) {
+  for (const host of sortHosts(hosts)) {
+    const origin = `http://${host}:${port || DEFAULT_PORT}`;
+    const health = await probe(origin, timeoutMs);
+    if (matches(health, wantedId)) return { origin, health };
+  }
+  return null;
+}
+
 /** Listens for beacons and sends probes for up to `ms`. Resolves the first matching server. */
 function udpSearch(wantedId, ms = 3500) {
   return new Promise((resolve) => {
     let done = false;
+    let busy = false;
     const sockets = [];
     const finish = (val) => {
       if (done) return;
@@ -58,13 +101,27 @@ function udpSearch(wantedId, ms = 3500) {
       resolve(val);
     };
     const onMessage = (buf, rinfo) => {
+      if (done || busy) return;
+      let h;
       try {
-        const h = JSON.parse(buf.toString());
-        if (h.app !== APP_ID || !matches(h, wantedId)) return;
-        finish({ origin: `http://${rinfo.address}:${h.port || DEFAULT_PORT}`, health: h });
+        h = JSON.parse(buf.toString());
       } catch {
-        /* not ours */
+        return;
       }
+      if (h.app !== APP_ID || !matches(h, wantedId)) return;
+      busy = true;
+      const port = h.port || DEFAULT_PORT;
+      // Prefer IPs advertised by the server (already ranked), not the UDP source
+      // (source is often Hyper-V / WSL 172.x when the server has virtual adapters).
+      const hosts = [...(Array.isArray(h.ips) ? h.ips : []), rinfo.address];
+      pickReachable(hosts, port, wantedId)
+        .then((hit) => {
+          if (hit) finish(hit);
+          else busy = false;
+        })
+        .catch(() => {
+          busy = false;
+        });
     };
 
     const listener = dgram.createSocket({ type: "udp4", reuseAddr: true });
@@ -112,19 +169,19 @@ function mdnsSearch(wantedId, ms = 3000) {
     const browser = bonjour.find({ type: "http" }, async (svc) => {
       if (svc.txt?.app !== APP_ID) return;
       if (wantedId && svc.txt?.serverId !== wantedId) return;
-      for (const addr of svc.addresses || []) {
-        if (!/^\d+\.\d+\.\d+\.\d+$/.test(addr)) continue;
-        const origin = `http://${addr}:${svc.port}`;
-        const h = await probe(origin);
-        if (matches(h, wantedId)) return finish({ origin, health: h });
-      }
+      const hit = await pickReachable(svc.addresses || [], svc.port, wantedId);
+      if (hit) finish(hit);
     });
     setTimeout(() => finish(null), ms);
   });
 }
 
 async function subnetScan(wantedId, port, onProgress) {
-  for (const net of localNets()) {
+  // Real LAN first; skip very virtual-looking prefixes when a better net exists.
+  const nets = localNets();
+  const hasGoodLan = nets.some((n) => n.rank < 100);
+  for (const net of nets) {
+    if (hasGoodLan && net.rank >= 200) continue; // skip Hyper-V-style 172.16/12 when 192.168/10 exists
     onProgress?.(`Scanning ${net.prefix}.x …`);
     const hosts = Array.from({ length: 254 }, (_, i) => `${net.prefix}.${i + 1}`);
     let found = null;
@@ -154,7 +211,11 @@ async function discover(saved, onProgress) {
   for (const origin of [...new Set(quick)]) {
     onProgress?.(`Checking ${origin}`);
     const h = await probe(origin);
-    if (matches(h, wantedId)) return { origin, health: h };
+    if (matches(h, wantedId)) {
+      // If saved URL is a virtual IP but beacon/health lists a better LAN IP, upgrade.
+      const upgraded = await pickReachable([...(h.ips || []), new URL(origin).hostname], h.port || port, wantedId);
+      return upgraded || { origin, health: h };
+    }
   }
 
   onProgress?.("Searching the network (broadcast)…");
@@ -168,4 +229,4 @@ async function discover(saved, onProgress) {
   return subnetScan(wantedId, port, onProgress);
 }
 
-module.exports = { discover, probe };
+module.exports = { discover, probe, lanRank, sortHosts };

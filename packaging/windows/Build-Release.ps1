@@ -4,6 +4,10 @@
 #   .\Build-Release.ps1 -SkipDesktop               # server only (faster)
 #   .\Build-Release.ps1 -SkipAndroid               # no Android Studio on this PC
 #   .\Build-Release.ps1 -SkipInstall -SkipBuild    # re-package existing build output
+#   .\Build-Release.ps1 -RequireSign               # fail if Authenticode signing is not configured
+#
+# Professional client releases MUST be Authenticode-signed (see docs\CODE-SIGNING.md).
+# Unsigned builds are for internal/dev only - Smart App Control blocks them on Windows 11.
 #
 # The version comes from the root VERSION file.
 # Stage layout (build\stage) mirrors the install folder:
@@ -13,7 +17,8 @@ param(
   [switch]$SkipInstall,
   [switch]$SkipBuild,
   [switch]$SkipDesktop,
-  [switch]$SkipAndroid
+  [switch]$SkipAndroid,
+  [switch]$RequireSign
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,12 +28,101 @@ $env:PRISMA_HIDE_UPDATE_MESSAGE = "1"
 
 . (Join-Path $PSScriptRoot "..\..\scripts\lib\Tools.ps1")
 
+function Import-HotelSigningEnv {
+  $envFile = Join-Path $PSScriptRoot "signing.env"
+  if (-not (Test-Path $envFile)) { return }
+  foreach ($raw in Get-Content $envFile) {
+    $line = $raw.Trim()
+    if (-not $line -or $line.StartsWith("#")) { continue }
+    $eq = $line.IndexOf("=")
+    if ($eq -lt 1) { continue }
+    $k = $line.Substring(0, $eq).Trim()
+    $v = $line.Substring($eq + 1).Trim().Trim('"').Trim("'")
+    if ($k -and -not [Environment]::GetEnvironmentVariable($k)) {
+      [Environment]::SetEnvironmentVariable($k, $v, "Process")
+    }
+  }
+}
+
+function Find-HotelSignTool {
+  if ($env:HOTEL_SIGNTOOL -and (Test-Path $env:HOTEL_SIGNTOOL)) { return $env:HOTEL_SIGNTOOL }
+  $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  foreach ($root in @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "$env:ProgramFiles\Windows Kits\10\bin")) {
+    if (-not (Test-Path $root)) { continue }
+    $hit = Get-ChildItem $root -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+      Sort-Object FullName -Descending | Select-Object -First 1
+    if ($hit) { return $hit.FullName }
+  }
+  return $null
+}
+
+# Inno SignTool must be a single safe command line. PFX passwords with # or ! break ISCC if inlined.
+# Returns a .cmd wrapper path; ISCC uses: /SHotelSign=wrapper.cmd $f
+function Get-InnoSignWrapperPath {
+  $signtool = Find-HotelSignTool
+  if (-not $signtool) { return $null }
+  $wrapper = Join-Path $script:RepoRoot "build\inno-sign.cmd"
+  New-Item -ItemType Directory -Force -Path (Split-Path $wrapper) | Out-Null
+
+  $tsRaw = $env:HOTEL_SIGN_TIMESTAMP_URL
+  $useTs = $true
+  if ($null -ne [Environment]::GetEnvironmentVariable("HOTEL_SIGN_TIMESTAMP_URL", "Process")) {
+    $useTs = $tsRaw -and $tsRaw -ne "none"
+  }
+  $ts = if ($useTs) { if ($tsRaw) { $tsRaw } else { "http://timestamp.digicert.com" } } else { $null }
+  $tsLine = if ($ts) { " /td SHA256 /tr `"$ts`"" } else { "" }
+
+  if ($env:HOTEL_SIGN_AZURE_ACCOUNT -and $env:HOTEL_SIGN_AZURE_DLIB -and $env:HOTEL_SIGN_AZURE_METADATA) {
+    if (-not (Test-Path $env:HOTEL_SIGN_AZURE_DLIB)) { return $null }
+    if (-not (Test-Path $env:HOTEL_SIGN_AZURE_METADATA)) { return $null }
+    @"
+@echo off
+"$signtool" sign /fd SHA256$tsLine /dlib "$($env:HOTEL_SIGN_AZURE_DLIB)" /dmdf "$($env:HOTEL_SIGN_AZURE_METADATA)" %1
+exit /b %ERRORLEVEL%
+"@ | Set-Content -Path $wrapper -Encoding ascii
+    return $wrapper
+  }
+  if ($env:HOTEL_SIGN_PFX -and (Test-Path $env:HOTEL_SIGN_PFX)) {
+    $pass = $env:HOTEL_SIGN_PFX_PASSWORD
+    $passLine = if ($pass) { " /p `"$pass`"" } else { "" }
+    @"
+@echo off
+"$signtool" sign /fd SHA256$tsLine /f "$($env:HOTEL_SIGN_PFX)"$passLine %1
+exit /b %ERRORLEVEL%
+"@ | Set-Content -Path $wrapper -Encoding ascii
+    return $wrapper
+  }
+  if ($env:HOTEL_SIGN_THUMBPRINT) {
+    $thumb = $env:HOTEL_SIGN_THUMBPRINT -replace "\s", ""
+    @"
+@echo off
+"$signtool" sign /fd SHA256$tsLine /sha1 $thumb /sm %1
+exit /b %ERRORLEVEL%
+"@ | Set-Content -Path $wrapper -Encoding ascii
+    return $wrapper
+  }
+  return $null
+}
+
 $Root = $RepoRoot
 $Stage = Join-Path $Root "build\stage"
 $Releases = Join-Path $Root "releases"
 $Version = (Get-Content (Join-Path $Root "VERSION") -Raw).Trim()
 
+Import-HotelSigningEnv
+if ($env:HOTEL_SIGN_REQUIRED -eq "1") { $RequireSign = $true }
+# electron-builder picks these up when packing the desktop app
+if ($env:HOTEL_SIGN_PFX -and -not $env:CSC_LINK) { $env:CSC_LINK = $env:HOTEL_SIGN_PFX }
+if ($env:HOTEL_SIGN_PFX_PASSWORD -and -not $env:CSC_KEY_PASSWORD) { $env:CSC_KEY_PASSWORD = $env:HOTEL_SIGN_PFX_PASSWORD }
+
 Write-Host "Hotel System release $Version" -ForegroundColor Green
+if (Get-InnoSignWrapperPath) {
+  Write-Host "Code signing: configured" -ForegroundColor Green
+} else {
+  Write-Host "Code signing: NOT configured (unsigned build = internal/dev only)" -ForegroundColor Yellow
+}
 
 if (-not $SkipInstall) {
   Step "pnpm install"
@@ -97,7 +191,16 @@ if (-not $SkipAndroid) {
 
 if (-not $SkipDesktop) {
   Step "Desktop app (Electron)"
-  Invoke-Checked "pnpm" @("--filter", "@hotel/desktop", "exec", "electron-builder", "--dir", "-c.extraMetadata.version=$Version")
+  # Sign with Sign.ps1 after pack; electron-builder winCodeSign cache needs symlinks on some PCs.
+  $prevCsc = $env:CSC_LINK
+  $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+  Remove-Item Env:CSC_LINK -ErrorAction SilentlyContinue
+  Remove-Item Env:CSC_KEY_PASSWORD -ErrorAction SilentlyContinue
+  try {
+    Invoke-Checked "pnpm" @("--filter", "@hotel/desktop", "exec", "electron-builder", "--dir", "-c.extraMetadata.version=$Version")
+  } finally {
+    if ($prevCsc) { $env:CSC_LINK = $prevCsc }
+  }
   $unpacked = Join-Path $Releases "desktop\win-unpacked"
   if (-not (Test-Path (Join-Path $unpacked "Hotel System.exe"))) { throw "Electron build missing: $unpacked" }
   Copy-Item $unpacked (Join-Path $Stage "desktop") -Recurse
@@ -107,6 +210,16 @@ Step "Install scripts"
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "scripts") | Out-Null
 Copy-Item (Join-Path $PSScriptRoot "install.ps1"), (Join-Path $PSScriptRoot "uninstall.ps1") (Join-Path $Stage "scripts")
 Set-Content -Path (Join-Path $Stage "VERSION") -Value $Version -NoNewline -Encoding ascii
+
+Step "Authenticode sign staged binaries"
+$signScript = Join-Path $PSScriptRoot "Sign.ps1"
+$toSign = @()
+if (Test-Path (Join-Path $Stage "desktop\Hotel System.exe")) { $toSign += (Join-Path $Stage "desktop\Hotel System.exe") }
+if (Test-Path (Join-Path $Stage "winsw\HotelSystemAPI.exe")) { $toSign += (Join-Path $Stage "winsw\HotelSystemAPI.exe") }
+$signResult = & $signScript -Path $toSign -Required:$RequireSign
+if ($signResult -is [hashtable] -and -not $signResult.Signed -and $RequireSign) {
+  throw "Signing required but no files were signed. Configure packaging\windows\signing.env - see docs\CODE-SIGNING.md"
+}
 
 $sizeMb = [math]::Round(((Get-ChildItem $Stage -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
 Write-Host "Stage ready: $Stage ($sizeMb MB)" -ForegroundColor Green
@@ -131,17 +244,44 @@ if (Test-Path $versionDir) { Remove-Item $versionDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $versionDir | Out-Null
 
 $withDesktop = if ($SkipDesktop) { "0" } else { "1" }
-Invoke-Checked $iscc @(
+
+# Build Inno SignTool definition so Setup.exe + SignedUninstaller stub are signed.
+$isccArgs = @(
   "/Q",
   "/DAppVersion=$Version",
   "/DStageDir=$Stage",
   "/DWithDesktop=$withDesktop",
-  "/O$versionDir",
-  (Join-Path $PSScriptRoot "HotelSystem.iss")
+  "/O$versionDir"
 )
+$signWrapper = Get-InnoSignWrapperPath
+if ($signWrapper) {
+  Write-Host "Inno SignTool enabled (Authenticode)" -ForegroundColor Green
+  $isccArgs += "/SHotelSign=$signWrapper `$f"
+} else {
+  # Inno still references SignTool=HotelSign - provide a no-op that copies "success"
+  # only when signing is optional. Prefer real signing for client releases.
+  Write-Host "WARNING: Building UNSIGNED installer (dev/internal only)." -ForegroundColor Yellow
+  Write-Host "Configure signing.env + docs\CODE-SIGNING.md for Smart App Control-safe releases." -ForegroundColor Yellow
+  if ($RequireSign) { throw "HOTEL_SIGN_REQUIRED / -RequireSign set but signing is not configured." }
+  $noop = Join-Path $env:TEMP "hotel-innosign-noop.cmd"
+  Set-Content -Path $noop -Value "@echo off`r`nrem unsigned build - SignTool noop`r`nexit /b 0" -Encoding ascii
+  $isccArgs += "/SHotelSign=$noop `$f"
+}
+$isccArgs += (Join-Path $PSScriptRoot "HotelSystem.iss")
+Invoke-Checked $iscc $isccArgs
 
 $setupExe = Join-Path $versionDir "HotelSystem-Setup-$Version.exe"
 if (-not (Test-Path $setupExe)) { throw "Installer missing: $setupExe" }
+
+# Sign outer Setup again if Inno noop was used but we still have a cert (belt and suspenders),
+# or when SignTool was used - verify and optionally re-stamp via Sign.ps1 on the final EXE.
+Step "Verify / finalize Setup.exe signature"
+& $signScript -Path @($setupExe) -Required:$RequireSign | Out-Null
+$sig = Get-AuthenticodeSignature $setupExe
+Write-Host "Setup signature status: $($sig.Status)" -ForegroundColor $(if ($sig.Status -eq "Valid") { "Green" } else { "Yellow" })
+if ($RequireSign -and $sig.Status -ne "Valid") {
+  throw "Setup.exe is not Validly signed. Status=$($sig.Status). See docs\CODE-SIGNING.md"
+}
 
 $apkSrc = Join-Path $Releases "android\hotel-system.apk"
 if (Test-Path $apkSrc) {
@@ -149,16 +289,16 @@ if (Test-Path $apkSrc) {
 }
 
 $readme = @"
-Hotel System v$Version — client package
+Hotel System v$Version - client package
 =====================================
 
 SEND TO CLIENT
 --------------
-1) HotelSystem-Setup-$Version.exe   (main installer — required)
+1) HotelSystem-Setup-$Version.exe   (main installer - required)
 2) hotel-system.apk                 (optional; also inside the server after install)
 3) See docs in the product: INDUSTRIAL-SETUP (main server + counter printers)
 
-INSTALL — INDUSTRIAL PATTERN
+INSTALL - INDUSTRIAL PATTERN
 ----------------------------
 • Main / server PC (ONE only, often in a back room):
   run the exe → "Main PC: server + desktop app"
@@ -166,7 +306,7 @@ INSTALL — INDUSTRIAL PATTERN
 
 • Cashier / kitchen / other PCs (same LAN or Wi-Fi):
   run the same exe → "Additional PC: desktop app only"
-  UI only — finds the main server automatically.
+  UI only - finds the main server automatically.
 
 • Each cashier COUNTER billing printer:
   Use NETWORK mode (Wi-Fi or Ethernet), fixed IP, port 9100.
@@ -184,18 +324,25 @@ NOTES
 -----
 • Prefer the 192.168.x address for tablets (ignore virtual 10.x / 172.x).
 • USB printers must be on the MAIN SERVER PC, or use network printers at counters.
+• Production Setup.exe must be Authenticode-signed (see CODE-SIGNING.md).
+  Unsigned builds are for internal testing only.
 "@
 Set-Content -Path (Join-Path $versionDir "README.txt") -Value $readme -Encoding utf8
 
-# Ship industrial setup guide next to the installer
-$industrialDoc = Join-Path $Root "docs\INDUSTRIAL-SETUP.md"
-if (Test-Path $industrialDoc) {
-  Copy-Item $industrialDoc (Join-Path $versionDir "INDUSTRIAL-SETUP.md") -Force
+# Ship docs next to the installer
+foreach ($doc in @("INDUSTRIAL-SETUP.md", "RELEASE-NOTES.md", "NETWORKING.md", "CODE-SIGNING.md")) {
+  $src = Join-Path $Root "docs\$doc"
+  if (Test-Path $src) { Copy-Item $src (Join-Path $versionDir $doc) -Force }
 }
 
 $exeMb = [math]::Round(((Get-Item $setupExe).Length / 1MB), 1)
 Write-Host "`nRelease folder: $versionDir" -ForegroundColor Green
 Write-Host "Installer: $setupExe ($exeMb MB)" -ForegroundColor Green
+Write-Host "Signature: $($sig.Status)" -ForegroundColor $(if ($sig.Status -eq "Valid") { "Green" } else { "Yellow" })
+if ($sig.Status -ne "Valid") {
+  Write-Host "Client PCs with Smart App Control ON will block this unsigned Setup." -ForegroundColor Yellow
+  Write-Host "See docs\CODE-SIGNING.md - obtain a trusted Authenticode cert, then rebuild with -RequireSign." -ForegroundColor Yellow
+}
 if (Test-Path (Join-Path $versionDir "hotel-system.apk")) {
   Write-Host "APK: $(Join-Path $versionDir 'hotel-system.apk')" -ForegroundColor Green
 }

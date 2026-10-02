@@ -168,7 +168,18 @@ async function beaconSearch(lenient: boolean): Promise<{ origin: string; h: Heal
   const saved = localStorage.getItem(K_ID);
   const ordered = [...servers].sort((a, b) => Number(b.serverId === saved) - Number(a.serverId === saved));
   for (const s of ordered) {
-    for (const host of [s.host, ...s.ips]) {
+    // Prefer server-advertised LAN IPs (192.168…) over UDP/mDNS host which may be Hyper-V 172.x
+    const hosts = [...(s.ips || []), s.host].filter(Boolean);
+    const ranked = [...new Set(hosts)].sort((a, b) => {
+      const score = (ip: string) => {
+        if (ip.startsWith("192.168.")) return 0;
+        if (/^10\./.test(ip)) return 10;
+        if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) return 200;
+        return 50;
+      };
+      return score(a) - score(b) || a.localeCompare(b);
+    });
+    for (const host of ranked) {
       const origin = `http://${host}:${s.port}`;
       const h = await probe(origin);
       if (isOurs(h, lenient)) return { origin, h: h! };

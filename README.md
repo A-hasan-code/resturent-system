@@ -114,6 +114,20 @@ Produces `releases/HotelSystem-Setup-<VERSION>.exe`, a single offline installer 
 
 You need Inno Setup 6 to build it (`winget install JRSoftware.InnoSetup`), plus Android Studio for the APK. Pass `-SkipAndroid` to `packaging/windows/Build-Release.ps1` to build without it. Bump the version in `VERSION` before building.
 
+### Code signing (required for customer PCs)
+
+Unsigned Setup files are blocked by Windows 11 **Smart App Control** (Error 4551). Professional releases must be **Authenticode-signed** with a certificate from a CA in the Microsoft Trusted Root Program (Azure Trusted Signing, DigiCert, Sectigo, …).
+
+1. Copy `packaging/windows/signing.env.example` → `signing.env` and fill one method  
+2. Install Windows SDK Signing Tools (`signtool.exe`)  
+3. Build with signing enforced:
+
+```powershell
+.\packaging\windows\Build-Release.ps1 -RequireSign
+```
+
+Full guide: **[docs/CODE-SIGNING.md](docs/CODE-SIGNING.md)**.
+
 The installer offers two choices:
 
 - **Main PC: server + desktop app.** Install on exactly one PC. It:

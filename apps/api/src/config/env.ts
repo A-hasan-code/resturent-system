@@ -53,7 +53,9 @@ export function appVersion(): string {
 }
 
 export function httpPort() {
-  return Number(process.env.PORT || 4000);
+  // Production installer sets PORT in hotel.env (usually 3000). Dev defaults to 4000.
+  const fallback = process.env.NODE_ENV === "production" ? 3000 : 4000;
+  return Number(process.env.PORT || fallback);
 }
 
 export function webDistDir(): string | null {

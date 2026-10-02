@@ -18,6 +18,13 @@ packaging/android/keystore.properties
 *.jks
 *.keystore
 
+# Windows Authenticode secrets (never commit)
+packaging/windows/signing.env
+packaging/windows/certs/
+*.pfx
+*.p12
+*.key
+
 # Legacy artifacts
 client-pack/
 

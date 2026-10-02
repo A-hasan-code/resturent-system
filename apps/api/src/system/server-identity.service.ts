@@ -56,6 +56,7 @@ export class ServerIdentityService implements OnModuleInit {
       name: this.name,
       version: this.version,
       port: this.port,
+      ips: this.addresses().map((a) => a.ip),
     };
   }
 
@@ -100,7 +101,7 @@ function lanRank(a: LanAddress): number {
   }
   if (a.ip.startsWith("192.168.")) score += 0;
   else if (/^10\./.test(a.ip)) score += 10;
-  else if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(a.ip)) score += 20;
+  else if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(a.ip)) score += 200; // Hyper-V / Docker-style ranges last
   else score += 50;
 
   if (/wi-?fi|wlan|wireless|ethernet|local area connection|^eth\d|^en\d/.test(iface)) score -= 5;
