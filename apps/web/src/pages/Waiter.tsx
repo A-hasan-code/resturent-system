@@ -7,6 +7,7 @@ import { serverPrint, useKotPreviewPref } from "../printing";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { KotPreviewModal, type KotTarget } from "../components/KotPreviewModal";
 import { PayModal } from "../components/PayModal";
+import { PickServerModal } from "../components/PickServerModal";
 import { MessageKey, useI18n, useT } from "../i18n";
 
 type TableCard = {
@@ -47,9 +48,14 @@ type Order = {
   paymentStatus: string;
   total: number;
   paidAmount: number;
+  tipAmount?: number;
   kotRounds: number;
   billRequestedAt: string | null;
   waiter: string | null;
+  waiterId?: string | null;
+  servedByName?: string | null;
+  servedBy?: string | null;
+  orderedBy?: { id: string; name: string; roleCode: string; roleName: string } | null;
   items: OrderItem[];
 };
 
@@ -106,6 +112,7 @@ export function WaiterPage() {
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const [noteFor, setNoteFor] = useState<string | null>(null);
+  const [pickServer, setPickServer] = useState(false);
 
   const selectedTable = tables.find((tbl) => tbl.name === selected) ?? null;
 
@@ -198,13 +205,18 @@ export function WaiterPage() {
 
   async function sendToKitchen() {
     if (!cart.length) return;
+    setPickServer(true);
+  }
+
+  async function sendWithServer(serverName: string) {
+    setPickServer(false);
     setBusy(true);
     const items = cart.map((c) => ({ menuItemId: c.menuItemId, quantity: c.quantity, notes: c.notes || undefined }));
     const preview = previewFirst && can("print.kot");
     try {
       const isWalkIn = selected === WALK_IN;
       const tableNo = isWalkIn ? walkInName.trim() || "Takeaway" : selected!;
-      const body = { items, printKot: !preview };
+      const body = { items, printKot: !preview, servedByName: serverName };
       const res = order
         ? await api<Order>(`/orders/${order.id}/items`, { method: "POST", body: JSON.stringify(body) })
         : await api<Order>("/orders", { method: "POST", body: JSON.stringify({ ...body, tableNo }) });
@@ -275,6 +287,13 @@ export function WaiterPage() {
 
   const kotModal = (
     <>
+      <PickServerModal
+        open={pickServer}
+        initialName={order?.servedByName || order?.servedBy}
+        orderTakenBy={order?.orderedBy?.name || order?.waiter || user?.name}
+        onClose={() => setPickServer(false)}
+        onPick={(name) => void sendWithServer(name)}
+      />
       <KotPreviewModal target={kot} onClose={closeKot} />
       <PayModal order={paying ? order : null} onClose={() => setPaying(false)} onPaid={paid} />
     </>

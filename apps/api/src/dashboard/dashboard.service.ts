@@ -3,6 +3,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { CostingService } from "../common/costing.service";
 import { toNumber } from "../common/units";
 import { AuthUser } from "../common/decorators";
+import { TipService } from "../system/tip.service";
 
 const STALE_MINUTES = 10;
 
@@ -23,7 +24,8 @@ type DashOrder = {
 export class DashboardService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly costing: CostingService
+    private readonly costing: CostingService,
+    private readonly tips: TipService
   ) {}
 
   async stats(user: AuthUser) {
@@ -55,6 +57,12 @@ export class DashboardService {
       storeItems,
       recentUsageRaw,
       stockUsedTodayAgg,
+      tipTotalToday,
+      myTip,
+      tipBoard,
+      myOrdersToday,
+      myServedToday,
+      waiterOrderCounts,
     ] = await Promise.all([
       this.prisma.order.count({ where: { status: "PENDING" } }),
       this.prisma.order.count({ where: { status: "PREPARING" } }),
@@ -70,7 +78,7 @@ export class DashboardService {
       this.prisma.order.count({ where: { paymentStatus: "PAID" } }),
       this.prisma.order.aggregate({
         where: { paymentStatus: "PAID", updatedAt: { gte: start } },
-        _sum: { total: true, costTotal: true },
+        _sum: { total: true, costTotal: true, tipAmount: true },
       }),
       this.prisma.order.aggregate({
         where: { paymentStatus: "PAID" },
@@ -125,6 +133,25 @@ export class DashboardService {
       this.prisma.stockMovement.findMany({
         where: { type: "SALE", createdAt: { gte: start } },
         select: { quantity: true, ratePerUnit: true },
+      }),
+      this.tips.tipsTodayTotal(start),
+      this.tips.tipsTodayForUser(user.id, start),
+      this.tips.tipBoard(start),
+      this.prisma.order.count({
+        where: { waiterId: user.id, createdAt: { gte: start }, status: { not: "CANCELLED" } },
+      }),
+      this.prisma.order.count({
+        where: {
+          servedByName: { equals: user.name, mode: "insensitive" },
+          createdAt: { gte: start },
+          status: { not: "CANCELLED" },
+        },
+      }),
+      this.prisma.order.groupBy({
+        by: ["waiterId"],
+        where: { createdAt: { gte: start }, status: { not: "CANCELLED" }, waiterId: { not: null } },
+        _count: true,
+        _sum: { total: true },
       }),
     ]);
 
@@ -186,27 +213,57 @@ export class DashboardService {
     const salesToday = toNumber(ordersTodayAgg._sum.total ?? 0);
     let costToday = toNumber(ordersTodayAgg._sum.costTotal ?? 0);
 
-    // Fallback: stock SALE movements today (qty × rate)
     let stockMoveCostToday = 0;
     for (const m of stockUsedTodayAgg) {
-      stockMoveCostToday +=
-        Math.abs(toNumber(m.quantity)) * toNumber(m.ratePerUnit);
+      stockMoveCostToday += Math.abs(toNumber(m.quantity)) * toNumber(m.ratePerUnit);
     }
     if (costToday <= 0 && stockMoveCostToday > 0) {
       costToday = stockMoveCostToday;
     }
 
     const profitToday = salesToday - costToday;
-
     const paidRevenueToday = toNumber(revenueTodayAgg._sum.total ?? 0);
     const paidCostToday = toNumber(revenueTodayAgg._sum.costTotal ?? 0);
+    const tipsCollectedToday = toNumber(revenueTodayAgg._sum.tipAmount ?? 0);
     const revenueAll = toNumber(revenueAllAgg._sum.total ?? 0);
     const costPaidAll = toNumber(revenueAllAgg._sum.costTotal ?? 0);
     const unpaidAmount = toNumber(unpaidAgg._sum.total ?? 0);
 
+    const waiterIds = waiterOrderCounts.map((r) => r.waiterId!).filter(Boolean);
+    const waiterUsers = waiterIds.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: waiterIds } },
+          select: { id: true, name: true, role: { select: { code: true, name: true } } },
+        })
+      : [];
+    const waiterMap = new Map(waiterUsers.map((u) => [u.id, u]));
+    const staffOrdersToday = waiterOrderCounts
+      .map((r) => {
+        const u = waiterMap.get(r.waiterId!);
+        return {
+          userId: r.waiterId!,
+          name: u?.name ?? "—",
+          roleCode: u?.role.code ?? "",
+          roleName: u?.role.name ?? "",
+          orders: r._count,
+          amount: toNumber(r._sum.total ?? 0),
+        };
+      })
+      .sort((a, b) => b.orders - a.orders);
+
     const emptyOrders: DashOrder[] = [];
     const emptyLow: typeof lowStock = [];
     const emptyUsage: typeof recentUsage = [];
+
+    const tipStats = {
+      tipsToday: tipTotalToday,
+      tipsCollectedToday,
+      myTipToday: myTip.amount,
+      myOrdersToday,
+      myServedToday,
+      tipBoard,
+      staffOrdersToday,
+    };
 
     const common = {
       role,
@@ -241,9 +298,10 @@ export class DashboardService {
       unpaidOrders,
       pending: pendingKitchen + preparing,
       unpaid: unpaidCount,
+      ...tipStats,
     };
 
-    if (role === "KITCHEN" || role === "WAITER") {
+    if (role === "WAITER") {
       return {
         ...common,
         revenueToday: 0,
@@ -265,6 +323,38 @@ export class DashboardService {
         recentUsage: emptyUsage,
         unpaid: 0,
         paidToday: 0,
+        tipsToday: myTip.amount,
+        tipBoard: tipBoard.filter((t) => t.userId === user.id),
+        staffOrdersToday: staffOrdersToday.filter((s) => s.userId === user.id),
+      };
+    }
+
+    if (role === "KITCHEN") {
+      return {
+        ...common,
+        revenueToday: 0,
+        revenueAll: 0,
+        profitToday: 0,
+        profitAll: 0,
+        costToday: 0,
+        stockUsedToday: 0,
+        salesToday: 0,
+        orderAmountToday: 0,
+        unpaidCount: 0,
+        unpaidAmount: 0,
+        paidCount: 0,
+        unpaidOrders: emptyOrders,
+        lowStockCount: 0,
+        lowStock: emptyLow,
+        stockValue: 0,
+        itemCount: 0,
+        recentUsage: emptyUsage,
+        unpaid: 0,
+        paidToday: 0,
+        tipsToday: 0,
+        myTipToday: 0,
+        tipBoard: [],
+        staffOrdersToday: [],
       };
     }
 
@@ -295,6 +385,10 @@ export class DashboardService {
         pending: 0,
         unpaid: 0,
         paidToday: 0,
+        tipsToday: 0,
+        myTipToday: 0,
+        tipBoard: [],
+        staffOrdersToday: [],
       };
     }
 
@@ -309,8 +403,8 @@ export class DashboardService {
         profitAll: 0,
         costToday: 0,
         stockUsedToday: 0,
-        salesToday: 0,
-        orderAmountToday: 0,
+        salesToday,
+        orderAmountToday: salesToday,
         lowStockCount: 0,
         lowStock: emptyLow,
         stockValue: 0,

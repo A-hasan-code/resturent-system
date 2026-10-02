@@ -7,12 +7,17 @@ import { useSocketEvent } from "../socket";
 export type PaymentRow = {
   id: string;
   amount: number;
+  tipAmount?: number;
   createdAt: string;
   confirmedAt: string | null;
   orderId: string;
   orderNo: number;
   tableNo: string | null;
   orderTotal: number;
+  orderTip?: number;
+  orderedBy?: string | null;
+  orderedByRole?: string | null;
+  servedBy?: string | null;
   collectedBy: { id: string; name: string; roleName: string };
   handedTo: { id: string; name: string } | null;
 };

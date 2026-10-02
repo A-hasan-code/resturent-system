@@ -7,12 +7,18 @@ import { AuthUser } from "../common/decorators";
 import { PrintService } from "../print/print.service";
 import { RealtimeService } from "../realtime/realtime.service";
 import { OPEN_ORDER_WHERE } from "../tables/tables.controller";
-import { AddItemsDto, CreateOrderDto, OrderLineDto, PayOrderDto, UpdateStatusDto } from "./dto";
+import { AddItemsDto, CreateOrderDto, OrderLineDto, PayOrderDto, UpdateOrderDto, UpdateStatusDto } from "./dto";
+import { TipService } from "../system/tip.service";
+
+const staffSelect = { id: true, name: true, role: { select: { code: true, name: true } } } as const;
 
 const orderInclude = {
   items: { orderBy: { createdAt: "asc" }, include: { addedBy: { select: { name: true } } } },
   cashier: { select: { name: true } },
-  waiter: { select: { id: true, name: true } },
+  waiter: { select: staffSelect },
+  tipShares: {
+    include: { user: { select: { id: true, name: true } } },
+  },
   payments: {
     orderBy: { createdAt: "asc" },
     include: { collectedBy: { select: { name: true } }, handedTo: { select: { name: true } } },
@@ -56,7 +62,8 @@ export class OrdersService {
     private readonly prisma: PrismaService,
     private readonly costing: CostingService,
     private readonly print: PrintService,
-    private readonly realtime: RealtimeService
+    private readonly realtime: RealtimeService,
+    private readonly tips: TipService
   ) {}
 
   async list(user: AuthUser, paymentStatus?: string, status?: string, billing = false) {
@@ -86,10 +93,11 @@ export class OrdersService {
       const open = isTable
         ? await this.prisma.order.findFirst({ where: { ...OPEN_ORDER_WHERE, tableNo }, orderBy: { createdAt: "desc" } })
         : null;
-      if (open) return this.addItems(user, open.id, { items: dto.items, printKot: dto.printKot });
+      if (open) return this.addItems(user, open.id, { items: dto.items, printKot: dto.printKot, servedByName: dto.servedByName });
     }
 
     const { lines, subtotal, costTotal } = await this.buildLines(dto.items);
+    const servedByName = cleanName(dto.servedByName);
     // waiterId is whoever took the order (waiter, cashier or manager); cashierId is set when it is paid.
     const order = await this.prisma.order.create({
       data: {
@@ -101,6 +109,7 @@ export class OrdersService {
         total: subtotal,
         costTotal,
         waiterId: user.id,
+        servedByName,
         kotRounds: 1,
         items: { create: lines.map(({ recipeId: _r, ...rest }) => ({ ...rest, kotRound: 1, addedById: user.id })) },
       },
@@ -121,6 +130,7 @@ export class OrdersService {
 
     const round = order.kotRounds + 1;
     const { lines, subtotal, costTotal } = await this.buildLines(dto.items);
+    const servedByName = dto.servedByName !== undefined ? cleanName(dto.servedByName) : undefined;
     await this.prisma.order.update({
       where: { id },
       data: {
@@ -132,6 +142,7 @@ export class OrdersService {
         status: order.status === "READY" || order.status === "COMPLETED" ? "PENDING" : order.status,
         paymentStatus: toNumber(order.paidAmount) > 0 ? "PARTIAL" : order.paymentStatus,
         ...(order.waiterId ? {} : { waiterId: user.id }),
+        ...(servedByName !== undefined ? { servedByName } : {}),
         items: { create: lines.map(({ recipeId: _r, ...rest }) => ({ ...rest, kotRound: round, addedById: user.id })) },
       },
     });
@@ -178,9 +189,17 @@ export class OrdersService {
     const total = toNumber(order.total);
     const due = total - toNumber(order.paidAmount);
     const pay = Math.min(dto.amount ?? due, due);
-    if (pay <= 0) throw new BadRequestException("Nothing left to pay");
+    const tip = Math.max(0, Math.round((dto.tip ?? 0) * 100) / 100);
+    if (pay <= 0 && tip <= 0) throw new BadRequestException("Nothing left to pay");
+    if (pay <= 0 && tip > 0 && due > 0) throw new BadRequestException("Pay the bill before collecting tip only");
     const paidAmount = toNumber(order.paidAmount) + pay;
-    const paymentStatus: PaymentStatus = paidAmount >= total ? "PAID" : "PARTIAL";
+    const paymentStatus: PaymentStatus = paidAmount >= total ? "PAID" : pay > 0 ? "PARTIAL" : order.paymentStatus;
+    const tipAmount = toNumber(order.tipAmount) + tip;
+
+    let servedByName = order.servedByName;
+    if (dto.servedByName !== undefined) {
+      servedByName = cleanName(dto.servedByName);
+    }
 
     // Staff without a cash drawer (e.g. the floor manager) must say which cashier received the money.
     let handedTo: { id: string; name: string } | null = null;
@@ -199,18 +218,33 @@ export class OrdersService {
 
     const [updated, payment] = await this.prisma.$transaction(async (tx) => {
       const payment = await tx.payment.create({
-        data: { orderId: id, amount: pay, collectedById: user.id, handedToId: handedTo?.id ?? null },
+        data: {
+          orderId: id,
+          amount: pay,
+          tipAmount: tip,
+          collectedById: user.id,
+          handedToId: handedTo?.id ?? null,
+        },
       });
       const updated = await tx.order.update({
         where: { id },
         data: {
           paidAmount,
+          tipAmount,
           paymentStatus,
+          servedByName,
           cashierId: order.cashierId ?? handedTo?.id ?? user.id,
           status: paymentStatus === "PAID" && order.status === "READY" ? "COMPLETED" : order.status,
         },
         include: orderInclude,
       });
+      if (tip > 0) {
+        await this.tips.allocate(tx, {
+          orderId: id,
+          tip: tipAmount,
+          orderTakerId: updated.waiterId,
+        });
+      }
       return [updated, payment] as const;
     });
 
@@ -219,12 +253,31 @@ export class OrdersService {
     if (handedTo) {
       this.realtime.cashHandover(handedTo.id, {
         id: payment.id,
-        amount: pay,
+        amount: pay + tip,
         orderNo: updated.orderNo,
         tableNo: updated.tableNo,
         from: user.name,
       });
     }
+    return this.toDto(updated, canSeeCost(user));
+  }
+
+  async updateMeta(user: AuthUser, id: string, dto: UpdateOrderDto) {
+    const order = await this.prisma.order.findUnique({ where: { id } });
+    if (!order) throw new NotFoundException("Order not found");
+    if (order.paymentStatus === "PAID") throw new BadRequestException("Bill already paid");
+    const servedByName =
+      dto.servedByName === null
+        ? null
+        : dto.servedByName !== undefined
+          ? cleanName(dto.servedByName)
+          : undefined;
+    const updated = await this.prisma.order.update({
+      where: { id },
+      data: { ...(servedByName !== undefined ? { servedByName } : {}) },
+      include: orderInclude,
+    });
+    this.realtime.orderChanged(this.event(updated), "updated");
     return this.toDto(updated, canSeeCost(user));
   }
 
@@ -239,6 +292,16 @@ export class OrdersService {
   }
 
   // ---------- helpers ----------
+
+  private staffDto(u: { id: string; name: string; role: { code: string; name: string } } | null | undefined) {
+    if (!u) return null;
+    return { id: u.id, name: u.name, roleCode: u.role.code, roleName: u.role.name };
+  }
+
+  private staffLabel(u: { name: string; role: { name: string } } | null | undefined) {
+    if (!u) return null;
+    return `${u.name} (${u.role.name})`;
+  }
 
   private async queueKot(orderId: string, round: number, userId: string) {
     try {
@@ -301,6 +364,7 @@ export class OrdersService {
   }
 
   private toDto(o: FullOrder, showCost: boolean) {
+    const tipAmount = toNumber(o.tipAmount);
     return {
       id: o.id,
       orderNo: o.orderNo,
@@ -311,15 +375,26 @@ export class OrdersService {
       subtotal: toNumber(o.subtotal),
       total: toNumber(o.total),
       paidAmount: toNumber(o.paidAmount),
+      tipAmount,
+      grandTotal: toNumber(o.total) + tipAmount,
       ...(showCost
         ? { costTotal: toNumber(o.costTotal), profit: toNumber(o.total) - toNumber(o.costTotal) }
         : {}),
       cashier: o.cashier?.name ?? null,
-      waiter: o.waiter?.name ?? null,
+      waiter: this.staffLabel(o.waiter),
       waiterId: o.waiterId,
+      orderedBy: this.staffDto(o.waiter),
+      servedBy: o.servedByName,
+      servedByName: o.servedByName,
       kotRounds: o.kotRounds,
       billRequestedAt: o.billRequestedAt,
       createdAt: o.createdAt,
+      tipShares: o.tipShares.map((s) => ({
+        userId: s.userId,
+        name: s.user.name,
+        amount: toNumber(s.amount),
+        kind: s.kind,
+      })),
       items: o.items.map((i) => ({
         id: i.id,
         name: i.name,
@@ -334,6 +409,7 @@ export class OrdersService {
       payments: o.payments.map((p) => ({
         id: p.id,
         amount: toNumber(p.amount),
+        tipAmount: toNumber(p.tipAmount),
         collectedBy: p.collectedBy.name,
         handedTo: p.handedTo?.name ?? null,
         confirmedAt: p.confirmedAt,
@@ -341,4 +417,9 @@ export class OrdersService {
       })),
     };
   }
+}
+
+function cleanName(v: string | null | undefined) {
+  const n = (v ?? "").trim().replace(/\s+/g, " ");
+  return n ? n.slice(0, 80) : null;
 }

@@ -94,6 +94,7 @@ export function SettingsPage() {
         </div>
       </div>
       <ServerSection canEdit={can("system.manage")} />
+      {can("system.manage") && <TipPrintSection />}
       {can("printers.manage") && <PrintersSection />}
       {can("printers.manage") && <JobsSection />}
       {can("tables.manage") && <TablesSection />}
@@ -309,6 +310,131 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
         )}
       </div>
     </div>
+  );
+}
+
+function TipPrintSection() {
+  const toast = useToast();
+  const t = useT();
+  const [tipSplit, setTipSplit] = useState("SPLIT_50");
+  const [billShowOrderBy, setBillShowOrderBy] = useState(true);
+  const [billShowServedBy, setBillShowServedBy] = useState(true);
+  const [billShowCashier, setBillShowCashier] = useState(true);
+  const [billShowTip, setBillShowTip] = useState(true);
+  const [billFooter, setBillFooter] = useState("Thank you - Come again!");
+  const [kotShowOrderBy, setKotShowOrderBy] = useState(true);
+  const [kotFooter, setKotFooter] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api<{
+      tip: { split: string };
+      print: {
+        bill: {
+          showOrderBy: boolean;
+          showServedBy: boolean;
+          showCashier: boolean;
+          showTip: boolean;
+          footer: string;
+        };
+        kot: { showOrderBy: boolean; footer: string };
+      };
+    }>("/system/settings")
+      .then((s) => {
+        setTipSplit(s.tip?.split || "SPLIT_50");
+        setBillShowOrderBy(s.print?.bill?.showOrderBy !== false);
+        setBillShowServedBy(s.print?.bill?.showServedBy !== false);
+        setBillShowCashier(s.print?.bill?.showCashier !== false);
+        setBillShowTip(s.print?.bill?.showTip !== false);
+        setBillFooter(s.print?.bill?.footer || "Thank you - Come again!");
+        setKotShowOrderBy(s.print?.kot?.showOrderBy !== false);
+        setKotFooter(s.print?.kot?.footer || "");
+      })
+      .catch(() => undefined);
+  }, []);
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api("/system/settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          tipSplit,
+          billShowOrderBy: billShowOrderBy ? "1" : "0",
+          billShowServedBy: billShowServedBy ? "1" : "0",
+          billShowCashier: billShowCashier ? "1" : "0",
+          billShowTip: billShowTip ? "1" : "0",
+          billFooter,
+          kotShowOrderBy: kotShowOrderBy ? "1" : "0",
+          kotFooter,
+        }),
+      });
+      toast.push(t("settings.saved"), "ok");
+    } catch (err) {
+      toast.push(errMsg(err, t("settings.saveFailed")), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="panel panel-pad" onSubmit={save} style={{ marginBottom: "1rem" }}>
+      <h2 className="settings-h">{t("settings.tipsPrint")}</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        {t("settings.tipsPrintHint")}
+      </p>
+
+      <div className="field">
+        <label htmlFor="tip-split">{t("settings.tipSplit")}</label>
+        <select id="tip-split" value={tipSplit} onChange={(e) => setTipSplit(e.target.value)}>
+          <option value="ORDER_TAKER">{t("settings.tipOrderTaker")}</option>
+          <option value="POOL">{t("settings.tipPool")}</option>
+        </select>
+      </div>
+
+      <h3 className="settings-h" style={{ fontSize: "1rem" }}>
+        {t("settings.billFields")}
+      </h3>
+      <label className="switch-row">
+        <input type="checkbox" checked={billShowOrderBy} onChange={(e) => setBillShowOrderBy(e.target.checked)} />
+        <span>{t("settings.showOrderBy")}</span>
+      </label>
+      <label className="switch-row">
+        <input type="checkbox" checked={billShowServedBy} onChange={(e) => setBillShowServedBy(e.target.checked)} />
+        <span>{t("settings.showServedBy")}</span>
+      </label>
+      <label className="switch-row">
+        <input type="checkbox" checked={billShowCashier} onChange={(e) => setBillShowCashier(e.target.checked)} />
+        <span>{t("settings.showCashier")}</span>
+      </label>
+      <label className="switch-row">
+        <input type="checkbox" checked={billShowTip} onChange={(e) => setBillShowTip(e.target.checked)} />
+        <span>{t("settings.showTip")}</span>
+      </label>
+      <div className="field">
+        <label>{t("settings.billFooter")}</label>
+        <input value={billFooter} onChange={(e) => setBillFooter(e.target.value)} maxLength={120} />
+      </div>
+
+      <h3 className="settings-h" style={{ fontSize: "1rem" }}>
+        {t("settings.kotFields")}
+      </h3>
+      <label className="switch-row">
+        <input type="checkbox" checked={kotShowOrderBy} onChange={(e) => setKotShowOrderBy(e.target.checked)} />
+        <span>{t("settings.showOrderBy")}</span>
+      </label>
+      <div className="field">
+        <label>{t("settings.kotFooter")}</label>
+        <input value={kotFooter} onChange={(e) => setKotFooter(e.target.value)} maxLength={120} />
+      </div>
+
+      <div className="form-footer">
+        <button className="btn" type="submit" disabled={busy}>
+          {busy ? t("common.saving") : t("common.save")}
+        </button>
+      </div>
+    </form>
   );
 }
 

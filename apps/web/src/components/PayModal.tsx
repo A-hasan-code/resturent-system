@@ -11,6 +11,10 @@ export type PayTarget = {
   tableNo?: string | null;
   total: number;
   paidAmount?: number;
+  tipAmount?: number;
+  servedByName?: string | null;
+  servedBy?: string | null;
+  orderedBy?: { id?: string; name: string; roleCode?: string; roleName: string } | null;
 };
 
 type Cashier = { id: string; name: string; roleName: string };
@@ -30,15 +34,19 @@ export function PayModal({
   const keepsCash = can("cash.keep");
   const due = order ? Math.max(0, order.total - (order.paidAmount ?? 0)) : 0;
   const [amount, setAmount] = useState("");
+  const [tip, setTip] = useState("");
   const [cashiers, setCashiers] = useState<Cashier[]>([]);
   const [handedTo, setHandedTo] = useState("");
+  const [servedByName, setServedByName] = useState("");
   const [busy, setBusy] = useState(false);
   const [handedOver, setHandedOver] = useState(false);
 
   useEffect(() => {
     if (!order) return;
     setAmount(String(due));
+    setTip("");
     setHandedOver(false);
+    setServedByName((order.servedByName || order.servedBy || "").trim());
     if (keepsCash) return;
     api<Cashier[]>("/payments/cashiers")
       .then((list) => {
@@ -54,14 +62,21 @@ export function PayModal({
     e.preventDefault();
     if (!order) return;
     const value = Number(amount);
-    if (!(value > 0)) return toast.push(t("pay.enterAmount"), "err");
+    const tipValue = Math.max(0, Number(tip) || 0);
+    if (!(value > 0) && !(tipValue > 0)) return toast.push(t("pay.enterAmount"), "err");
+    if (due > 0 && !(value > 0)) return toast.push(t("pay.enterAmount"), "err");
     if (!keepsCash && !handedTo) return toast.push(t("pay.selectCashier"), "err");
     if (!keepsCash && !handedOver) return toast.push(t("pay.confirmGave"), "err");
     setBusy(true);
     try {
       await api(`/orders/${order.id}/pay`, {
         method: "POST",
-        body: JSON.stringify({ amount: Math.min(value, due), ...(keepsCash ? {} : { handedToId: handedTo }) }),
+        body: JSON.stringify({
+          amount: Math.min(Math.max(0, value), due),
+          tip: tipValue,
+          servedByName: servedByName.trim() || undefined,
+          ...(keepsCash ? {} : { handedToId: handedTo }),
+        }),
       });
       if (!keepsCash) localStorage.setItem(`handover:${user?.id}`, handedTo);
       const to = cashiers.find((c) => c.id === handedTo)?.name;
@@ -75,6 +90,9 @@ export function PayModal({
   }
 
   const value = Number(amount) || 0;
+  const tipValue = Math.max(0, Number(tip) || 0);
+  const foodPay = Math.min(value, due);
+  const collect = foodPay + tipValue;
   const payTitle = order ? `${t("pay.title")} · ${t("pay.billNo", { n: order.orderNo })}` : t("pay.title");
 
   return (
@@ -92,8 +110,34 @@ export function PayModal({
                 <strong>{money(order.paidAmount ?? 0)}</strong>
               </>
             )}
+            {(order.tipAmount ?? 0) > 0 && (
+              <>
+                <span>{t("pay.tipAlready")}</span>
+                <strong>{money(order.tipAmount ?? 0)}</strong>
+              </>
+            )}
             <span>{t("pay.amountDue")}</span>
             <strong className="due">{money(due)}</strong>
+            {order.orderedBy && (
+              <>
+                <span>{t("pay.orderedBy")}</span>
+                <strong>
+                  {order.orderedBy.name} ({order.orderedBy.roleName})
+                </strong>
+              </>
+            )}
+          </div>
+
+          <div className="field">
+            <label htmlFor="pay-server">{t("pay.servedBy")}</label>
+            <input
+              id="pay-server"
+              value={servedByName}
+              onChange={(e) => setServedByName(e.target.value)}
+              placeholder={t("serve.namePh")}
+              maxLength={80}
+              autoComplete="off"
+            />
           </div>
 
           <div className="field">
@@ -102,17 +146,39 @@ export function PayModal({
               id="pay-amount"
               type="number"
               inputMode="decimal"
-              min={1}
-              max={due}
+              min={0}
+              max={due || undefined}
               step="any"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              required
+              required={due > 0}
             />
             {value > 0 && value < due && (
               <span className="hint">{t("pay.partial", { amount: money(due - value) })}</span>
             )}
           </div>
+
+          <div className="field">
+            <label htmlFor="pay-tip">{t("pay.tip")}</label>
+            <input
+              id="pay-tip"
+              type="number"
+              inputMode="decimal"
+              min={0}
+              step="any"
+              value={tip}
+              onChange={(e) => setTip(e.target.value)}
+              placeholder="0"
+            />
+            <span className="hint">{t("pay.tipHint")}</span>
+          </div>
+
+          {tipValue > 0 && (
+            <div className="pay-summary">
+              <span>{t("pay.collectTotal")}</span>
+              <strong className="due">{money(collect)}</strong>
+            </div>
+          )}
 
           {!keepsCash && (
             <div className="field">
@@ -149,7 +215,7 @@ export function PayModal({
               <span>
                 <strong>
                   {t("pay.confirmHanded", {
-                    amount: money(Math.min(value, due)),
+                    amount: money(collect),
                     name: cashiers.find((c) => c.id === handedTo)?.name ?? t("pay.theCashier"),
                   })}
                 </strong>
@@ -163,7 +229,7 @@ export function PayModal({
               {t("common.cancel")}
             </button>
             <button type="submit" className="btn ok" disabled={busy || (!keepsCash && (!handedTo || !handedOver))}>
-              {busy ? t("common.saving") : `${t("pay.markPaid")} ${money(Math.min(value, due))}`}
+              {busy ? t("common.saving") : `${t("pay.markPaid")} ${money(collect)}`}
             </button>
           </div>
         </form>

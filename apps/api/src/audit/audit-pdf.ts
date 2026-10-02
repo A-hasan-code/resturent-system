@@ -33,9 +33,9 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
       bufferPages: true,
       margins: { top: PAGE.margin, bottom: PAGE.margin + 18, left: PAGE.margin, right: PAGE.margin },
       info: {
-        Title: `Audit report ${report.from} to ${report.to}`,
+        Title: `Sales report ${report.from} to ${report.to}`,
         Author: hotel.name,
-        Subject: "Hotel System management audit",
+        Subject: "Hotel System sales and audit report",
         Creator: "Hotel System",
       },
     });
@@ -50,20 +50,16 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
 
     cover(doc, hotel, report, contentW);
     kpiRow(doc, contentW, [
-      { label: "Orders", value: String(s.orders), note: `${s.cancelled} cancelled` },
-      { label: "Bills paid", value: String(s.billsPaid), note: `${s.unpaidCount} still unpaid` },
+      { label: "Food sales", value: money(s.salesTotal), note: `${s.billsPaid} paid bills` },
+      { label: "Tips", value: money(s.tipsTotal), note: "Guest tips (separate)" },
       { label: "Payments in", value: money(s.paymentsIn), note: `${s.paymentCount} receipts` },
-      { label: "Purchases out", value: money(s.purchasesOut), note: `${s.purchaseCount} stock-ins` },
+      { label: "Orders", value: String(s.orders), note: `${s.cancelled} cancelled` },
     ]);
     kpiRow(doc, contentW, [
+      { label: "Purchases out", value: money(s.purchasesOut), note: `${s.purchaseCount} stock-ins` },
       { label: "Cash left", value: money(cashLeft), note: "Payments − purchases" },
       { label: "Food cost", value: money(s.foodCost), note: "Paid bills only" },
       { label: "Unpaid amount", value: money(s.unpaidAmount), note: `${s.unpaidCount} open bills` },
-      {
-        label: "Days covered",
-        value: String(report.days.length),
-        note: `${report.from} → ${report.to}`,
-      },
     ]);
 
     sectionTitle(doc, "1. Cash flow by day", "Payments received versus stock purchases");
@@ -74,7 +70,17 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
     ]);
 
     ensureSpace(doc, 160);
-    sectionTitle(doc, "2. Collection by staff", "Who received the customer payments");
+    sectionTitle(doc, "2. Sales by who took the order", "Order taker · paid food sale · tips");
+    table(
+      doc,
+      contentW,
+      ["Staff", "Role", "Orders", "Sales", "Tips"],
+      report.byOrderTaker.map((r) => [r.name, r.role, String(r.orders), money(r.sales), money(r.tips)]),
+      [0.28, 0.2, 0.14, 0.2, 0.18]
+    );
+
+    ensureSpace(doc, 160);
+    sectionTitle(doc, "3. Collection by cashier / staff", "Who received the customer payments");
     staffBars(doc, report.byStaff, contentW);
     table(
       doc,
@@ -85,37 +91,64 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
     );
 
     ensureSpace(doc, 120);
-    sectionTitle(doc, "3. Daily summary", "Orders and money movement for each day");
+    sectionTitle(doc, "4. Daily summary", "Orders and money movement for each day");
     table(
       doc,
       contentW,
-      ["Date", "Orders", "Bills paid", "Payments in", "Purchases out"],
+      ["Date", "Orders", "Sales", "Tips", "Payments in", "Purchases"],
       report.days
-        .filter((d) => d.orders || d.paymentsIn || d.purchasesOut)
-        .map((d) => [dayLabel(d.date), String(d.orders), String(d.billsPaid), money(d.paymentsIn), money(d.purchasesOut)]),
-      [0.22, 0.14, 0.16, 0.24, 0.24]
+        .filter((d) => d.orders || d.paymentsIn || d.purchasesOut || d.sales)
+        .map((d) => [
+          dayLabel(d.date),
+          String(d.orders),
+          money(d.sales),
+          money(d.tips),
+          money(d.paymentsIn),
+          money(d.purchasesOut),
+        ]),
+      [0.16, 0.12, 0.18, 0.16, 0.2, 0.18]
     );
 
     ensureSpace(doc, 120);
-    sectionTitle(doc, "4. Payment register", "Bill taken by · handed to cashier · confirmation time");
+    sectionTitle(doc, "5. Sales register", "Every order in the period — order taken by · served by");
     table(
       doc,
       contentW,
-      ["Time", "Bill", "Table", "Amount", "Received by", "Handed to", "Confirmed"],
+      ["Time", "Bill", "Table", "Sale", "Tip", "Order taken by", "Served by", "Pay"],
+      report.sales.map((o) => [
+        when(o.time),
+        `#${o.orderNo}`,
+        o.tableNo || "—",
+        money(o.total),
+        money(o.tipAmount),
+        o.orderedBy || "—",
+        o.servedBy || "—",
+        o.paymentStatus,
+      ]),
+      [0.16, 0.08, 0.08, 0.12, 0.1, 0.18, 0.14, 0.14]
+    );
+
+    ensureSpace(doc, 120);
+    sectionTitle(doc, "6. Payment register", "Bill taken by · handed to cashier · confirmation time");
+    table(
+      doc,
+      contentW,
+      ["Time", "Bill", "Table", "Amount", "Tip", "Received by", "Handed to", "Confirmed"],
       report.payments.map((p) => [
         when(p.time),
         `#${p.orderNo}`,
         p.tableNo || "—",
         money(p.amount),
+        money(p.tipAmount),
         `${p.collectedBy}`,
         p.handedTo || "—",
         p.confirmedAt ? when(p.confirmedAt) : p.handedTo ? "Pending" : "—",
       ]),
-      [0.2, 0.08, 0.1, 0.14, 0.18, 0.14, 0.16]
+      [0.16, 0.08, 0.08, 0.12, 0.1, 0.16, 0.14, 0.16]
     );
 
     ensureSpace(doc, 120);
-    sectionTitle(doc, "5. Stock purchases", "Money spent on inventory in this period");
+    sectionTitle(doc, "7. Stock purchases", "Money spent on inventory in this period");
     table(
       doc,
       contentW,
@@ -144,12 +177,13 @@ function cover(doc: PDFKit.PDFDocument, hotel: Hotel, report: AuditReport, w: nu
   if (hotel.tagline) doc.text(hotel.tagline, PAGE.margin, 56, { width: w });
   const meta = [hotel.address, hotel.phone ? `Tel ${hotel.phone}` : ""].filter(Boolean).join("  ·  ");
   if (meta) doc.text(meta, PAGE.margin, 72, { width: w });
-  doc.font("Helvetica-Bold").fontSize(16).fillColor("#ffffff").text("MANAGEMENT AUDIT REPORT", PAGE.margin, 92, { width: w });
+  doc.font("Helvetica-Bold").fontSize(16).fillColor("#ffffff").text("SALES & AUDIT REPORT", PAGE.margin, 92, { width: w });
   doc.restore();
 
   doc.y = 136;
   doc.fillColor(INK).font("Helvetica-Bold").fontSize(11).text(`Period  ${report.from}  →  ${report.to}`);
-  doc.fillColor(MUTED).font("Helvetica").fontSize(9).text(`Generated ${new Date().toLocaleString("en-PK")}  ·  Confidential — for management use`);
+  const since = report.firstSaleDate ? `  ·  System sales since ${report.firstSaleDate}` : "";
+  doc.fillColor(MUTED).font("Helvetica").fontSize(9).text(`Generated ${new Date().toLocaleString("en-PK")}${since}  ·  Confidential — for management use`);
   doc.moveDown(0.8);
   doc.strokeColor(LINE).lineWidth(1).moveTo(PAGE.margin, doc.y).lineTo(PAGE.margin + w, doc.y).stroke();
   doc.moveDown(0.8);
@@ -320,7 +354,7 @@ function footer(doc: PDFKit.PDFDocument, hotel: Hotel) {
     doc.save();
     doc.strokeColor(LINE).lineWidth(0.7).moveTo(PAGE.margin, PAGE.height - 28).lineTo(PAGE.width - PAGE.margin, PAGE.height - 28).stroke();
     doc.fillColor(MUTED).font("Helvetica").fontSize(8);
-    doc.text(`${hotel.name} · Management audit`, PAGE.margin, PAGE.height - 22, { lineBreak: false });
+    doc.text(`${hotel.name} · Sales & audit report`, PAGE.margin, PAGE.height - 22, { lineBreak: false });
     doc.text(`Page ${n} of ${range.count}`, PAGE.width - PAGE.margin - 80, PAGE.height - 22, {
       width: 80,
       align: "right",

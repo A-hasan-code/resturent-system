@@ -13,7 +13,17 @@ export type PaymentFilter = {
 };
 
 const paymentInclude = {
-  order: { select: { id: true, orderNo: true, tableNo: true, total: true } },
+  order: {
+    select: {
+      id: true,
+      orderNo: true,
+      tableNo: true,
+      total: true,
+      tipAmount: true,
+      waiter: { select: { name: true, role: { select: { name: true, code: true } } } },
+      servedByName: true,
+    },
+  },
   collectedBy: { select: { id: true, name: true, role: { select: { name: true } } } },
   handedTo: { select: { id: true, name: true } },
 } satisfies Prisma.PaymentInclude;
@@ -44,6 +54,16 @@ export class PaymentsService {
     return users
       .sort((a, b) => Number(a.role.code === "ADMIN") - Number(b.role.code === "ADMIN"))
       .map((u) => ({ id: u.id, name: u.name, roleName: u.role.name }));
+  }
+
+  /** Floor staff who can be marked as table servers. */
+  async servers() {
+    const users = await this.prisma.user.findMany({
+      where: { active: true, role: { code: { in: ["WAITER", "MANAGER", "CASHIER"] } } },
+      select: { id: true, name: true, role: { select: { code: true, name: true } } },
+      orderBy: { name: "asc" },
+    });
+    return users.map((u) => ({ id: u.id, name: u.name, roleCode: u.role.code, roleName: u.role.name }));
   }
 
   /** Cash handed to me that I have not confirmed yet. */
@@ -101,6 +121,7 @@ export class PaymentsService {
     });
     const list = rows.map((p) => this.toDto(p));
     const sum = (xs: typeof list) => xs.reduce((s, p) => s + p.amount, 0);
+    const tipSum = (xs: typeof list) => xs.reduce((s, p) => s + p.tipAmount, 0);
     const handed = list.filter((p) => p.handedTo);
     return {
       rows: list,
@@ -108,6 +129,7 @@ export class PaymentsService {
         count: list.length,
         bills: new Set(list.map((p) => p.orderId)).size,
         total: sum(list),
+        tips: tipSum(list),
         direct: sum(list.filter((p) => !p.handedTo)),
         handedOver: sum(handed),
         pending: sum(handed.filter((p) => !p.confirmedAt)),
@@ -117,15 +139,21 @@ export class PaymentsService {
   }
 
   private toDto(p: FullPayment) {
+    const waiter = p.order.waiter;
     return {
       id: p.id,
       amount: toNumber(p.amount),
+      tipAmount: toNumber(p.tipAmount),
       createdAt: p.createdAt,
       confirmedAt: p.confirmedAt,
       orderId: p.order.id,
       orderNo: p.order.orderNo,
       tableNo: p.order.tableNo,
       orderTotal: toNumber(p.order.total),
+      orderTip: toNumber(p.order.tipAmount),
+      orderedBy: waiter ? `${waiter.name} (${waiter.role.name})` : null,
+      orderedByRole: waiter?.role.code ?? null,
+      servedBy: p.order.servedByName || null,
       collectedBy: { id: p.collectedBy.id, name: p.collectedBy.name, roleName: p.collectedBy.role.name },
       handedTo: p.handedTo ? { id: p.handedTo.id, name: p.handedTo.name } : null,
     };

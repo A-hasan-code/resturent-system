@@ -9,12 +9,16 @@ export type KotPayload = {
   waiter: string | null;
   /** Who took the items on this slip, e.g. "Ahmed (Waiter)". Absent on jobs stored by older versions. */
   takenBy?: string | null;
+  /** Who is serving the table. */
+  servedBy?: string | null;
   round: number | null;
   reprint: boolean;
   station: string | null;
   time: string;
   notes: string | null;
   items: Array<{ name: string; quantity: number; unit: string; notes: string | null; round: number }>;
+  showOrderBy?: boolean;
+  footer?: string;
 };
 
 export type BillPayload = {
@@ -23,13 +27,23 @@ export type BillPayload = {
   tableNo: string | null;
   cashier: string | null;
   waiter: string | null;
+  /** Order-taker with role, e.g. "Ali (Manager)". */
+  orderedBy?: string | null;
+  /** Table server with role. */
+  servedBy?: string | null;
   /** Staff who collected the payment(s), when not the cashier. */
   receivedBy?: string | null;
   time: string;
   items: Array<{ name: string; quantity: number; unit: string; rate: number; amount: number }>;
   total: number;
+  tipAmount?: number;
   paidAmount: number;
   paymentStatus: string;
+  showOrderBy?: boolean;
+  showServedBy?: boolean;
+  showCashier?: boolean;
+  showTip?: boolean;
+  footer?: string;
 };
 
 export type TestPayload = {
@@ -73,15 +87,20 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   e.rule();
   if (p.notes) e.wrapped(`Note: ${p.notes}`).rule();
   if (p.round && p.round > 1) e.align("center").bold().line(`** NEW ITEMS (Round ${p.round}) **`).bold(false);
+  const showBy = p.showOrderBy !== false;
   const takenBy = p.takenBy ?? p.waiter;
-  if (takenBy) e.align("left").bold().wrapped(`Order by: ${takenBy}`).bold(false);
+  if (showBy && takenBy) e.align("left").bold().wrapped(`Order taken by: ${takenBy}`).bold(false);
+  if (p.servedBy) e.align("left").bold().wrapped(`Served by: ${p.servedBy}`).bold(false);
   e.align("center").line("-- no prices on kitchen copy --");
+  if (p.footer) e.align("center").wrapped(p.footer);
   return e.feed(4).beep().cut();
 }
 
 export function renderBill(p: BillPayload, paperWidth: number) {
   const e = new EscPos(columnsFor(paperWidth));
   const r = p.restaurant;
+  const tip = p.tipAmount ?? 0;
+  const showTip = p.showTip !== false && tip > 0;
   e.align("center").bold().big().wrapped(r.name).big(false).bold(false);
   if (r.tagline) e.wrapped(r.tagline);
   if (r.address) e.wrapped(r.address);
@@ -90,21 +109,27 @@ export function renderBill(p: BillPayload, paperWidth: number) {
   e.align("center").bold().line("CUSTOMER BILL").bold(false).align("left");
   e.pair(`Bill #${p.orderNo}`, `Table: ${p.tableNo || "-"}`);
   e.line(when(p.time));
-  if (p.waiter) e.line(`Served by: ${p.waiter}`);
-  if (p.cashier) e.line(`Cashier: ${p.cashier}`);
+  const orderedBy = p.orderedBy ?? p.waiter;
+  if (p.showOrderBy !== false && orderedBy) e.bold().line(`Order taken by: ${orderedBy}`).bold(false);
+  if (p.showServedBy !== false && p.servedBy) e.bold().line(`Served by: ${p.servedBy}`).bold(false);
+  if (p.showCashier !== false && p.cashier) e.line(`Cashier: ${p.cashier}`);
   e.rule();
   for (const i of p.items) {
     e.wrapped(i.name);
     e.pair(`  ${qty(i.quantity, i.unit)} x ${money(i.rate)}`, money(i.amount));
   }
   e.rule();
-  e.bold().big().pair("TOTAL", money(p.total)).big(false).bold(false);
+  e.bold().pair("SUBTOTAL", money(p.total)).bold(false);
+  if (showTip) e.pair("Tip", money(tip));
+  if (showTip) e.bold().big().pair("TOTAL", money(p.total + tip)).big(false).bold(false);
+  else e.bold().big().pair("TOTAL", money(p.total)).big(false).bold(false);
   if (p.paidAmount > 0) e.pair("Paid", money(p.paidAmount));
+  if (showTip && tip > 0) e.pair("Tip paid", money(tip));
   if (p.receivedBy) e.line(`Received by: ${p.receivedBy}`);
   if (p.paidAmount > 0 && p.paidAmount < p.total) e.pair("Balance", money(p.total - p.paidAmount));
   e.line(`Payment: ${p.paymentStatus}`);
   e.rule("=");
-  e.align("center").line("Thank you - Come again!");
+  e.align("center").wrapped(p.footer || "Thank you - Come again!");
   return e.feed(4).cut();
 }
 

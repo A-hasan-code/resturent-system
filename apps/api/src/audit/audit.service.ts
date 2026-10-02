@@ -8,7 +8,7 @@ import { toNumber } from "../common/units";
 import { renderAuditPdf } from "./audit-pdf";
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
-const MAX_DAYS = 366;
+const MAX_DAYS = 4000;
 const KEEP_MONTHS = 36;
 const REFRESH_MS = 12 * 60 * 60 * 1000;
 const FILE_RE = /^audit-\d{4}-\d{2}\.pdf$/;
@@ -20,15 +20,22 @@ export type AuditDay = {
   paymentsIn: number;
   purchasesOut: number;
   billsPaid: number;
+  sales: number;
+  tips: number;
 };
 
 export type AuditReport = {
   from: string;
   to: string;
+  firstSaleDate: string | null;
+  staff: string | null;
   summary: {
     orders: number;
     cancelled: number;
     billsPaid: number;
+    /** Food sale on paid bills (tip excluded). */
+    salesTotal: number;
+    tipsTotal: number;
     paymentsIn: number;
     paymentCount: number;
     purchasesOut: number;
@@ -39,11 +46,24 @@ export type AuditReport = {
   };
   days: AuditDay[];
   byStaff: { name: string; role: string; amount: number; count: number }[];
+  byOrderTaker: { name: string; role: string; orders: number; sales: number; tips: number }[];
+  sales: {
+    time: string;
+    orderNo: number;
+    tableNo: string | null;
+    total: number;
+    tipAmount: number;
+    orderedBy: string | null;
+    servedBy: string | null;
+    cashier: string | null;
+    paymentStatus: string;
+  }[];
   payments: {
     time: string;
     orderNo: number;
     tableNo: string | null;
     amount: number;
+    tipAmount: number;
     collectedBy: string;
     role: string;
     handedTo: string | null;
@@ -54,9 +74,17 @@ export type AuditReport = {
 
 export type StoredAudit = { file: string; month: string; size: number; updatedAt: string; closed: boolean };
 
+/** Local calendar midnight for YYYY-MM-DD (avoids UTC date-only parsing bugs). */
 function dayStart(d: string) {
   if (!DATE.test(d)) throw new BadRequestException("Dates must be YYYY-MM-DD");
-  return new Date(`${d}T00:00:00`);
+  const [y, m, day] = d.split("-").map(Number);
+  return new Date(y, m - 1, day, 0, 0, 0, 0);
+}
+
+function dayEndExclusive(d: string) {
+  if (!DATE.test(d)) throw new BadRequestException("Dates must be YYYY-MM-DD");
+  const [y, m, day] = d.split("-").map(Number);
+  return new Date(y, m - 1, day + 1, 0, 0, 0, 0);
 }
 
 function isoDay(d: Date) {
@@ -91,37 +119,81 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
     return dataDir("audit");
   }
 
-  async report(from: string, to: string): Promise<AuditReport> {
+  /** Earliest order date in the system (for “all time” filter). */
+  async firstSaleDate(): Promise<string | null> {
+    const first = await this.prisma.order.findFirst({
+      where: { status: { not: "CANCELLED" } },
+      orderBy: { createdAt: "asc" },
+      select: { createdAt: true },
+    });
+    return first ? isoDay(first.createdAt) : null;
+  }
+
+  async report(from: string, to: string, staffName?: string): Promise<AuditReport> {
     const start = dayStart(from);
-    const end = dayStart(to);
-    end.setDate(end.getDate() + 1);
+    const end = dayEndExclusive(to);
     if (end <= start) throw new BadRequestException("End date is before the start date");
     if (end.getTime() - start.getTime() > MAX_DAYS * 86400000) {
-      throw new BadRequestException("Pick one year or less");
+      throw new BadRequestException("Date range is too long");
     }
 
-    const [orders, payments, purchases] = await Promise.all([
+    const staffFilter = staffName?.trim() || undefined;
+    const nameMatch = staffFilter
+      ? { contains: staffFilter, mode: "insensitive" as const }
+      : undefined;
+
+    const [orders, payments, purchases, firstSaleDate] = await Promise.all([
       this.prisma.order.findMany({
-        where: { createdAt: { gte: start, lt: end } },
+        where: {
+          createdAt: { gte: start, lt: end },
+          ...(nameMatch
+            ? {
+                OR: [
+                  { waiter: { name: nameMatch } },
+                  { cashier: { name: nameMatch } },
+                  { servedByName: nameMatch },
+                ],
+              }
+            : {}),
+        },
         select: {
           orderNo: true,
+          tableNo: true,
           status: true,
           paymentStatus: true,
           total: true,
+          tipAmount: true,
           paidAmount: true,
           costTotal: true,
           createdAt: true,
+          servedByName: true,
+          waiter: { select: { name: true, role: { select: { name: true } } } },
+          cashier: { select: { name: true } },
         },
+        orderBy: { createdAt: "asc" },
+        take: 20000,
       }),
       this.prisma.payment.findMany({
-        where: { createdAt: { gte: start, lt: end } },
+        where: {
+          createdAt: { gte: start, lt: end },
+          ...(nameMatch
+            ? {
+                OR: [
+                  { collectedBy: { name: nameMatch } },
+                  { handedTo: { name: nameMatch } },
+                  { order: { waiter: { name: nameMatch } } },
+                  { order: { servedByName: nameMatch } },
+                ],
+              }
+            : {}),
+        },
         include: {
           order: { select: { orderNo: true, tableNo: true } },
           collectedBy: { select: { name: true, role: { select: { name: true } } } },
           handedTo: { select: { name: true } },
         },
         orderBy: { createdAt: "asc" },
-        take: 8000,
+        take: 20000,
       }),
       this.prisma.stockMovement.findMany({
         where: { type: "IN", createdAt: { gte: start, lt: end } },
@@ -129,12 +201,22 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         orderBy: { createdAt: "asc" },
         take: 8000,
       }),
+      this.firstSaleDate(),
     ]);
 
     const days = new Map<string, AuditDay>();
     for (let t = start.getTime(); t < end.getTime(); t += 86400000) {
       const date = isoDay(new Date(t));
-      days.set(date, { date, orders: 0, cancelled: 0, paymentsIn: 0, purchasesOut: 0, billsPaid: 0 });
+      days.set(date, {
+        date,
+        orders: 0,
+        cancelled: 0,
+        paymentsIn: 0,
+        purchasesOut: 0,
+        billsPaid: 0,
+        sales: 0,
+        tips: 0,
+      });
     }
     const bucket = (d: Date) => days.get(isoDay(d));
 
@@ -143,6 +225,11 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
     let unpaidCount = 0;
     let foodCost = 0;
     let billsPaid = 0;
+    let salesTotal = 0;
+    let tipsTotal = 0;
+    const takers = new Map<string, { name: string; role: string; orders: number; sales: number; tips: number }>();
+    const salesRows: AuditReport["sales"] = [];
+
     for (const o of orders) {
       const day = bucket(o.createdAt);
       if (o.status === "CANCELLED") {
@@ -151,28 +238,56 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         continue;
       }
       if (day) day.orders += 1;
+      const total = toNumber(o.total);
+      const tip = toNumber(o.tipAmount);
+      const takerName = o.waiter?.name ?? "—";
+      const takerRole = o.waiter?.role.name ?? "";
+      const taker = takers.get(takerName) ?? { name: takerName, role: takerRole, orders: 0, sales: 0, tips: 0 };
+      taker.orders += 1;
+
       if (o.paymentStatus === "PAID") {
         billsPaid += 1;
         foodCost += toNumber(o.costTotal);
-        if (day) day.billsPaid += 1;
+        salesTotal += total;
+        tipsTotal += tip;
+        taker.sales += total;
+        taker.tips += tip;
+        if (day) {
+          day.billsPaid += 1;
+          day.sales += total;
+          day.tips += tip;
+        }
       } else {
         unpaidCount += 1;
-        unpaidAmount += Math.max(0, toNumber(o.total) - toNumber(o.paidAmount));
+        unpaidAmount += Math.max(0, total - toNumber(o.paidAmount));
       }
+      takers.set(takerName, taker);
+
+      salesRows.push({
+        time: o.createdAt.toISOString(),
+        orderNo: o.orderNo,
+        tableNo: o.tableNo,
+        total,
+        tipAmount: tip,
+        orderedBy: o.waiter ? `${o.waiter.name} (${o.waiter.role.name})` : null,
+        servedBy: o.servedByName,
+        cashier: o.cashier?.name ?? null,
+        paymentStatus: o.paymentStatus,
+      });
     }
 
     let paymentsIn = 0;
-    const staff = new Map<string, { name: string; role: string; amount: number; count: number }>();
+    const collectors = new Map<string, { name: string; role: string; amount: number; count: number }>();
     for (const p of payments) {
       const amount = toNumber(p.amount);
       paymentsIn += amount;
       const day = bucket(p.createdAt);
       if (day) day.paymentsIn += amount;
       const key = p.collectedBy.name;
-      const s = staff.get(key) ?? { name: p.collectedBy.name, role: p.collectedBy.role.name, amount: 0, count: 0 };
+      const s = collectors.get(key) ?? { name: p.collectedBy.name, role: p.collectedBy.role.name, amount: 0, count: 0 };
       s.amount += amount;
       s.count += 1;
-      staff.set(key, s);
+      collectors.set(key, s);
     }
 
     let purchasesOut = 0;
@@ -194,10 +309,14 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
     return {
       from,
       to,
+      firstSaleDate,
+      staff: staffFilter ?? null,
       summary: {
         orders: orders.length - cancelled,
         cancelled,
         billsPaid,
+        salesTotal,
+        tipsTotal,
         paymentsIn,
         paymentCount: payments.length,
         purchasesOut,
@@ -207,12 +326,15 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         unpaidCount,
       },
       days: [...days.values()],
-      byStaff: [...staff.values()].sort((a, b) => b.amount - a.amount),
+      byStaff: [...collectors.values()].sort((a, b) => b.amount - a.amount),
+      byOrderTaker: [...takers.values()].sort((a, b) => b.sales - a.sales || b.orders - a.orders),
+      sales: salesRows,
       payments: payments.map((p) => ({
         time: p.createdAt.toISOString(),
         orderNo: p.order.orderNo,
         tableNo: p.order.tableNo,
         amount: toNumber(p.amount),
+        tipAmount: toNumber(p.tipAmount),
         collectedBy: p.collectedBy.name,
         role: p.collectedBy.role.name,
         handedTo: p.handedTo?.name ?? null,

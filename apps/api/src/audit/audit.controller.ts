@@ -10,16 +10,21 @@ import { AuditService } from "./audit.service";
 export class AuditController {
   constructor(private readonly audit: AuditService) {}
 
+  @Get("meta")
+  async meta() {
+    return { firstSaleDate: await this.audit.firstSaleDate() };
+  }
+
   @Get()
-  report(@Query("from") from: string, @Query("to") to: string) {
-    return this.audit.report(from, to);
+  report(@Query("from") from: string, @Query("to") to: string, @Query("staff") staff?: string) {
+    return this.audit.report(from, to, staff);
   }
 
   @Get("export")
-  async export(@Query("from") from: string, @Query("to") to: string) {
-    const report = await this.audit.report(from, to);
+  async export(@Query("from") from: string, @Query("to") to: string, @Query("staff") staff?: string) {
+    const report = await this.audit.report(from, to, staff);
     const pdf = await this.audit.toPdf(report);
-    return file(`audit-${from}-to-${to}.pdf`, pdf);
+    return file(`sales-report-${from}-to-${to}.pdf`, pdf);
   }
 
   @Get("files")

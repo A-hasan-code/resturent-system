@@ -19,6 +19,7 @@ import { RequirePerms } from "../common/decorators";
 import { ServerIdentityService } from "./server-identity.service";
 import { SettingsService } from "./settings.service";
 import { BackupService } from "./backup.service";
+import { TipService } from "./tip.service";
 
 class UpdateSettingsDto {
   @IsOptional() @IsString() @MaxLength(80) serverName?: string;
@@ -27,6 +28,15 @@ class UpdateSettingsDto {
   @IsOptional() @IsString() @MaxLength(160) address?: string;
   @IsOptional() @IsString() @MaxLength(40) phone?: string;
   @IsOptional() @IsString() @Matches(/^#[0-9a-fA-F]{6}$/) accent?: string;
+  /** ORDER_TAKER | SERVER | SPLIT_50 | POOL */
+  @IsOptional() @IsString() @Matches(/^(ORDER_TAKER|SERVER|SPLIT_50|POOL)$/i) tipSplit?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) billShowOrderBy?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) billShowServedBy?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) billShowCashier?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) billShowTip?: string;
+  @IsOptional() @IsString() @MaxLength(120) billFooter?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) kotShowOrderBy?: string;
+  @IsOptional() @IsString() @MaxLength(120) kotFooter?: string;
 }
 
 @Controller()
@@ -54,12 +64,32 @@ export class SystemController {
   constructor(
     private readonly identity: ServerIdentityService,
     private readonly settings: SettingsService,
-    private readonly backups: BackupService
+    private readonly backups: BackupService,
+    private readonly tips: TipService
   ) {}
 
   @Get("settings")
   async getSettings() {
-    return { serverName: this.identity.name, restaurant: await this.settings.restaurant() };
+    const [tipSplit, bill, kot] = await Promise.all([
+      this.tips.tipSplit(),
+      this.tips.printBillOpts(),
+      this.tips.printKotOpts(),
+    ]);
+    return {
+      serverName: this.identity.name,
+      restaurant: await this.settings.restaurant(),
+      tip: { split: tipSplit },
+      print: {
+        bill: {
+          showOrderBy: bill.showOrderBy,
+          showServedBy: bill.showServedBy,
+          showCashier: bill.showCashier,
+          showTip: bill.showTip,
+          footer: bill.footer,
+        },
+        kot: { showOrderBy: kot.showOrderBy, footer: kot.footer },
+      },
+    };
   }
 
   @Patch("settings")
@@ -72,10 +102,21 @@ export class SystemController {
       ["address", "restaurant.address"],
       ["phone", "restaurant.phone"],
       ["accent", "restaurant.accent"],
+      ["tipSplit", "tip.split"],
+      ["billShowOrderBy", "print.bill.showOrderBy"],
+      ["billShowServedBy", "print.bill.showServedBy"],
+      ["billShowCashier", "print.bill.showCashier"],
+      ["billShowTip", "print.bill.showTip"],
+      ["billFooter", "print.bill.footer"],
+      ["kotShowOrderBy", "print.kot.showOrderBy"],
+      ["kotFooter", "print.kot.footer"],
     ];
     for (const [field, key] of map) {
       const v = dto[field];
-      if (v != null) await this.settings.set(key, String(v).trim());
+      if (v != null) {
+        const raw = String(v).trim();
+        await this.settings.set(key, field === "tipSplit" ? raw.toUpperCase() : raw);
+      }
     }
     return this.getSettings();
   }

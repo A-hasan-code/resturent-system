@@ -35,6 +35,11 @@ export class CreateOrderDto {
   @IsOptional()
   notes?: string;
 
+  /** Free-text name of who is serving the table (asked before kitchen slip). */
+  @IsString()
+  @IsOptional()
+  servedByName?: string;
+
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
@@ -57,6 +62,11 @@ export class AddItemsDto {
   @IsOptional()
   @IsBoolean()
   printKot?: boolean;
+
+  /** Free-text name of who is serving when sending more items to the kitchen. */
+  @IsString()
+  @IsOptional()
+  servedByName?: string;
 }
 
 export class PrintKotDto {
@@ -77,10 +87,28 @@ export class PayOrderDto {
   @IsOptional()
   amount?: number;
 
+  /** Guest tip collected with this payment (separate from food total). */
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  tip?: number;
+
+  /** Free-text name of who served the table. */
+  @IsString()
+  @IsOptional()
+  servedByName?: string;
+
   /** Cashier the collected cash was handed to. Required when the payer does not keep a cash drawer. */
   @IsString()
   @IsOptional()
   handedToId?: string;
+}
+
+export class UpdateOrderDto {
+  /** Free-text name of who is serving the table. */
+  @IsString()
+  @IsOptional()
+  servedByName?: string | null;
 }
 
 export class UpdateStatusDto {

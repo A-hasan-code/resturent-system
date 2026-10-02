@@ -12,6 +12,7 @@ import { SettingsService } from "../system/settings.service";
 import { ServerIdentityService } from "../system/server-identity.service";
 import { RealtimeService } from "../realtime/realtime.service";
 import { toNumber } from "../common/units";
+import { TipService } from "../system/tip.service";
 import { BillPayload, KotPayload, renderBill, renderKot, renderTest, TestPayload } from "./receipts";
 import { sendToNetworkPrinter, sendToWindowsPrinter, writePreviewFile } from "./drivers";
 
@@ -32,7 +33,8 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
     private readonly identity: ServerIdentityService,
-    private readonly realtime: RealtimeService
+    private readonly realtime: RealtimeService,
+    private readonly tips: TipService
   ) {}
 
   async onApplicationBootstrap() {
@@ -110,6 +112,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     }));
     const restaurant = await this.settings.restaurant();
     const time = new Date().toISOString();
+    const kotOpts = await this.tips.printKotOpts();
 
     return {
       orderNo: order.orderNo,
@@ -122,12 +125,15 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
           tableNo: order.tableNo,
           waiter: order.waiter?.name ?? null,
           takenBy: takers.length ? takers.join(", ") : null,
+          servedBy: order.servedByName || null,
           round: opts.round ?? null,
           reprint: !!opts.reprint,
           station,
           time,
           notes: opts.round && opts.round > 1 ? null : order.notes,
           items: mine.map((i) => i.line),
+          showOrderBy: kotOpts.showOrderBy,
+          footer: kotOpts.footer || undefined,
         };
       },
     };
@@ -138,7 +144,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       where: { id: orderId },
       include: {
         items: { orderBy: { createdAt: "asc" } },
-        waiter: { select: { name: true } },
+        waiter: { select: { name: true, role: { select: { name: true } } } },
         cashier: { select: { name: true } },
         payments: { select: { collectedBy: { select: { name: true } } } },
       },
@@ -148,12 +154,15 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
 
     const cashier = order.cashier?.name ?? null;
     const collectors = [...new Set(order.payments.map((p) => p.collectedBy.name))].filter((n) => n !== cashier);
+    const billOpts = await this.tips.printBillOpts();
     const payload: BillPayload = {
       restaurant: await this.settings.restaurant(),
       orderNo: order.orderNo,
       tableNo: order.tableNo,
       cashier,
       waiter: order.waiter?.name ?? null,
+      orderedBy: staffLabel(order.waiter),
+      servedBy: order.servedByName || null,
       receivedBy: collectors.length ? collectors.join(", ") : null,
       time: order.createdAt.toISOString(),
       items: order.items.map((i) => ({
@@ -164,8 +173,14 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
         amount: toNumber(i.amount),
       })),
       total: toNumber(order.total),
+      tipAmount: toNumber(order.tipAmount),
       paidAmount: toNumber(order.paidAmount),
       paymentStatus: order.paymentStatus,
+      showOrderBy: billOpts.showOrderBy,
+      showServedBy: billOpts.showServedBy,
+      showCashier: billOpts.showCashier,
+      showTip: billOpts.showTip,
+      footer: billOpts.footer,
     };
     // One bill copy, on the first bill printer.
     return [await this.createJob("BILL", printers[0].id, payload, orderId, requestedById)];

@@ -15,6 +15,7 @@ type Result = {
   summary: {
     count: number;
     total: number;
+    tips?: number;
     direct: number;
     handedOver: number;
     pending: number;
@@ -75,7 +76,7 @@ export function PaymentsPage() {
   const rows = useMemo(
     () =>
       (data?.rows ?? []).filter((p) =>
-        matchesSearch(q, p.orderNo, p.tableNo, p.collectedBy.name, p.handedTo?.name)
+        matchesSearch(q, p.orderNo, p.tableNo, p.collectedBy.name, p.handedTo?.name, p.orderedBy, p.servedBy)
       ),
     [data, q]
   );
@@ -117,7 +118,10 @@ export function PaymentsPage() {
         Time: new Date(p.createdAt).toLocaleString("en-PK"),
         Bill: p.orderNo,
         Table: p.tableNo || "",
+        OrderedBy: p.orderedBy || "",
+        ServedBy: p.servedBy || "",
         Amount: p.amount,
+        Tip: p.tipAmount ?? 0,
         ReceivedBy: p.collectedBy.name,
         Role: p.collectedBy.roleName,
         HandedTo: p.handedTo?.name ?? "",
@@ -157,6 +161,10 @@ export function PaymentsPage() {
           <span>{t("payments.totalReceived")}</span>
           <strong>{s ? money(s.total) : "—"}</strong>
           <span className="tiny">{t("payments.nPayments", { n: s?.count ?? 0 })}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("payments.tipsTotal")}</span>
+          <strong>{s ? money(s.tips ?? 0) : "—"}</strong>
         </div>
         <div className="panel stat">
           <span>{t("payments.keptCashier")}</span>
@@ -254,7 +262,9 @@ export function PaymentsPage() {
                 <th>{t("common.time")}</th>
                 <th>{t("payments.bill")}</th>
                 <th>{t("common.table")}</th>
+                <th>{t("payments.orderedBy")}</th>
                 <th>{t("common.amount")}</th>
+                <th>{t("payments.tip")}</th>
                 <th>{t("payments.receivedBy")}</th>
                 <th>{t("payments.handedTo")}</th>
                 <th>{t("common.status")}</th>
@@ -268,6 +278,12 @@ export function PaymentsPage() {
                     <td>{stamp(p.createdAt)}</td>
                     <td>#{p.orderNo}</td>
                     <td>{p.tableNo || "—"}</td>
+                    <td className="tiny">
+                      {p.orderedBy || "—"}
+                      {p.servedBy && p.servedBy !== p.orderedBy && (
+                        <div className="muted">{t("payments.servedBy")} {p.servedBy}</div>
+                      )}
+                    </td>
                     <td>
                       <strong>{money(p.amount)}</strong>
                       {p.amount < p.orderTotal && (
@@ -277,6 +293,7 @@ export function PaymentsPage() {
                         </span>
                       )}
                     </td>
+                    <td>{(p.tipAmount ?? 0) > 0 ? money(p.tipAmount ?? 0) : "—"}</td>
                     <td>
                       <strong>{p.collectedBy.name}</strong> <span className="tiny muted">{p.collectedBy.roleName}</span>
                     </td>

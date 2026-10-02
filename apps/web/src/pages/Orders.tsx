@@ -5,6 +5,7 @@ import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
 import { BillPreview, printBill, type BillOrder } from "../components/BillPreview";
 import { KotPreviewModal, type KotTarget } from "../components/KotPreviewModal";
+import { PickServerModal } from "../components/PickServerModal";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 import { serverPrint, useKotPreviewPref } from "../printing";
@@ -60,6 +61,7 @@ export function OrdersPage() {
   const [orderQ, setOrderQ] = useState("");
   const [menuPage, setMenuPage] = useState(1);
   const [orderPage, setOrderPage] = useState(1);
+  const [pickServer, setPickServer] = useState(false);
 
   async function load() {
     try {
@@ -182,6 +184,11 @@ export function OrdersPage() {
       toast.push(t("orders.addItemsFirst"), "err");
       return;
     }
+    setPickServer(true);
+  }
+
+  async function placeWithServer(serverName: string) {
+    setPickServer(false);
     setBusy(true);
     const preview = previewFirst && can("print.kot");
     try {
@@ -191,6 +198,7 @@ export function OrdersPage() {
           tableNo: tableNo || undefined,
           notes: notes || undefined,
           printKot: !preview,
+          servedByName: serverName,
           items: cart.map((c) => ({
             menuItemId: c.menuItemId,
             quantity: c.quantity,
@@ -213,6 +221,8 @@ export function OrdersPage() {
           tableNo: created.tableNo,
           paymentStatus: created.paymentStatus,
           total: Number(created.total),
+          waiter: created.waiter,
+          servedBy: (created as Order & { servedBy?: string | null }).servedBy ?? serverName,
           items: created.items.map((i) => ({
             name: i.name,
             quantity: Number(i.quantity),
@@ -497,6 +507,12 @@ export function OrdersPage() {
           </>
         )}
       </Modal>
+      <PickServerModal
+        open={pickServer}
+        orderTakenBy={user?.name}
+        onClose={() => setPickServer(false)}
+        onPick={(name) => void placeWithServer(name)}
+      />
       <KotPreviewModal target={kot} onClose={closeKot} />
     </div>
   );

@@ -27,7 +27,11 @@ type Order = BillOrder & {
   id: string;
   status: string;
   paidAmount: number;
+  tipAmount?: number;
   waiter?: string | null;
+  orderedBy?: { id?: string; name: string; roleCode?: string; roleName: string } | null;
+  servedBy?: string | null;
+  servedByName?: string | null;
   billRequestedAt?: string | null;
   payments?: OrderPayment[];
 };
@@ -258,9 +262,11 @@ export function BillsPage() {
               <tr>
                 <th>#</th>
                 <th>{t("common.table")}</th>
+                <th>{t("bills.orderedBy")}</th>
                 <th>{t("common.items")}</th>
                 <th>{t("bills.kitchen")}</th>
                 <th>{t("common.total")}</th>
+                <th>{t("bills.tip")}</th>
                 <th>{t("bills.pay")}</th>
                 <th />
               </tr>
@@ -275,6 +281,16 @@ export function BillsPage() {
                       <span className="badge pending" style={{ marginLeft: "0.35rem" }}>
                         {t("bills.billRequested")}
                       </span>
+                    )}
+                  </td>
+                  <td className="tiny">
+                    {o.orderedBy
+                      ? `${o.orderedBy.name} (${o.orderedBy.roleName})`
+                      : o.waiter || "—"}
+                    {(o.servedByName || o.servedBy) && (
+                      <div className="muted">
+                        {t("bills.servedBy")} {o.servedByName || o.servedBy}
+                      </div>
                     )}
                   </td>
                   <td>
@@ -294,6 +310,7 @@ export function BillsPage() {
                     </span>
                   </td>
                   <td>{money(o.total)}</td>
+                  <td>{(o.tipAmount ?? 0) > 0 ? money(o.tipAmount ?? 0) : "—"}</td>
                   <td>
                     <span
                       className={`badge ${

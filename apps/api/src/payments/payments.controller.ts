@@ -26,6 +26,12 @@ export class PaymentsController {
     return this.payments.cashiers();
   }
 
+  @Get("servers")
+  @RequirePerms("order.create", "order.pay", "bill.view")
+  servers() {
+    return this.payments.servers();
+  }
+
   /** The cash keeper's own record: payments they took plus cash handed to them. */
   @Get("mine")
   @RequirePerms("cash.keep")

@@ -10,8 +10,14 @@ export type BillOrder = {
   tableNo?: string | null;
   paymentStatus: string;
   total: number;
+  tipAmount?: number;
+  paidAmount?: number;
   createdAt?: string;
   cashier?: string | null;
+  waiter?: string | null;
+  orderedBy?: { id?: string; name: string; roleCode?: string; roleName: string } | null;
+  servedBy?: string | null;
+  servedByName?: string | null;
   items: {
     name: string;
     quantity: number;
@@ -34,16 +40,23 @@ export function BillPreview({
   const dateLocale = locale === "ur" ? "ur-PK" : "en-PK";
   const { brand, logoSrc } = useBrand();
   const when = order.createdAt ? new Date(order.createdAt) : new Date();
+  const tip = order.tipAmount ?? 0;
+  const grand = order.total + tip;
+  const orderedLabel = order.orderedBy
+    ? `${order.orderedBy.name} (${order.orderedBy.roleName})`
+    : order.waiter || null;
+  const servedLabel = (order.servedByName || order.servedBy || "").trim() || null;
 
   const qrPayload = useMemo(() => {
     return JSON.stringify({
       h: brand.name,
       o: order.orderNo,
-      t: order.total,
+      t: grand,
+      tip,
       p: order.paymentStatus,
       d: when.toISOString().slice(0, 10),
     });
-  }, [order.orderNo, order.total, order.paymentStatus, when, brand.name]);
+  }, [order.orderNo, grand, tip, order.paymentStatus, when, brand.name]);
 
   return (
     <div className="receipt-wrap">
@@ -77,6 +90,16 @@ export function BillPreview({
               minute: "2-digit",
             })}
           </div>
+          {orderedLabel && (
+            <div>
+              {t("bill.orderedBy")} {orderedLabel}
+            </div>
+          )}
+          {servedLabel && (
+            <div>
+              {t("bill.servedBy")} {servedLabel}
+            </div>
+          )}
           {order.cashier && (
             <div>
               {t("bill.cashier")} {order.cashier}
@@ -119,8 +142,18 @@ export function BillPreview({
         {mode === "customer" ? (
           <>
             <div className="receipt-total">
-              <span>{t("bill.total")}</span>
+              <span>{t("bill.subtotal")}</span>
               <strong>{money(order.total)}</strong>
+            </div>
+            {tip > 0 && (
+              <div className="receipt-total">
+                <span>{t("bill.tip")}</span>
+                <strong>{money(tip)}</strong>
+              </div>
+            )}
+            <div className="receipt-total">
+              <span>{t("bill.total")}</span>
+              <strong>{money(grand)}</strong>
             </div>
             <div className="receipt-pay">
               {t("bill.payment")} {ts(order.paymentStatus)}

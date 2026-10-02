@@ -12,7 +12,7 @@ import { OrdersService } from "./orders.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
-import { AddItemsDto, CreateOrderDto, PayOrderDto, PrintKotDto, UpdateStatusDto } from "./dto";
+import { AddItemsDto, CreateOrderDto, PayOrderDto, PrintKotDto, UpdateOrderDto, UpdateStatusDto } from "./dto";
 
 @Controller("orders")
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -46,6 +46,12 @@ export class OrdersController {
   @RequirePerms("order.addItems")
   addItems(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: AddItemsDto) {
     return this.orders.addItems(user, id, dto);
+  }
+
+  @Patch(":id")
+  @RequirePerms("order.create", "order.addItems", "order.pay")
+  updateMeta(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: UpdateOrderDto) {
+    return this.orders.updateMeta(user, id, dto);
   }
 
   @Post(":id/request-bill")

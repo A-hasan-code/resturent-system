@@ -36,6 +36,24 @@ type UsageRow = {
   createdAt: string;
 };
 
+type TipRow = {
+  userId: string;
+  name: string;
+  roleCode: string;
+  roleName: string;
+  tip: number;
+  shares: number;
+};
+
+type StaffOrderRow = {
+  userId: string;
+  name: string;
+  roleCode: string;
+  roleName: string;
+  orders: number;
+  amount: number;
+};
+
 type Stats = {
   role: string;
   staleMinutes: number;
@@ -64,6 +82,13 @@ type Stats = {
   kitchenQueue: DashOrder[];
   newOrders: DashOrder[];
   unpaidOrders: DashOrder[];
+  tipsToday?: number;
+  tipsCollectedToday?: number;
+  myTipToday?: number;
+  myOrdersToday?: number;
+  myServedToday?: number;
+  tipBoard?: TipRow[];
+  staffOrdersToday?: StaffOrderRow[];
 };
 
 function waitLabel(
@@ -114,7 +139,9 @@ export function DashboardPage() {
           ? t("dash.titleStore")
           : role === "MANAGER"
             ? t("dash.titleManager")
-            : t("dash.titleAdmin");
+            : role === "WAITER"
+              ? t("dash.titleWaiter")
+              : t("dash.titleAdmin");
 
   return (
     <div>
@@ -135,7 +162,9 @@ export function DashboardPage() {
       {role === "CASHIER" && <CashierDash data={data} can={can} />}
       {role === "KITCHEN" && <KitchenDash data={data} can={can} />}
       {role === "STORE" && <StoreDash data={data} can={can} />}
-      {!["ADMIN", "CASHIER", "KITCHEN", "STORE"].includes(role) && (
+      {role === "WAITER" && <WaiterDash data={data} can={can} />}
+      {role === "MANAGER" && <ManagerDash data={data} can={can} />}
+      {!["ADMIN", "CASHIER", "KITCHEN", "STORE", "WAITER", "MANAGER"].includes(role) && (
         <AdminDash data={data} can={can} />
       )}
     </div>
@@ -202,7 +231,16 @@ function AdminDash({
             {t("dash.hintProfit")}
           </span>
         </div>
+        <div className="panel stat">
+          <span>{t("dash.tipsToday")}</span>
+          <strong>{data ? money(data.tipsToday ?? 0) : "—"}</strong>
+          <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
+            {t("dash.hintTips")}
+          </span>
+        </div>
       </div>
+
+      <TipAndStaffPanels data={data} />
 
       <div className="stats">
         <div className="panel stat">
@@ -305,7 +343,13 @@ function CashierDash({
             {t("dash.hintNOrders", { n: data?.ordersToday ?? 0 })} · {t("dash.hintOrderAmount")}
           </span>
         </div>
+        <div className="panel stat">
+          <span>{t("dash.tipsToday")}</span>
+          <strong>{data ? money(data.tipsToday ?? data.tipsCollectedToday ?? 0) : "—"}</strong>
+        </div>
       </div>
+
+      <TipAndStaffPanels data={data} />
 
       <div className="stats">
         <div className="panel stat">
@@ -505,6 +549,187 @@ function StoreDash({
 
       <Shortcuts can={can} focus={["store"]} />
     </>
+  );
+}
+
+function WaiterDash({
+  data,
+  can,
+}: {
+  data: Stats | null;
+  can: (...p: string[]) => boolean;
+}) {
+  const t = useT();
+  return (
+    <>
+      <div className="stats">
+        <div className="panel stat">
+          <span>{t("dash.myTipToday")}</span>
+          <strong>{data ? money(data.myTipToday ?? data.tipsToday ?? 0) : "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.myOrdersToday")}</span>
+          <strong>{data?.myOrdersToday ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.myServedToday")}</span>
+          <strong>{data?.myServedToday ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.readyToServe")}</span>
+          <strong style={{ color: (data?.ready ?? 0) ? "var(--ok)" : undefined }}>
+            {data?.ready ?? "—"}
+          </strong>
+        </div>
+      </div>
+
+      <div className="stats">
+        <div className="panel stat">
+          <span>{t("dash.pendingKitchen")}</span>
+          <strong>{data?.pendingKitchen ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.preparing")}</span>
+          <strong>{data?.preparing ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.ready")}</span>
+          <strong>{data?.ready ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.completed")}</span>
+          <strong>{data?.completed ?? "—"}</strong>
+        </div>
+      </div>
+
+      <TipAndStaffPanels data={data} personal />
+      <Shortcuts can={can} focus={["orders"]} />
+    </>
+  );
+}
+
+function ManagerDash({
+  data,
+  can,
+}: {
+  data: Stats | null;
+  can: (...p: string[]) => boolean;
+}) {
+  const t = useT();
+  return (
+    <>
+      <StaleAlert
+        orders={data?.staleOrders ?? []}
+        minutes={data?.staleMinutes ?? 10}
+        link="/kitchen"
+        linkLabel={t("dash.openKitchen")}
+      />
+
+      <div className="stats">
+        <div className="panel stat">
+          <span>{t("dash.ordersToday")}</span>
+          <strong>{data?.ordersToday ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.orderAmountToday")}</span>
+          <strong>{data ? money(data.orderAmountToday ?? data.salesToday ?? 0) : "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.tipsToday")}</span>
+          <strong>{data ? money(data.tipsToday ?? 0) : "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.myTipToday")}</span>
+          <strong>{data ? money(data.myTipToday ?? 0) : "—"}</strong>
+        </div>
+      </div>
+
+      <TipAndStaffPanels data={data} />
+
+      <div className="dash-grid">
+        <OrderList
+          title={t("dash.activeKitchen")}
+          empty={t("dash.emptyKitchen")}
+          orders={(data?.kitchenQueue ?? []).slice(0, 8)}
+          showTotal
+        />
+        <OrderList
+          title={t("dash.unpaidBills")}
+          empty={t("dash.emptyUnpaid")}
+          orders={(data?.unpaidOrders ?? []).slice(0, 8)}
+          showTotal
+        />
+      </div>
+
+      <Shortcuts can={can} />
+    </>
+  );
+}
+
+function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: boolean }) {
+  const t = useT();
+  const tips = data?.tipBoard ?? [];
+  const staff = data?.staffOrdersToday ?? [];
+  if (!tips.length && !staff.length) return null;
+  return (
+    <div className="dash-grid" style={{ marginBottom: "1rem" }}>
+      <div className="panel panel-pad">
+        <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>
+          {personal ? t("dash.myTipBreakdown") : t("dash.tipBoard")}
+        </h2>
+        {!tips.length ? (
+          <div className="empty">{t("dash.emptyTips")}</div>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>{t("common.name")}</th>
+                <th>{t("common.role")}</th>
+                <th>{t("dash.tip")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tips.map((r) => (
+                <tr key={r.userId}>
+                  <td>{r.name}</td>
+                  <td>{r.roleName || r.roleCode}</td>
+                  <td>{money(r.tip)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {!personal && (
+        <div className="panel panel-pad">
+          <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>{t("dash.staffOrdersToday")}</h2>
+          {!staff.length ? (
+            <div className="empty">{t("dash.emptyStaffOrders")}</div>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("common.name")}</th>
+                  <th>{t("common.role")}</th>
+                  <th>{t("dash.ordersCol")}</th>
+                  <th>{t("common.amount")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {staff.map((r) => (
+                  <tr key={r.userId}>
+                    <td>{r.name}</td>
+                    <td>{r.roleName || r.roleCode}</td>
+                    <td>{r.orders}</td>
+                    <td>{money(r.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

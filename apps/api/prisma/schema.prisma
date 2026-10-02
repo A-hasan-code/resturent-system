@@ -142,6 +142,7 @@ model User {
   itemsAdded   OrderItem[] @relation("OrderItemAddedBy")
   paymentsCollected Payment[] @relation("PaymentCollectedBy")
   cashReceived      Payment[] @relation("PaymentHandedTo")
+  tipShares         TipShare[]
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
@@ -242,17 +243,23 @@ model Order {
   subtotal      Decimal         @default(0) @db.Decimal(14, 2)
   total         Decimal         @default(0) @db.Decimal(14, 2)
   paidAmount    Decimal         @default(0) @db.Decimal(14, 2)
+  /// Guest tip — tracked separately from food sale (total).
+  tipAmount     Decimal         @default(0) @db.Decimal(14, 2)
   costTotal     Decimal         @default(0) @db.Decimal(14, 2)
   cashierId     String?
   cashier       User?           @relation("OrderCashier", fields: [cashierId], references: [id])
+  /// Who took / placed the order (waiter, manager, or cashier).
   waiterId      String?
   waiter        User?           @relation("OrderWaiter", fields: [waiterId], references: [id])
+  /// Free-text name of who served the table (not a system user).
+  servedByName  String?
   kotRounds     Int             @default(1)
   billRequestedAt DateTime?
   items         OrderItem[]
   stockMoves    StockMovement[]
   printJobs     PrintJob[]
   payments      Payment[]
+  tipShares     TipShare[]
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
 }
@@ -264,6 +271,8 @@ model Payment {
   orderId       String
   order         Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
   amount        Decimal   @db.Decimal(14, 2)
+  /// Tip collected with this payment (not part of order.total / amount).
+  tipAmount     Decimal   @default(0) @db.Decimal(14, 2)
   collectedById String
   collectedBy   User      @relation("PaymentCollectedBy", fields: [collectedById], references: [id])
   handedToId    String?
@@ -273,6 +282,23 @@ model Payment {
 
   @@index([createdAt])
   @@index([handedToId, confirmedAt])
+}
+
+/// Tip allocated to a staff member for an order (split by restaurant tip policy).
+model TipShare {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  amount    Decimal  @db.Decimal(14, 2)
+  /// ORDER_TAKER | SERVER | POOL
+  kind      String
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@index([orderId])
 }
 
 model OrderItem {
