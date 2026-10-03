@@ -55,25 +55,29 @@ export function KotPreviewModal({ target, onClose }: { target: KotTarget | null;
   return (
     <Modal open={!!target} title={title} onClose={onClose}>
       {!preview ? (
-        <div className="empty">
-          <BrandLoader compact label={t("kot.loading")} />
+        <div className="modal-scroll">
+          <div className="empty">
+            <BrandLoader compact label={t("kot.loading")} />
+          </div>
         </div>
       ) : (
         <>
-          <pre className="print-preview kot-preview">{preview.text}</pre>
-          <div className="row" style={{ marginTop: "1rem" }}>
-            <button type="button" className="btn" disabled={busy} onClick={() => void print()}>
-              {busy ? t("kot.sending") : target?.reprint ? t("kot.reprint") : t("kot.print")}
-            </button>
+          <div className="modal-scroll">
+            <pre className="print-preview kot-preview">{preview.text}</pre>
+            {!target?.reprint && (
+              <p className="tiny muted" style={{ marginBottom: 0 }}>
+                {t("kot.alreadyOnScreen")}
+              </p>
+            )}
+          </div>
+          <div className="form-footer">
             <button type="button" className="btn ghost" disabled={busy} onClick={onClose}>
               {target?.reprint ? t("common.close") : t("kot.doneNoPrint")}
             </button>
+            <button type="button" className="btn" disabled={busy} onClick={() => void print()}>
+              {busy ? t("kot.sending") : target?.reprint ? t("kot.reprint") : t("kot.print")}
+            </button>
           </div>
-          {!target?.reprint && (
-            <p className="tiny muted" style={{ marginBottom: 0 }}>
-              {t("kot.alreadyOnScreen")}
-            </p>
-          )}
         </>
       )}
     </Modal>

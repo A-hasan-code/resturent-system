@@ -5,6 +5,7 @@ import { useToast } from "../toast";
 import { useSocketEvent } from "../socket";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
+import { DateField } from "../components/DateField";
 import { downloadExcelCsv } from "../csv";
 import type { PaymentRow } from "../components/CashHandovers";
 
@@ -144,13 +145,13 @@ export function PaymentsPage() {
         <div className="row">
           <div className="field" style={{ margin: 0 }}>
             <label htmlFor="pay-from">{t("payments.from")}</label>
-            <input id="pay-from" type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} />
+            <DateField id="pay-from" value={from} max={to || undefined} onChange={setFrom} />
           </div>
           <div className="field" style={{ margin: 0 }}>
             <label htmlFor="pay-to">{t("payments.to")}</label>
-            <input id="pay-to" type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} />
+            <DateField id="pay-to" value={to} min={from || undefined} onChange={setTo} />
           </div>
-          <button type="button" className="btn ghost sm" style={{ alignSelf: "flex-end" }} onClick={exportCsv}>
+          <button type="button" className="btn ghost" style={{ alignSelf: "flex-end", minHeight: "2.6rem" }} onClick={exportCsv}>
             {t("common.excel")}
           </button>
         </div>
@@ -185,6 +186,7 @@ export function PaymentsPage() {
         <div className="grid-2">
           <div className="panel panel-pad">
             <h3 style={{ marginTop: 0 }}>{t("payments.byStaff")}</h3>
+            <div className="table-wrap">
             <table>
               <thead>
                 <tr>
@@ -198,7 +200,8 @@ export function PaymentsPage() {
                 {byStaff.map((r) => (
                   <tr key={r.name}>
                     <td>
-                      <strong>{r.name}</strong> <span className="tiny muted">{r.role}</span>
+                      <strong>{r.name}</strong>
+                      <div className="tiny muted">{r.role}</div>
                     </td>
                     <td>{money(r.collected)}</td>
                     <td>{r.handedOver ? money(r.handedOver) : "—"}</td>
@@ -207,10 +210,12 @@ export function PaymentsPage() {
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
           <div className="panel panel-pad">
             <h3 style={{ marginTop: 0 }}>{t("payments.cashToCashiers")}</h3>
             {received.length ? (
+              <div className="table-wrap">
               <table>
                 <thead>
                   <tr>
@@ -231,6 +236,7 @@ export function PaymentsPage() {
                   ))}
                 </tbody>
               </table>
+              </div>
             ) : (
               <div className="empty">{t("payments.noHandovers")}</div>
             )}
@@ -256,6 +262,7 @@ export function PaymentsPage() {
         {!rows.length ? (
           <div className="empty">{t("payments.empty")}</div>
         ) : (
+          <div className="table-wrap wide">
           <table>
             <thead>
               <tr>
@@ -309,6 +316,7 @@ export function PaymentsPage() {
               })}
             </tbody>
           </table>
+          </div>
         )}
       </div>
       <Pagination page={page} pageSize={PAGE_SIZE} total={rows.length} onChange={setPage} />

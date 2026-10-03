@@ -3,6 +3,7 @@ import { api, money } from "../api";
 import { useAuth } from "../auth";
 import { useT } from "../i18n";
 import { useSocketEvent } from "../socket";
+import { DateField } from "./DateField";
 import type { PaymentRow } from "./CashHandovers";
 
 type Result = {
@@ -62,7 +63,7 @@ export function CashRecord() {
         </p>
         <div className="field" style={{ margin: 0 }}>
           <label htmlFor="cash-day">{t("cash.day")}</label>
-          <input id="cash-day" type="date" value={day} max={isoDay(new Date())} onChange={(e) => setDay(e.target.value)} />
+          <DateField id="cash-day" value={day} max={isoDay(new Date())} onChange={setDay} />
         </div>
       </div>
 

@@ -77,6 +77,20 @@ export function LoginPage() {
             <li>{t("login.point3")}</li>
           </ul>
         </div>
+        <aside className="login-vendor">
+          <span>
+            <em>company:</em> Pixalbotics
+          </span>
+          <a href="mailto:pixalbotics@gmail.com">
+            <em>email:</em> pixalbotics@gmail.com
+          </a>
+          <a href="https://wa.me/923431743916" target="_blank" rel="noopener noreferrer">
+            <em>whatsapp:</em> +92 343 1743916
+          </a>
+          <a href="https://www.pixalbotic.com/" target="_blank" rel="noopener noreferrer">
+            <em>url:</em> www.pixalbotic.com
+          </a>
+        </aside>
       </aside>
 
       <main className="login-panel">
@@ -109,23 +123,18 @@ export function LoginPage() {
           {mode === "pin" && staff?.length ? <PinLogin staff={staff} /> : <PasswordLogin />}
 
           <footer className="login-credit">
-            <span>{t("login.builtBy")}</span>
-            <a
-              href="https://www.pixalbotics.com/"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Pixalbotics
-            </a>
+            <span>
+              {t("login.poweredBy")}{" "}
+              <a
+                href="https://www.pixalbotics.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Pixalbotics
+              </a>
+            </span>
             <span className="login-credit-sep">·</span>
-            <a
-              href="https://www.pixalbotics.com/"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="login-credit-site"
-            >
-              www.pixalbotics.com
-            </a>
+            <span className="login-credit-copy">{t("login.copyright", { year: 2026 })}</span>
           </footer>
         </div>
       </main>

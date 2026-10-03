@@ -4,6 +4,7 @@ import { useT } from "../i18n";
 import { useToast } from "../toast";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
+import { DateField } from "../components/DateField";
 
 type Day = {
   date: string;
@@ -375,11 +376,11 @@ export function AuditPage() {
           <div className="audit-filter-grid">
             <div className="field" style={{ margin: 0 }}>
               <label htmlFor="audit-from">{t("payments.from")}</label>
-              <input id="audit-from" type="date" value={from} max={to || today} onChange={(e) => setFrom(e.target.value)} />
+              <DateField id="audit-from" value={from} max={to || today} onChange={setFrom} />
             </div>
             <div className="field" style={{ margin: 0 }}>
               <label htmlFor="audit-to">{t("payments.to")}</label>
-              <input id="audit-to" type="date" value={to} min={from || undefined} max={today} onChange={(e) => setTo(e.target.value)} />
+              <DateField id="audit-to" value={to} min={from || undefined} max={today} onChange={setTo} />
             </div>
             <div className="field" style={{ margin: 0 }}>
               <label htmlFor="audit-month">{t("audit.jumpMonth")}</label>

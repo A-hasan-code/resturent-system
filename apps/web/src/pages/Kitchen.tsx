@@ -165,7 +165,7 @@ export function KitchenPage() {
                   ))}
                 </ul>
                 {can("kitchen.update") && (
-                  <div className="row">
+                  <div className="row kitchen-actions">
                     {can("print.kot") && (
                       <button type="button" className="btn ghost sm" onClick={() => void reprint(o.id)}>
                         {t("kitchen.slip")}

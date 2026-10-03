@@ -257,6 +257,7 @@ export function BillsPage() {
         {!shown.length ? (
           <div className="empty">{t("bills.noMatch")}</div>
         ) : (
+          <div className="table-wrap wide">
           <table>
             <thead>
               <tr>
@@ -338,6 +339,7 @@ export function BillsPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
@@ -357,29 +359,31 @@ export function BillsPage() {
       >
         {selected && (
           <>
-            <BillPreview order={selected} mode="customer" />
-            {!!selected.payments?.length && (
-              <ul className="payment-log no-print">
-                {selected.payments.map((p) => (
-                  <li key={p.id}>
-                    <strong>{money(p.amount)}</strong> {t("bills.receivedBy")}{" "}
-                    <strong>{p.collectedBy}</strong> · {stamp(p.createdAt)}
-                    {p.handedTo && (
-                      <>
-                        {" "}
-                        → {t("bills.handedTo")} <strong>{p.handedTo}</strong>{" "}
-                        {p.confirmedAt ? (
-                          <span className="badge paid">{t("bills.confirmed")}</span>
-                        ) : (
-                          <span className="badge pending">{t("bills.notConfirmed")}</span>
-                        )}
-                      </>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="row no-print" style={{ marginTop: "1rem" }}>
+            <div className="modal-scroll">
+              <BillPreview order={selected} mode="customer" />
+              {!!selected.payments?.length && (
+                <ul className="payment-log no-print">
+                  {selected.payments.map((p) => (
+                    <li key={p.id}>
+                      <strong>{money(p.amount)}</strong> {t("bills.receivedBy")}{" "}
+                      <strong>{p.collectedBy}</strong> · {stamp(p.createdAt)}
+                      {p.handedTo && (
+                        <>
+                          {" "}
+                          → {t("bills.handedTo")} <strong>{p.handedTo}</strong>{" "}
+                          {p.confirmedAt ? (
+                            <span className="badge paid">{t("bills.confirmed")}</span>
+                          ) : (
+                            <span className="badge pending">{t("bills.notConfirmed")}</span>
+                          )}
+                        </>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="form-footer no-print">
               {can("print.bill") && (
                 <button type="button" className="btn" onClick={() => void printOnServer(selected.id)}>
                   {t("common.printOnPrinter")}

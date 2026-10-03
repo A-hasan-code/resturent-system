@@ -45,6 +45,7 @@ export function PickServerModal({
   return (
     <Modal open={open} title={t("serve.title")} onClose={onClose}>
       <form onSubmit={submit}>
+        <div className="modal-scroll">
         <p className="muted" style={{ marginTop: 0 }}>
           {t("serve.hint")}
         </p>
@@ -68,6 +69,7 @@ export function PickServerModal({
             maxLength={80}
             required
           />
+        </div>
         </div>
         <div className="form-footer">
           <button type="button" className="btn ghost" onClick={onClose}>

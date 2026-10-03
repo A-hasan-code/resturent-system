@@ -51,6 +51,8 @@ export const en = {
   "common.close": "Close",
   "common.search": "Search",
   "common.clearSearch": "Clear search",
+  "common.clear": "Clear",
+  "common.today": "Today",
   "common.confirm": "Confirm",
   "common.retry": "Retry",
   "common.refresh": "Refresh",
@@ -127,6 +129,8 @@ export const en = {
   "login.ok": "OK",
   "login.digitsEntered": "{n} digits entered",
   "login.builtBy": "Built by",
+  "login.poweredBy": "Powered by",
+  "login.copyright": "© {year}",
   "login.usernamePh": "e.g. admin",
   "login.heroAlt": "Fine dining hotel restaurant",
 

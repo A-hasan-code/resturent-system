@@ -286,6 +286,7 @@ export function MenuPage() {
         }}
       >
         <form onSubmit={submit}>
+          <div className="modal-scroll">
           <div className="field">
             <label>{t("common.name")}</label>
             <input
@@ -345,6 +346,7 @@ export function MenuPage() {
               ))}
             </select>
           </div>
+          </div>
           <div className="form-actions">
             <button className="btn" type="submit" disabled={busy}>
               {busy
@@ -369,6 +371,7 @@ export function MenuPage() {
 
       <Modal open={catOpen} title={t("menu.addCatTitle")} onClose={() => setCatOpen(false)}>
         <form onSubmit={addCategory}>
+          <div className="modal-scroll">
           <div className="field">
             <label>{t("menu.catName")}</label>
             <input
@@ -378,17 +381,20 @@ export function MenuPage() {
               required
             />
           </div>
-          <button className="btn" type="submit" disabled={busy}>
-            {t("menu.saveCat")}
-          </button>
+          <div className="chips" style={{ marginTop: "1rem" }}>
+            {cats.map((c) => (
+              <span key={c.id} className="chip active">
+                {c.name}
+              </span>
+            ))}
+          </div>
+          </div>
+          <div className="form-actions">
+            <button className="btn" type="submit" disabled={busy}>
+              {t("menu.saveCat")}
+            </button>
+          </div>
         </form>
-        <div className="chips" style={{ marginTop: "1rem" }}>
-          {cats.map((c) => (
-            <span key={c.id} className="chip active">
-              {c.name}
-            </span>
-          ))}
-        </div>
       </Modal>
     </div>
   );

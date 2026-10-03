@@ -711,6 +711,7 @@ export function StorePage() {
 
       <Modal open={!!moveOpen} title={moveTitle} onClose={() => setMoveOpen(null)}>
         <form onSubmit={submitMove}>
+          <div className="modal-scroll">
           <div className="field">
             <label>{t("store.selectItem")}</label>
             <input
@@ -785,6 +786,7 @@ export function StorePage() {
               placeholder={t("store.notePh")}
             />
           </div>
+          </div>
           <div className="form-actions">
             <button className="btn" type="submit" disabled={busy || !itemId}>
               {busy ? t("common.saving") : t("common.save")}
@@ -795,6 +797,7 @@ export function StorePage() {
 
       <Modal open={addOpen} title={t("store.addTitle")} onClose={() => setAddOpen(false)}>
         <form onSubmit={addItem}>
+          <div className="modal-scroll">
           <div className="field">
             <label>{t("common.name")}</label>
             <input value={newName} onChange={(e) => setNewName(e.target.value)} required />
@@ -835,6 +838,7 @@ export function StorePage() {
               <input value={newRate} onChange={(e) => setNewRate(e.target.value)} required />
             </div>
           </div>
+          </div>
           <div className="form-actions">
             <button className="btn" type="submit" disabled={busy}>
               {t("store.addItemBtn")}
@@ -856,6 +860,7 @@ export function StorePage() {
         }}
       >
         <form className="form" onSubmit={saveRate}>
+          <div className="modal-scroll">
           {editItem && (
             <p className="muted">
               {editItem.category} · {t("store.currentStock")} {editItem.quantityOnHand}{" "}
@@ -885,6 +890,7 @@ export function StorePage() {
                 required
               />
             </div>
+          </div>
           </div>
           <div className="form-actions">
             <button className="btn" type="submit" disabled={busy}>
