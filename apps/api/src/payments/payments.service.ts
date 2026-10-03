@@ -47,19 +47,29 @@ export class PaymentsService {
   /** People a manager can hand collected cash to. */
   async cashiers() {
     const users = await this.prisma.user.findMany({
-      where: { active: true, role: { permissions: { some: { permission: { code: "cash.keep" } } } } },
+      where: {
+        active: true,
+        role: {
+          OR: [
+            { code: { in: ["MAIN_CASHIER", "CASHIER"] } },
+            { permissions: { some: { permission: { code: "cash.keep" } } } },
+          ],
+        },
+      },
       select: { id: true, name: true, role: { select: { code: true, name: true } } },
       orderBy: { name: "asc" },
     });
+    const rank = (code: string) => (code === "MAIN_CASHIER" ? 0 : code === "CASHIER" ? 1 : 2);
     return users
-      .sort((a, b) => Number(a.role.code === "ADMIN") - Number(b.role.code === "ADMIN"))
-      .map((u) => ({ id: u.id, name: u.name, roleName: u.role.name }));
+      .filter((u) => u.role.code !== "ADMIN")
+      .sort((a, b) => rank(a.role.code) - rank(b.role.code) || a.name.localeCompare(b.name))
+      .map((u) => ({ id: u.id, name: u.name, roleCode: u.role.code, roleName: u.role.name }));
   }
 
   /** Floor staff who can be marked as table servers. */
   async servers() {
     const users = await this.prisma.user.findMany({
-      where: { active: true, role: { code: { in: ["WAITER", "MANAGER", "CASHIER"] } } },
+      where: { active: true, role: { code: { in: ["WAITER", "SUPERVISOR", "CASHIER", "MAIN_CASHIER"] } } },
       select: { id: true, name: true, role: { select: { code: true, name: true } } },
       orderBy: { name: "asc" },
     });

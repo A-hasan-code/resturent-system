@@ -19,6 +19,7 @@ export type BillOrder = {
   servedBy?: string | null;
   servedByName?: string | null;
   items: {
+    id?: string;
     name: string;
     quantity: number;
     sellUnit: string;
@@ -156,7 +157,13 @@ export function BillPreview({
               <strong>{money(grand)}</strong>
             </div>
             <div className="receipt-pay">
-              {t("bill.payment")} {ts(order.paymentStatus)}
+              {order.paymentStatus === "PAID" ? (
+                <strong>*** {ts("PAID")} ***</strong>
+              ) : (
+                <>
+                  {t("bill.payment")} {ts(order.paymentStatus)}
+                </>
+              )}
             </div>
             <div className="receipt-rule dashed" />
             <div className="receipt-qr">

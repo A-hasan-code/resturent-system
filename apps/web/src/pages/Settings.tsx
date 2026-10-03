@@ -58,7 +58,17 @@ type Job = {
   createdAt: string;
 };
 
-type Table = { id: string; name: string; area: string | null; seats: number; sortOrder: number; active: boolean };
+type Partition = { id: string; name: string; sortOrder: number; active?: boolean };
+type Table = {
+  id: string;
+  name: string;
+  area: string | null;
+  seats: number;
+  sortOrder: number;
+  active: boolean;
+  partitionId?: string;
+  partition?: { id: string; name: string } | null;
+};
 type Backup = { file: string; size: number; createdAt: string; auto: boolean; kind?: "daily" | "monthly" | "manual" | "safety" };
 
 const BACKUP_KIND_KEY: Record<string, MessageKey> = {
@@ -329,11 +339,15 @@ function TipPrintSection() {
   const [billFooter, setBillFooter] = useState("Thank you - Come again!");
   const [kotShowOrderBy, setKotShowOrderBy] = useState(true);
   const [kotFooter, setKotFooter] = useState("");
+  const [perHeadEnabled, setPerHeadEnabled] = useState(true);
+  const [perHeadAmount, setPerHeadAmount] = useState("100");
+  const [perHeadLabel, setPerHeadLabel] = useState("Per head");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     api<{
       tip: { split: string };
+      billing?: { perHead?: { enabled: boolean; amount: number; label: string } };
       print: {
         bill: {
           showOrderBy: boolean;
@@ -354,6 +368,12 @@ function TipPrintSection() {
         setBillFooter(s.print?.bill?.footer || "Thank you - Come again!");
         setKotShowOrderBy(s.print?.kot?.showOrderBy !== false);
         setKotFooter(s.print?.kot?.footer || "");
+        const ph = s.billing?.perHead;
+        if (ph) {
+          setPerHeadEnabled(ph.enabled !== false);
+          setPerHeadAmount(String(ph.amount ?? 100));
+          setPerHeadLabel(ph.label || "Per head");
+        }
       })
       .catch(() => undefined);
   }, []);
@@ -362,6 +382,7 @@ function TipPrintSection() {
     e.preventDefault();
     setBusy(true);
     try {
+      const amount = Math.max(0, Number(perHeadAmount) || 0);
       await api("/system/settings", {
         method: "PATCH",
         body: JSON.stringify({
@@ -373,6 +394,9 @@ function TipPrintSection() {
           billFooter,
           kotShowOrderBy: kotShowOrderBy ? "1" : "0",
           kotFooter,
+          perHeadEnabled: perHeadEnabled ? "1" : "0",
+          perHeadAmount: amount,
+          perHeadLabel: perHeadLabel.trim() || "Per head",
         }),
       });
       toast.push(t("settings.saved"), "ok");
@@ -396,6 +420,43 @@ function TipPrintSection() {
           <option value="ORDER_TAKER">{t("settings.tipOrderTaker")}</option>
           <option value="POOL">{t("settings.tipPool")}</option>
         </select>
+      </div>
+
+      <h3 className="settings-h" style={{ fontSize: "1rem" }}>
+        {t("settings.perHead")}
+      </h3>
+      <p className="muted" style={{ marginTop: 0 }}>
+        {t("settings.perHeadHint")}
+      </p>
+      <label className="switch-row">
+        <input
+          type="checkbox"
+          checked={perHeadEnabled}
+          onChange={(e) => setPerHeadEnabled(e.target.checked)}
+        />
+        <span>{t("settings.perHeadEnabled")}</span>
+      </label>
+      <div className="field">
+        <label htmlFor="per-head-amount">{t("settings.perHeadAmount")}</label>
+        <input
+          id="per-head-amount"
+          type="number"
+          min={0}
+          step={1}
+          value={perHeadAmount}
+          onChange={(e) => setPerHeadAmount(e.target.value)}
+          disabled={!perHeadEnabled}
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="per-head-label">{t("settings.perHeadLabel")}</label>
+        <input
+          id="per-head-label"
+          value={perHeadLabel}
+          onChange={(e) => setPerHeadLabel(e.target.value)}
+          maxLength={40}
+          disabled={!perHeadEnabled}
+        />
       </div>
 
       <h3 className="settings-h" style={{ fontSize: "1rem" }}>
@@ -805,12 +866,20 @@ function TablesSection() {
   const toast = useToast();
   const t = useT();
   const [tables, setTables] = useState<Table[]>([]);
+  const [partitions, setPartitions] = useState<Partition[]>([]);
   const [name, setName] = useState("");
-  const [area, setArea] = useState("");
+  const [partitionId, setPartitionId] = useState("");
+  const [partName, setPartName] = useState("");
 
   const load = useCallback(async () => {
     try {
-      setTables(await api<Table[]>("/tables/all"));
+      const [all, parts] = await Promise.all([
+        api<Table[]>("/tables/all"),
+        api<Partition[]>("/tables/partitions"),
+      ]);
+      setTables(all);
+      setPartitions(parts);
+      setPartitionId((prev) => prev || parts[0]?.id || "");
     } catch (e) {
       toast.push(errMsg(e, t("settings.printersLoadFailed")), "err");
     }
@@ -820,13 +889,42 @@ function TablesSection() {
     void load();
   }, [load]);
 
+  async function addPartition(e: FormEvent) {
+    e.preventDefault();
+    if (!partName.trim()) return;
+    try {
+      const p = await api<Partition>("/tables/partitions", {
+        method: "POST",
+        body: JSON.stringify({ name: partName.trim(), sortOrder: partitions.length }),
+      });
+      setPartName("");
+      setPartitionId(p.id);
+      void load();
+    } catch (err) {
+      toast.push(errMsg(err, t("common.failed")), "err");
+    }
+  }
+
+  async function setPartitionActive(p: Partition, active: boolean) {
+    try {
+      await api(`/tables/partitions/${p.id}`, { method: "PATCH", body: JSON.stringify({ active }) });
+      void load();
+    } catch (err) {
+      toast.push(errMsg(err, t("common.failed")), "err");
+    }
+  }
+
   async function add(e: FormEvent) {
     e.preventDefault();
     if (!name.trim()) return;
+    if (!partitionId) {
+      toast.push(t("settings.pickPartition"), "err");
+      return;
+    }
     try {
       await api("/tables", {
         method: "POST",
-        body: JSON.stringify({ name: name.trim(), area: area.trim() || undefined, sortOrder: tables.length + 1 }),
+        body: JSON.stringify({ name: name.trim(), partitionId, sortOrder: tables.length + 1 }),
       });
       setName("");
       void load();
@@ -847,22 +945,59 @@ function TablesSection() {
   return (
     <div className="panel panel-pad settings-block">
       <h2 className="settings-h">{t("settings.tables")}</h2>
+
+      <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.95rem" }}>{t("settings.partitions")}</h3>
+      <form className="row tables-add" onSubmit={addPartition}>
+        <div className="field" style={{ margin: 0, flex: "1 1 180px" }}>
+          <input
+            value={partName}
+            onChange={(e) => setPartName(e.target.value)}
+            placeholder={t("settings.partitionNamePh")}
+          />
+        </div>
+        <button className="btn ghost" type="submit" style={{ minHeight: "2.6rem" }}>
+          {t("settings.addPartition")}
+        </button>
+      </form>
+      <div className="chips" style={{ marginTop: "0.6rem", marginBottom: "1rem" }}>
+        {partitions.map((p) => (
+          <span key={p.id} className={`chip ${p.active !== false ? "active" : ""}`}>
+            {p.name}
+            <button
+              type="button"
+              className="chip-x"
+              title={p.active !== false ? t("settings.hideTitles") : t("settings.showTitles")}
+              onClick={() => void setPartitionActive(p, p.active === false)}
+            >
+              {p.active !== false ? "×" : "+"}
+            </button>
+          </span>
+        ))}
+      </div>
+
       <form className="row tables-add" onSubmit={add}>
         <div className="field" style={{ margin: 0, flex: "1 1 140px" }}>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("settings.tableNamePh")} />
         </div>
-        <div className="field" style={{ margin: 0, flex: "1 1 140px" }}>
-          <input value={area} onChange={(e) => setArea(e.target.value)} placeholder={t("settings.areaPh")} />
+        <div className="field" style={{ margin: 0, flex: "1 1 160px" }}>
+          <select value={partitionId} onChange={(e) => setPartitionId(e.target.value)} required>
+            <option value="">{t("settings.pickPartition")}</option>
+            {partitions.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
         </div>
-        <button className="btn" type="submit" style={{ minHeight: "2.6rem" }}>
+        <button className="btn" type="submit" style={{ minHeight: "2.6rem" }} disabled={!partitionId}>
           {t("settings.addTable")}
         </button>
       </form>
       <div className="chips" style={{ marginTop: "0.75rem" }}>
         {tables.map((tbl) => (
           <span key={tbl.id} className={`chip ${tbl.active ? "active" : ""}`}>
+            {tbl.partition?.name ? `${tbl.partition.name} · ` : ""}
             {tbl.name}
-            {tbl.area ? ` · ${tbl.area}` : ""}
             <button
               type="button"
               className="chip-x"

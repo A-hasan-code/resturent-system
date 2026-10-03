@@ -12,7 +12,7 @@ import { OrdersService } from "./orders.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
-import { AddItemsDto, CreateOrderDto, PayOrderDto, PrintKotDto, UpdateOrderDto, UpdateStatusDto } from "./dto";
+import { AddItemsDto, CreateOrderDto, EditOrderDto, PayOrderDto, PrintKotDto, UpdateOrderDto, UpdateStatusDto } from "./dto";
 
 @Controller("orders")
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -28,6 +28,12 @@ export class OrdersController {
     @Query("view") view?: string
   ) {
     return this.orders.list(user, paymentStatus, status, view === "billing");
+  }
+
+  @Get("per-head")
+  @RequirePerms("order.create")
+  perHead() {
+    return this.orders.perHeadConfig();
   }
 
   @Get(":id")
@@ -46,6 +52,12 @@ export class OrdersController {
   @RequirePerms("order.addItems")
   addItems(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: AddItemsDto) {
     return this.orders.addItems(user, id, dto);
+  }
+
+  @Post(":id/edit")
+  @RequirePerms("order.edit")
+  editItems(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: EditOrderDto) {
+    return this.orders.editItems(user, id, dto);
   }
 
   @Patch(":id")

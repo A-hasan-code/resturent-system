@@ -21,7 +21,7 @@ export class PaymentsController {
   }
 
   @Get("cashiers")
-  @RequirePerms("order.pay")
+  @RequirePerms("order.pay", "order.create", "order.addItems")
   cashiers() {
     return this.payments.cashiers();
   }

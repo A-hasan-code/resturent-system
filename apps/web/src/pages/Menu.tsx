@@ -8,10 +8,13 @@ import { useConfirm } from "../components/ConfirmModal";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 
+type KitchenStation = "BEVERAGES" | "COOKING" | "BBQ";
+
 type MenuItem = {
   id: string;
   name: string;
   category: string | null;
+  kitchenStation?: KitchenStation | null;
   sellUnit: string;
   sellingPrice: number;
   costPerUnit: number;
@@ -23,6 +26,7 @@ type Recipe = { id: string; name: string; category: string; baseUnit: string };
 type RecipeCat = { id: string; name: string };
 
 const UNITS = ["KG", "G", "L", "ML", "PCS"] as const;
+const STATIONS: KitchenStation[] = ["BEVERAGES", "COOKING", "BBQ"];
 const PAGE_SIZE = 10;
 
 export function MenuPage() {
@@ -43,6 +47,7 @@ export function MenuPage() {
 
   const [name, setName] = useState("");
   const [category, setCategory] = useState("Karahi");
+  const [kitchenStation, setKitchenStation] = useState<KitchenStation>("COOKING");
   const [sellUnit, setSellUnit] = useState("KG");
   const [price, setPrice] = useState("");
   const [recipeId, setRecipeId] = useState("");
@@ -82,6 +87,7 @@ export function MenuPage() {
   function resetForm() {
     setName("");
     setCategory(cats[0]?.name || "Karahi");
+    setKitchenStation("COOKING");
     setSellUnit("KG");
     setPrice("");
     setRecipeId("");
@@ -97,6 +103,7 @@ export function MenuPage() {
     setEditId(m.id);
     setName(m.name);
     setCategory(m.category || cats[0]?.name || "General");
+    setKitchenStation(m.kitchenStation || "COOKING");
     setSellUnit(m.sellUnit);
     setPrice(String(m.sellingPrice));
     setRecipeId(m.recipeId || "");
@@ -110,6 +117,7 @@ export function MenuPage() {
       const body = {
         name: name.trim(),
         category,
+        kitchenStation,
         sellUnit,
         sellingPrice: Number(price),
         recipeId: recipeId || null,
@@ -206,6 +214,7 @@ export function MenuPage() {
             <tr>
               <th>{t("common.item")}</th>
               <th>{t("common.category")}</th>
+              <th>{t("menu.kitchenStation")}</th>
               <th>{t("menu.sellUnit")}</th>
               <th>{t("menu.sellRate")}</th>
               <th>{t("menu.cost")}</th>
@@ -216,7 +225,7 @@ export function MenuPage() {
           <tbody>
             {!pageRows.length && (
               <tr>
-                <td colSpan={can("menu.manage") ? 7 : 6} className="empty">
+                <td colSpan={can("menu.manage") ? 8 : 7} className="empty">
                   {t("menu.empty")}
                 </td>
               </tr>
@@ -228,6 +237,11 @@ export function MenuPage() {
                 </td>
                 <td>
                   <span className="badge">{m.category || "—"}</span>
+                </td>
+                <td>
+                  <span className="badge">
+                    {t(`menu.station.${m.kitchenStation || "COOKING"}` as "menu.station.COOKING")}
+                  </span>
                 </td>
                 <td>
                   {t("menu.per")} {unitLabel(m.sellUnit)}
@@ -305,6 +319,20 @@ export function MenuPage() {
               {cats.map((c) => (
                 <option key={c.id} value={c.name}>
                   {c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label>{t("menu.kitchenStation")}</label>
+            <select
+              value={kitchenStation}
+              onChange={(e) => setKitchenStation(e.target.value as KitchenStation)}
+              required
+            >
+              {STATIONS.map((s) => (
+                <option key={s} value={s}>
+                  {t(`menu.station.${s}` as "menu.station.COOKING")}
                 </option>
               ))}
             </select>

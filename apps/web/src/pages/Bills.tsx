@@ -30,6 +30,7 @@ type Order = BillOrder & {
   tipAmount?: number;
   waiter?: string | null;
   orderedBy?: { id?: string; name: string; roleCode?: string; roleName: string } | null;
+  assignedCashier?: { id: string; name: string; roleCode?: string; roleName?: string } | null;
   servedBy?: string | null;
   servedByName?: string | null;
   billRequestedAt?: string | null;
@@ -68,6 +69,9 @@ export function BillsPage() {
   const [view, setView] = useState<"bills" | "cash">("bills");
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
+  const [editQty, setEditQty] = useState<Record<string, number>>({});
+  const [editing, setEditing] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
 
   async function load() {
     try {
@@ -98,11 +102,48 @@ export function BillsPage() {
           o.tableNo,
           o.paymentStatus,
           o.status,
+          o.assignedCashier?.name,
           ...o.items.map((i) => i.name)
         )
       ),
     [orders, q]
   );
+
+  function openBill(o: Order) {
+    setSelected(o);
+    setEditing(false);
+    const qty: Record<string, number> = {};
+    for (const i of o.items) {
+      if (i.id) qty[i.id] = i.quantity;
+    }
+    setEditQty(qty);
+  }
+
+  async function saveEdit() {
+    if (!selected || !can("order.edit")) return;
+    const items = Object.entries(editQty).map(([id, quantity]) => ({ id, quantity }));
+    if (!items.length) return;
+    setSavingEdit(true);
+    try {
+      const updated = await api<Order>(`/orders/${selected.id}/edit`, {
+        method: "POST",
+        body: JSON.stringify({ items }),
+      });
+      toast.push(t("bills.editSaved"), "ok");
+      setSelected(updated);
+      setEditing(false);
+      const qty: Record<string, number> = {};
+      for (const i of updated.items) {
+        if (i.id) qty[i.id] = i.quantity;
+      }
+      setEditQty(qty);
+      void load();
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("bills.editFailed"), "err");
+    } finally {
+      setSavingEdit(false);
+    }
+  }
 
   useEffect(() => {
     setPage(1);
@@ -264,6 +305,7 @@ export function BillsPage() {
                 <th>#</th>
                 <th>{t("common.table")}</th>
                 <th>{t("bills.orderedBy")}</th>
+                <th>{t("bills.assignedCashier")}</th>
                 <th>{t("common.items")}</th>
                 <th>{t("bills.kitchen")}</th>
                 <th>{t("common.total")}</th>
@@ -294,6 +336,7 @@ export function BillsPage() {
                       </div>
                     )}
                   </td>
+                  <td className="tiny">{o.assignedCashier?.name || "—"}</td>
                   <td>
                     {o.items
                       .map((i) => `${i.quantity} ${unitLabel(i.sellUnit)} ${i.name}`)
@@ -325,7 +368,7 @@ export function BillsPage() {
                     <button
                       type="button"
                       className="btn ghost sm"
-                      onClick={() => setSelected(o)}
+                      onClick={() => openBill(o)}
                     >
                       {t("bills.open")}
                     </button>
@@ -355,12 +398,64 @@ export function BillsPage() {
       <Modal
         open={!!selected}
         title={selected ? t("bills.billNo", { n: selected.orderNo }) : t("bills.modalTitle")}
-        onClose={() => setSelected(null)}
+        onClose={() => {
+          setSelected(null);
+          setEditing(false);
+        }}
       >
         {selected && (
           <>
             <div className="modal-scroll">
-              <BillPreview order={selected} mode="customer" />
+              {selected.assignedCashier && (
+                <div className="pay-summary no-print" style={{ marginBottom: "0.75rem" }}>
+                  <span>{t("bills.assignedCashier")}</span>
+                  <strong>{selected.assignedCashier.name}</strong>
+                </div>
+              )}
+              {can("order.edit") && selected.paymentStatus !== "PAID" && editing ? (
+                <div className="no-print" style={{ marginBottom: "1rem" }}>
+                  <h3 style={{ marginTop: 0, fontSize: "1rem" }}>{t("bills.editOrder")}</h3>
+                  {selected.items.map((i) =>
+                    i.id ? (
+                      <div key={i.id} className="row" style={{ justifyContent: "space-between", marginBottom: "0.5rem" }}>
+                        <span>
+                          {i.name}
+                          <span className="tiny muted"> · {unitLabel(i.sellUnit)}</span>
+                        </span>
+                        <div className="row" style={{ gap: "0.35rem", alignItems: "center" }}>
+                          <button
+                            type="button"
+                            className="qty-btn"
+                            onClick={() =>
+                              setEditQty((prev) => ({
+                                ...prev,
+                                [i.id!]: Math.max(0, +((prev[i.id!] ?? i.quantity) - 1).toFixed(3)),
+                              }))
+                            }
+                          >
+                            −
+                          </button>
+                          <span className="qty-val">{editQty[i.id] ?? i.quantity}</span>
+                          <button
+                            type="button"
+                            className="qty-btn"
+                            onClick={() =>
+                              setEditQty((prev) => ({
+                                ...prev,
+                                [i.id!]: +((prev[i.id!] ?? i.quantity) + 1).toFixed(3),
+                              }))
+                            }
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    ) : null
+                  )}
+                </div>
+              ) : (
+                <BillPreview order={selected} mode="customer" />
+              )}
               {!!selected.payments?.length && (
                 <ul className="payment-log no-print">
                   {selected.payments.map((p) => (
@@ -384,15 +479,33 @@ export function BillsPage() {
               )}
             </div>
             <div className="form-footer no-print">
-              {can("print.bill") && (
+              {can("order.edit") && selected.paymentStatus !== "PAID" && (
+                editing ? (
+                  <>
+                    <button type="button" className="btn" disabled={savingEdit} onClick={() => void saveEdit()}>
+                      {savingEdit ? t("common.saving") : t("bills.saveEdit")}
+                    </button>
+                    <button type="button" className="btn ghost" onClick={() => setEditing(false)}>
+                      {t("common.cancel")}
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" className="btn ghost" onClick={() => setEditing(true)}>
+                    {t("bills.editOrder")}
+                  </button>
+                )
+              )}
+              {can("print.bill") && !editing && (
                 <button type="button" className="btn" onClick={() => void printOnServer(selected.id)}>
                   {t("common.printOnPrinter")}
                 </button>
               )}
-              <button type="button" className="btn ghost" onClick={printBill}>
-                {t("common.browserPrint")}
-              </button>
-              {can("order.pay") && selected.paymentStatus !== "PAID" && (
+              {!editing && (
+                <button type="button" className="btn ghost" onClick={printBill}>
+                  {t("common.browserPrint")}
+                </button>
+              )}
+              {can("order.pay") && selected.paymentStatus !== "PAID" && !editing && (
                 <button type="button" className="btn ok" onClick={() => setPaying(selected)}>
                   {t("bills.takePayment")}
                 </button>
@@ -400,7 +513,10 @@ export function BillsPage() {
               <button
                 type="button"
                 className="btn ghost"
-                onClick={() => setSelected(null)}
+                onClick={() => {
+                  setSelected(null);
+                  setEditing(false);
+                }}
               >
                 {t("common.close")}
               </button>

@@ -3,6 +3,7 @@ import { api, money } from "../api";
 import { useAuth } from "../auth";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
+import { serverPrint } from "../printing";
 import { Modal } from "./Modal";
 
 export type PayTarget = {
@@ -68,11 +69,13 @@ export function PayModal({
     if (!keepsCash && !handedTo) return toast.push(t("pay.selectCashier"), "err");
     if (!keepsCash && !handedOver) return toast.push(t("pay.confirmGave"), "err");
     setBusy(true);
+    const payAmount = Math.min(Math.max(0, value), due);
+    const fullyPaid = due <= 0 || payAmount >= due;
     try {
       await api(`/orders/${order.id}/pay`, {
         method: "POST",
         body: JSON.stringify({
-          amount: Math.min(Math.max(0, value), due),
+          amount: payAmount,
           tip: tipValue,
           servedByName: servedByName.trim() || undefined,
           ...(keepsCash ? {} : { handedToId: handedTo }),
@@ -81,6 +84,20 @@ export function PayModal({
       if (!keepsCash) localStorage.setItem(`handover:${user?.id}`, handedTo);
       const to = cashiers.find((c) => c.id === handedTo)?.name;
       toast.push(to ? t("pay.savedHanded", { name: to }) : t("pay.saved"), "ok");
+
+      // Fully paid → auto-print customer receipt with PAID status for the guest.
+      if (fullyPaid && can("print.bill")) {
+        try {
+          await serverPrint("bill", order.id);
+          toast.push(t("pay.paidReceiptPrinted"), "ok");
+        } catch (printErr) {
+          toast.push(
+            printErr instanceof Error ? printErr.message : t("pay.paidReceiptFailed"),
+            "err"
+          );
+        }
+      }
+
       onPaid();
     } catch (err) {
       toast.push(err instanceof Error ? err.message : t("pay.failed"), "err");

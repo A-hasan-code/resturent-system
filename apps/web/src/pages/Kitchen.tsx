@@ -6,7 +6,9 @@ import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 import { useSocketEvent } from "../socket";
 import { alertBeep, serverPrint } from "../printing";
-import { useI18n, useT } from "../i18n";
+import { MessageKey, useI18n, useT } from "../i18n";
+
+type KitchenStation = "BEVERAGES" | "COOKING" | "BBQ";
 
 type Order = {
   id: string;
@@ -22,10 +24,46 @@ type Order = {
     sellUnit: string;
     notes: string | null;
     kotRound?: number;
+    lineKind?: "MENU" | "PER_HEAD";
+    kitchenStation?: KitchenStation | null;
+    category?: string | null;
   }[];
 };
 
+type MenuRow = { name: string; category: string | null; kitchenStation?: KitchenStation | null };
+
 const PAGE_SIZE = 8;
+const STATIONS: { key: "ALL" | KitchenStation; labelKey: MessageKey }[] = [
+  { key: "ALL", labelKey: "kitchen.stationAll" },
+  { key: "BEVERAGES", labelKey: "kitchen.stationBeverages" },
+  { key: "COOKING", labelKey: "kitchen.stationCooking" },
+  { key: "BBQ", labelKey: "kitchen.stationBbq" },
+];
+
+function stationFromCategory(category: string | null | undefined): KitchenStation | null {
+  if (!category) return null;
+  const c = category.toLowerCase();
+  if (c.includes("beverage") || c.includes("drink") || c.includes("lassi") || c.includes("juice")) {
+    return "BEVERAGES";
+  }
+  if (c.includes("bbq") || c.includes("grill")) return "BBQ";
+  if (c.includes("cook") || c.includes("karahi") || c.includes("chinese") || c.includes("rice")) {
+    return "COOKING";
+  }
+  return null;
+}
+
+function itemStation(
+  item: Order["items"][number],
+  menuByName: Map<string, MenuRow>
+): KitchenStation {
+  if (item.kitchenStation) return item.kitchenStation;
+  const fromCat = stationFromCategory(item.category);
+  if (fromCat) return fromCat;
+  const menu = menuByName.get(item.name.toLowerCase());
+  if (menu?.kitchenStation) return menu.kitchenStation;
+  return stationFromCategory(menu?.category) || "COOKING";
+}
 
 export function KitchenPage() {
   const { can } = useAuth();
@@ -33,7 +71,9 @@ export function KitchenPage() {
   const t = useT();
   const { ts } = useI18n();
   const [orders, setOrders] = useState<Order[]>([]);
+  const [menuByName, setMenuByName] = useState<Map<string, MenuRow>>(new Map());
   const [q, setQ] = useState("");
+  const [station, setStation] = useState<"ALL" | KitchenStation>("ALL");
   const [page, setPage] = useState(1);
 
   async function load() {
@@ -49,6 +89,13 @@ export function KitchenPage() {
 
   useEffect(() => {
     load();
+    api<MenuRow[]>("/menu")
+      .then((rows) => {
+        const map = new Map<string, MenuRow>();
+        for (const r of rows) map.set(r.name.toLowerCase(), r);
+        setMenuByName(map);
+      })
+      .catch(() => undefined);
     const timer = setInterval(load, 30000);
     return () => clearInterval(timer);
   }, []);
@@ -71,9 +118,18 @@ export function KitchenPage() {
     }
   }
 
-  const shown = useMemo(
-    () =>
-      orders.filter((o) =>
+  const shown = useMemo(() => {
+    return orders
+      .map((o) => {
+        const kitchenItems = o.items.filter((i) => i.lineKind !== "PER_HEAD");
+        const items =
+          station === "ALL"
+            ? kitchenItems
+            : kitchenItems.filter((i) => itemStation(i, menuByName) === station);
+        return { ...o, items };
+      })
+      .filter((o) => o.items.length > 0)
+      .filter((o) =>
         matchesSearch(
           q,
           o.orderNo,
@@ -82,13 +138,12 @@ export function KitchenPage() {
           o.notes,
           ...o.items.map((i) => i.name)
         )
-      ),
-    [orders, q]
-  );
+      );
+  }, [orders, q, station, menuByName]);
 
   useEffect(() => {
     setPage(1);
-  }, [q]);
+  }, [q, station]);
 
   const pageRows = paginate(shown, page, PAGE_SIZE);
 
@@ -119,8 +174,20 @@ export function KitchenPage() {
         </button>
       </div>
 
-      <div className="row" style={{ marginBottom: "0.85rem" }}>
+      <div className="row" style={{ marginBottom: "0.85rem", flexWrap: "wrap", gap: "0.5rem" }}>
         <SearchField value={q} onChange={setQ} placeholder={t("kitchen.search")} />
+        <div className="chips">
+          {STATIONS.map((s) => (
+            <button
+              key={s.key}
+              type="button"
+              className={`chip ${station === s.key ? "active" : ""}`}
+              onClick={() => setStation(s.key)}
+            >
+              {t(s.labelKey)}
+            </button>
+          ))}
+        </div>
       </div>
 
       {!shown.length ? (

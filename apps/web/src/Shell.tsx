@@ -16,9 +16,8 @@ const GROUPS: { titleKey: MessageKey; tabs: Tab[] }[] = [
   {
     titleKey: "nav.group.service",
     tabs: [
-      { to: "/", labelKey: "nav.dashboard", perms: [], hideFor: ["WAITER", "MANAGER"] },
-      { to: "/waiter", labelKey: "nav.waiter", perms: ["order.viewOwn", "order.addItems"] },
-      { to: "/orders", labelKey: "nav.orders", perms: ["order.create"], hideFor: ["WAITER"] },
+      { to: "/", labelKey: "nav.dashboard", perms: [], hideFor: ["WAITER", "SUPERVISOR"] },
+      { to: "/waiter", labelKey: "nav.waiter", perms: ["order.viewOwn", "order.addItems", "order.create"] },
       { to: "/bills", labelKey: "nav.bills", perms: ["bill.view", "order.pay"] },
       { to: "/kitchen", labelKey: "nav.kitchen", perms: ["kitchen.view"] },
     ],
@@ -44,6 +43,8 @@ const GROUPS: { titleKey: MessageKey; tabs: Tab[] }[] = [
 
 const ROLE_KEY: Record<string, MessageKey> = {
   ADMIN: "role.ADMIN",
+  SUPERVISOR: "role.SUPERVISOR",
+  MAIN_CASHIER: "role.MAIN_CASHIER",
   MANAGER: "role.MANAGER",
   CASHIER: "role.CASHIER",
   WAITER: "role.WAITER",

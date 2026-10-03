@@ -57,6 +57,17 @@ export class SettingsService {
     };
   }
 
+  /** Cover charge / person-per-head (Settings → Billing). */
+  async perHead() {
+    const s = await this.getMany("billing.");
+    const amount = Number(s["billing.perHeadAmount"] ?? "100");
+    return {
+      enabled: (s["billing.perHeadEnabled"] ?? "1") !== "0",
+      amount: Number.isFinite(amount) && amount >= 0 ? amount : 100,
+      label: (s["billing.perHeadLabel"] || "Per head").trim() || "Per head",
+    };
+  }
+
   async saveLogo(file: { originalname: string; buffer: Buffer; mimetype: string; size: number }) {
     if (!file?.buffer?.length) throw new BadRequestException("No image uploaded");
     if (file.size > 2 * 1024 * 1024) throw new BadRequestException("Logo must be under 2 MB");

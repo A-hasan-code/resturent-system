@@ -48,15 +48,32 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
 
   // ---------- enqueue ----------
 
+  /**
+   * KOT routing (hotel serving rule):
+   * - Round 1 (first place): every involved station printer gets the FULL slip (all items).
+   * - Later rounds (add-ons): only the new round's items → only matching printers (delta).
+   */
   async enqueueKot(orderId: string, opts: KotOptions = {}) {
     const kot = await this.loadKot(orderId, opts);
     const printers = await this.prisma.printer.findMany({ where: { active: true, printsKot: true } });
     if (!printers.length) return [await this.noPrinterJob("KOT", orderId, opts.requestedById, kot.orderNo)];
 
+    const round = opts.round ?? kot.defaultRound;
+    const fullSlip = !round || round <= 1;
+    const routeItems = kot.roundItems;
+    const printItems = fullSlip ? kot.allItems : kot.roundItems;
+
     const jobs: PrintJob[] = [];
     for (const printer of printers) {
       const cats = splitCats(printer.categories);
-      const mine = cats.length ? kot.items.filter((i) => cats.includes(i.category)) : kot.items;
+      const involved = cats.length
+        ? routeItems.some((i) => cats.includes(i.category) || cats.includes(i.station))
+        : true;
+      if (!involved) continue;
+      if (!cats.length && !printItems.length) continue;
+      const mine = cats.length && !fullSlip
+        ? printItems.filter((i) => cats.includes(i.category) || cats.includes(i.station))
+        : printItems;
       if (!mine.length) continue;
       const payload = kot.payload(mine, cats.length ? printer.name : null);
       jobs.push(await this.createJob("KOT", printer.id, payload, orderId, opts.requestedById));
@@ -87,7 +104,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       include: {
         items: {
           include: {
-            menuItem: { select: { category: true } },
+            menuItem: { select: { category: true, kitchenStation: true } },
             addedBy: { select: { name: true, role: { select: { name: true } } } },
           },
           orderBy: { createdAt: "asc" },
@@ -96,11 +113,11 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       },
     });
     if (!order) throw new NotFoundException("Order not found");
-    const all = opts.round ? order.items.filter((i) => i.kotRound === opts.round) : order.items;
-    if (!all.length) throw new BadRequestException("No items to print");
-
-    const items = all.map((i) => ({
-      category: (i.menuItem.category || "General").toLowerCase(),
+    // Cover charge / per-head is bill-only — never on kitchen slips.
+    const kitchenRows = order.items.filter((i) => i.lineKind !== "PER_HEAD" && i.menuItem);
+    const mapItem = (i: (typeof kitchenRows)[number]) => ({
+      category: (i.menuItem!.category || "General").toLowerCase(),
+      station: i.menuItem!.kitchenStation.toLowerCase(),
       takenBy: staffLabel(i.addedBy ?? order.waiter),
       line: {
         name: i.name,
@@ -109,15 +126,24 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
         notes: i.notes,
         round: i.kotRound,
       },
-    }));
+    });
+    const allItems = kitchenRows.map(mapItem);
+    const round = opts.round ?? order.kotRounds;
+    const roundItems = kitchenRows.filter((i) => i.kotRound === round).map(mapItem);
+    if (!(opts.round ? roundItems : allItems).length) throw new BadRequestException("No items to print");
+
     const restaurant = await this.settings.restaurant();
     const time = new Date().toISOString();
     const kotOpts = await this.tips.printKotOpts();
 
     return {
       orderNo: order.orderNo,
-      items,
-      payload: (mine: typeof items, station: string | null): KotPayload => {
+      defaultRound: order.kotRounds,
+      allItems,
+      roundItems: roundItems.length ? roundItems : allItems,
+      /** @deprecated use roundItems / allItems — kept for previewKot */
+      items: opts.round ? roundItems : allItems,
+      payload: (mine: typeof allItems, station: string | null): KotPayload => {
         const takers = [...new Set(mine.map((i) => i.takenBy).filter((t): t is string => !!t))];
         return {
           restaurant,

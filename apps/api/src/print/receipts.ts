@@ -127,7 +127,12 @@ export function renderBill(p: BillPayload, paperWidth: number) {
   if (showTip && tip > 0) e.pair("Tip paid", money(tip));
   if (p.receivedBy) e.line(`Received by: ${p.receivedBy}`);
   if (p.paidAmount > 0 && p.paidAmount < p.total) e.pair("Balance", money(p.total - p.paidAmount));
-  e.line(`Payment: ${p.paymentStatus}`);
+  e.rule();
+  if (p.paymentStatus === "PAID") {
+    e.align("center").bold().big().line("*** PAID ***").big(false).bold(false).align("left");
+  } else {
+    e.line(`Payment: ${p.paymentStatus}`);
+  }
   e.rule("=");
   e.align("center").wrapped(p.footer || "Thank you - Come again!");
   return e.feed(4).cut();

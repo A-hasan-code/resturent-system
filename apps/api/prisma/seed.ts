@@ -1,4 +1,4 @@
-import { PrismaClient, UnitType } from "@prisma/client";
+import { KitchenStation, PrismaClient, UnitType } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
@@ -12,6 +12,7 @@ const PERMS = [
   ["menu.manage", "Manage menu"],
   ["order.create", "Create orders"],
   ["order.pay", "Take payment"],
+  ["order.edit", "Edit order items (main cashier)"],
   ["bill.view", "View bills"],
   ["kitchen.view", "Kitchen view"],
   ["kitchen.update", "Update kitchen status"],
@@ -31,17 +32,29 @@ const PERMS = [
 
 const ROLE_PERMS: Record<string, string[]> = {
   ADMIN: PERMS.map(([c]) => c),
-  // Floor manager: takes orders and payments, prints bills, hands the cash to a cashier.
-  MANAGER: [
+  SUPERVISOR: [
     "order.create",
     "order.addItems",
+    "order.viewOwn",
+    "bill.request",
+    "print.kot",
+    "kitchen.view",
+    "kitchen.update",
+  ],
+  MAIN_CASHIER: [
+    "menu.view",
+    "order.create",
+    "order.addItems",
+    "order.edit",
     "order.pay",
     "bill.view",
     "bill.request",
+    "kitchen.view",
+    "reports.view",
     "print.kot",
     "print.bill",
+    "cash.keep",
   ],
-  STORE: ["store.view", "store.manage"],
   CASHIER: [
     "menu.view",
     "order.create",
@@ -55,21 +68,17 @@ const ROLE_PERMS: Record<string, string[]> = {
     "print.bill",
     "cash.keep",
   ],
+  STORE: ["store.view", "store.manage"],
   KITCHEN: ["kitchen.view", "kitchen.update", "print.kot"],
-  WAITER: [
-    "order.create",
-    "order.addItems",
-    "order.viewOwn",
-    "bill.request",
-    "print.kot",
-  ],
+  WAITER: ["order.viewOwn", "bill.request", "kitchen.view"],
 };
 
 const ROLES = [
   { code: "ADMIN", name: "Admin" },
-  { code: "MANAGER", name: "Manager" },
-  { code: "STORE", name: "Store" },
+  { code: "SUPERVISOR", name: "Supervisor" },
+  { code: "MAIN_CASHIER", name: "Main Cashier" },
   { code: "CASHIER", name: "Cashier" },
+  { code: "STORE", name: "Store" },
   { code: "KITCHEN", name: "Kitchen" },
   { code: "WAITER", name: "Waiter" },
 ];
@@ -80,6 +89,9 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   "restaurant.address": "Pakistan",
   "restaurant.phone": "0300-0000000",
   "restaurant.accent": "#0f7a6c",
+  "billing.perHeadEnabled": "1",
+  "billing.perHeadAmount": "100",
+  "billing.perHeadLabel": "Per head",
 };
 
 async function upsertItem(
@@ -120,9 +132,7 @@ async function main() {
       create: r,
     });
     const codes = ROLE_PERMS[r.code] ?? [];
-    const perms = await prisma.permission.findMany({
-      where: { code: { in: codes } },
-    });
+    const perms = await prisma.permission.findMany({ where: { code: { in: codes } } });
     await prisma.rolePermission.deleteMany({ where: { roleId: role.id } });
     if (perms.length) {
       await prisma.rolePermission.createMany({
@@ -131,29 +141,64 @@ async function main() {
     }
   }
 
+  // Migrate legacy MANAGER → SUPERVISOR
+  const manager = await prisma.role.findUnique({ where: { code: "MANAGER" } });
+  const supervisor = await prisma.role.findUniqueOrThrow({ where: { code: "SUPERVISOR" } });
+  if (manager) {
+    await prisma.user.updateMany({ where: { roleId: manager.id }, data: { roleId: supervisor.id } });
+    await prisma.rolePermission.deleteMany({ where: { roleId: manager.id } });
+    await prisma.role.delete({ where: { id: manager.id } }).catch(() => undefined);
+  }
+
   const roleId = async (code: string) => (await prisma.role.findUniqueOrThrow({ where: { code } })).id;
 
-  // Demo accounts are only created when missing; existing users (and their passwords) are never touched.
   const users = [
     { username: "admin", name: "Admin", pass: "admin123", role: "ADMIN" },
-    { username: "manager", name: "Manager Usman", pass: "manager123", pin: "2222", role: "MANAGER" },
-    { username: "cashier", name: "Cashier Ali", pass: "cashier123", role: "CASHIER" },
+    { username: "supervisor", name: "Supervisor Usman", pass: "super123", pin: "2222", role: "SUPERVISOR" },
+    { username: "maincashier", name: "Main Cashier", pass: "main123", pin: "3333", role: "MAIN_CASHIER" },
+    { username: "cashier", name: "Cashier Ali", pass: "cashier123", pin: "4444", role: "CASHIER" },
+    { username: "cashier2", name: "Cashier Two", pass: "cashier123", pin: "4445", role: "CASHIER" },
     { username: "kitchen", name: "Kitchen Staff", pass: "kitchen123", role: "KITCHEN" },
     { username: "store", name: "Store Keeper", pass: "store123", role: "STORE" },
     { username: "waiter", name: "Waiter Ahmed", pass: "waiter123", pin: "1111", role: "WAITER" },
     { username: "waiter2", name: "Waiter Bilal", pass: "waiter123", pin: "1112", role: "WAITER" },
   ];
   for (const u of users) {
+    const passwordHash = await bcrypt.hash(u.pass, 10);
+    const pinHash = u.pin ? await bcrypt.hash(u.pin, 10) : null;
+    const rid = await roleId(u.role);
     const exists = await prisma.user.findUnique({ where: { username: u.username } });
-    if (exists) continue;
+    if (exists) {
+      // Keep demo accounts usable after role/PIN changes (local test).
+      await prisma.user.update({
+        where: { id: exists.id },
+        data: {
+          name: u.name,
+          roleId: rid,
+          active: true,
+          passwordHash,
+          ...(pinHash ? { pinHash } : {}),
+        },
+      });
+      continue;
+    }
     await prisma.user.create({
       data: {
         username: u.username,
         name: u.name,
-        passwordHash: await bcrypt.hash(u.pass, 10),
-        pinHash: u.pin ? await bcrypt.hash(u.pin, 10) : null,
-        roleId: await roleId(u.role),
+        passwordHash,
+        pinHash,
+        roleId: rid,
       },
+    });
+  }
+
+  // Rename old manager login to supervisor role if still present
+  const oldMgr = await prisma.user.findUnique({ where: { username: "manager" } });
+  if (oldMgr) {
+    await prisma.user.update({
+      where: { id: oldMgr.id },
+      data: { roleId: await roleId("SUPERVISOR"), name: oldMgr.name.includes("Manager") ? "Supervisor Usman" : oldMgr.name },
     });
   }
 
@@ -161,42 +206,100 @@ async function main() {
     await prisma.setting.upsert({ where: { key }, update: {}, create: { key, value } });
   }
 
-  if ((await prisma.restaurantTable.count()) === 0) {
-    await prisma.restaurantTable.createMany({
-      data: Array.from({ length: 12 }, (_, i) => ({
-        name: `T-${i + 1}`,
-        area: i < 8 ? "Hall" : "Family",
+  // Older DBs may still have global unique(name); partitions need per-partition names (Hall T-1 + Lawn T-1).
+  await prisma.$executeRawUnsafe(`DROP INDEX IF EXISTS "RestaurantTable_name_key"`);
+
+  // Partitions + demo tables (Hall T-1..15, Lawn T-1..10). Safe after migration that may create empty Hall.
+  const hall =
+    (await prisma.tablePartition.findUnique({ where: { name: "Hall" } })) ??
+    (await prisma.tablePartition.create({ data: { name: "Hall", sortOrder: 1 } }));
+  const lawn =
+    (await prisma.tablePartition.findUnique({ where: { name: "Lawn" } })) ??
+    (await prisma.tablePartition.create({ data: { name: "Lawn", sortOrder: 2 } }));
+
+  async function ensureTables(partitionId: string, area: string, count: number) {
+    const existing = await prisma.restaurantTable.count({ where: { partitionId } });
+    if (existing >= count) return;
+    const have = new Set(
+      (await prisma.restaurantTable.findMany({ where: { partitionId }, select: { name: true } })).map((t) => t.name)
+    );
+    const rows = Array.from({ length: count }, (_, i) => `T-${i + 1}`)
+      .filter((name) => !have.has(name))
+      .map((name, i) => ({
+        name,
+        partitionId,
+        area,
         sortOrder: i + 1,
-      })),
-    });
+        active: true,
+      }));
+    if (rows.length) await prisma.restaurantTable.createMany({ data: rows });
   }
+
+  await ensureTables(hall.id, "Hall", 15);
+  await ensureTables(lawn.id, "Lawn", 10);
 
   if ((await prisma.printer.count()) === 0) {
-    await prisma.printer.create({
-      data: {
-        name: "Preview (no printer yet)",
-        kind: "FILE",
-        target: "",
-        printsKot: true,
-        printsBill: true,
-      },
+    await prisma.printer.createMany({
+      data: [
+        {
+          name: "Kitchen · Beverages",
+          kind: "FILE",
+          target: "",
+          printsKot: true,
+          printsBill: false,
+          categories: "Beverages",
+        },
+        {
+          name: "Kitchen · Cooking",
+          kind: "FILE",
+          target: "",
+          printsKot: true,
+          printsBill: false,
+          categories: "Cooking",
+        },
+        {
+          name: "Kitchen · BBQ",
+          kind: "FILE",
+          target: "",
+          printsKot: true,
+          printsBill: false,
+          categories: "BBQ",
+        },
+        {
+          name: "Cashier bill (preview)",
+          kind: "FILE",
+          target: "",
+          printsKot: false,
+          printsBill: true,
+          station: "Main",
+        },
+      ],
     });
   }
 
-  for (const name of ["Karahi", "BBQ", "Sweet", "Drinks", "Rice", "Curry", "General"]) {
+  for (const name of ["Karahi", "BBQ", "Sweet", "Drinks", "Rice", "Curry", "General", "Beverages", "Cooking"]) {
     await prisma.recipeCategory.upsert({ where: { name }, update: {}, create: { name } });
   }
 
+  // Backfill kitchenStation from category heuristics
+  await prisma.menuItem.updateMany({
+    where: { OR: [{ category: { contains: "Drink", mode: "insensitive" } }, { category: { contains: "Beverage", mode: "insensitive" } }] },
+    data: { kitchenStation: KitchenStation.BEVERAGES },
+  });
+  await prisma.menuItem.updateMany({
+    where: { category: { contains: "BBQ", mode: "insensitive" } },
+    data: { kitchenStation: KitchenStation.BBQ },
+  });
+
   if ((await prisma.storeItem.count()) > 0) {
-    console.log("Seed OK — roles/permissions/settings updated (existing data kept)");
+    console.log("Seed OK — roles/partitions/settings updated (existing inventory kept)");
     return;
   }
   await seedDemoData();
-  console.log("Seed OK — users, inventory, recipes, menu, demo orders");
+  console.log("Seed OK — full demo data");
 }
 
 async function seedDemoData() {
-
   for (const c of [
     { code: "FRESH", name: "Fresh", sortOrder: 1 },
     { code: "DRY", name: "Dry", sortOrder: 2 },
@@ -219,15 +322,9 @@ async function seedDemoData() {
   const onion = await upsertItem(fresh.id, "Onion", UnitType.KG, 25, 60, 5);
   const ginger = await upsertItem(fresh.id, "Ginger Garlic", UnitType.KG, 8, 350, 2);
   const yoghurt = await upsertItem(fresh.id, "Yoghurt", UnitType.KG, 10, 200, 3);
-
   const rice = await upsertItem(dry.id, "Rice", UnitType.KG, 50, 280, 10);
   const chilli = await upsertItem(dry.id, "Red Chilli", UnitType.KG, 5, 900, 1);
   const sugar = await upsertItem(dry.id, "Sugar", UnitType.KG, 20, 160, 3);
-  const flour = await upsertItem(dry.id, "Besan", UnitType.KG, 12, 220, 2);
-  const salt = await upsertItem(dry.id, "Salt", UnitType.KG, 10, 40, 2);
-  void flour;
-  void salt;
-
   const oil = await upsertItem(liquid.id, "Cooking Oil", UnitType.L, 30, 480, 5);
   const milk = await upsertItem(liquid.id, "Milk", UnitType.L, 20, 220, 4);
   const syrup = await upsertItem(liquid.id, "Rooh Afza", UnitType.L, 6, 900, 1);
@@ -275,11 +372,6 @@ async function seedDemoData() {
     { storeItemId: oil.id, quantity: 0.1, unit: UnitType.L },
     { storeItemId: yoghurt.id, quantity: 0.15, unit: UnitType.KG },
   ]);
-  const rKheer = await ensureRecipe("Kheer", "Sweet", UnitType.KG, [
-    { storeItemId: milk.id, quantity: 1, unit: UnitType.L },
-    { storeItemId: rice.id, quantity: 0.08, unit: UnitType.KG },
-    { storeItemId: sugar.id, quantity: 0.12, unit: UnitType.KG },
-  ]);
   const rLassi = await ensureRecipe("Sweet Lassi", "Drinks", UnitType.L, [
     { storeItemId: yoghurt.id, quantity: 0.4, unit: UnitType.KG },
     { storeItemId: milk.id, quantity: 0.4, unit: UnitType.L },
@@ -291,13 +383,14 @@ async function seedDemoData() {
   ]);
 
   const menus = [
-    { id: "seed-chicken-karahi", name: "Chicken Karahi", category: "Karahi", unit: UnitType.KG, price: 1800, recipeId: rKarahi.id },
-    { id: "seed-mutton-karahi", name: "Mutton Karahi", category: "Karahi", unit: UnitType.KG, price: 3200, recipeId: rMutton.id },
-    { id: "seed-biryani", name: "Chicken Biryani", category: "Rice", unit: UnitType.KG, price: 1400, recipeId: rBiryani.id },
-    { id: "seed-kheer", name: "Kheer", category: "Sweet", unit: UnitType.KG, price: 800, recipeId: rKheer.id },
-    { id: "seed-lassi", name: "Sweet Lassi", category: "Drinks", unit: UnitType.L, price: 250, recipeId: rLassi.id },
-    { id: "seed-sharbat", name: "Rooh Afza", category: "Drinks", unit: UnitType.L, price: 180, recipeId: rSharbat.id },
-    { id: "seed-chapli", name: "Chapli Kabab", category: "BBQ", unit: UnitType.PCS, price: 120, recipeId: null },
+    { id: "seed-chicken-karahi", name: "Chicken Karahi", category: "Cooking", station: KitchenStation.COOKING, unit: UnitType.KG, price: 1800, recipeId: rKarahi.id },
+    { id: "seed-mutton-karahi", name: "Mutton Karahi", category: "Cooking", station: KitchenStation.COOKING, unit: UnitType.KG, price: 3200, recipeId: rMutton.id },
+    { id: "seed-biryani", name: "Chicken Biryani", category: "Cooking", station: KitchenStation.COOKING, unit: UnitType.KG, price: 1400, recipeId: rBiryani.id },
+    { id: "seed-lassi", name: "Sweet Lassi", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.L, price: 250, recipeId: rLassi.id },
+    { id: "seed-sharbat", name: "Rooh Afza", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.L, price: 180, recipeId: rSharbat.id },
+    { id: "seed-chai", name: "Chai", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.PCS, price: 80, recipeId: null },
+    { id: "seed-chapli", name: "Chapli Kabab", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 120, recipeId: null },
+    { id: "seed-tika", name: "Chicken Tikka", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 450, recipeId: null },
   ];
 
   for (const m of menus) {
@@ -306,6 +399,7 @@ async function seedDemoData() {
       update: {
         name: m.name,
         category: m.category,
+        kitchenStation: m.station,
         sellUnit: m.unit,
         sellingPrice: m.price,
         recipeId: m.recipeId,
@@ -315,183 +409,18 @@ async function seedDemoData() {
         id: m.id,
         name: m.name,
         category: m.category,
+        kitchenStation: m.station,
         sellUnit: m.unit,
         sellingPrice: m.price,
         recipeId: m.recipeId,
       },
     });
   }
-
-  const existingOrders = await prisma.order.count();
-  if (existingOrders === 0) {
-    const cashier = await prisma.user.findUniqueOrThrow({
-      where: { username: "cashier" },
-    });
-    const manager = await prisma.user.findUniqueOrThrow({
-      where: { username: "manager" },
-    });
-    const mk = await prisma.menuItem.findUniqueOrThrow({
-      where: { id: "seed-chicken-karahi" },
-    });
-    const mb = await prisma.menuItem.findUniqueOrThrow({
-      where: { id: "seed-biryani" },
-    });
-    const ml = await prisma.menuItem.findUniqueOrThrow({
-      where: { id: "seed-lassi" },
-    });
-    const mm = await prisma.menuItem.findUniqueOrThrow({
-      where: { id: "seed-mutton-karahi" },
-    });
-    const mch = await prisma.menuItem.findUniqueOrThrow({
-      where: { id: "seed-chapli" },
-    });
-
-    const demo = [
-      {
-        tableNo: "T-1",
-        status: "PENDING" as const,
-        paymentStatus: "UNPAID" as const,
-        items: [
-          { menu: mk, qty: 1.5 },
-          { menu: ml, qty: 2 },
-        ],
-      },
-      {
-        tableNo: "T-3",
-        status: "PREPARING" as const,
-        paymentStatus: "UNPAID" as const,
-        items: [{ menu: mb, qty: 2 }],
-      },
-      {
-        tableNo: "T-5",
-        status: "READY" as const,
-        paymentStatus: "UNPAID" as const,
-        items: [
-          { menu: mm, qty: 1 },
-          { menu: mch, qty: 6 },
-        ],
-      },
-      {
-        tableNo: "T-2",
-        status: "COMPLETED" as const,
-        paymentStatus: "PAID" as const,
-        items: [
-          { menu: mk, qty: 1 },
-          { menu: ml, qty: 1 },
-        ],
-      },
-      {
-        tableNo: "Takeaway",
-        status: "COMPLETED" as const,
-        paymentStatus: "PAID" as const,
-        items: [
-          { menu: mb, qty: 1.5 },
-          { menu: mch, qty: 4 },
-        ],
-      },
-    ];
-
-    for (const d of demo) {
-      let subtotal = 0;
-      let costTotal = 0;
-      const lines = [];
-      for (const { menu, qty } of d.items) {
-        const rate = Number(menu.sellingPrice);
-        const amount = rate * qty;
-        subtotal += amount;
-        let unitCost = 0;
-        if (menu.recipeId) {
-          const recipe = await prisma.recipe.findUnique({
-            where: { id: menu.recipeId },
-            include: { ingredients: { include: { storeItem: true } } },
-          });
-          if (recipe) {
-            let baseCost = 0;
-            for (const ing of recipe.ingredients) {
-              const storeRate = Number(ing.storeItem.ratePerUnit);
-              const q = Number(ing.quantity);
-              let qtyInStore = q;
-              if (ing.unit === "G" && ing.storeItem.unit === "KG") qtyInStore = q / 1000;
-              else if (ing.unit === "KG" && ing.storeItem.unit === "G") qtyInStore = q * 1000;
-              else if (ing.unit === "ML" && ing.storeItem.unit === "L") qtyInStore = q / 1000;
-              else if (ing.unit === "L" && ing.storeItem.unit === "ML") qtyInStore = q * 1000;
-              baseCost += qtyInStore * storeRate;
-            }
-            const baseQty = Number(recipe.baseQty) || 1;
-            unitCost = baseCost / baseQty;
-          }
-        }
-        const costAmount = unitCost * qty;
-        costTotal += costAmount;
-        lines.push({
-          menuItemId: menu.id,
-          name: menu.name,
-          sellUnit: menu.sellUnit,
-          quantity: qty,
-          ratePerUnit: rate,
-          amount,
-          unitCost,
-          costAmount,
-        });
-      }
-      const paid = d.paymentStatus === "PAID";
-      // Demo: the takeaway bill was collected by the manager and handed to the cashier (still unconfirmed).
-      const viaManager = paid && d.tableNo === "Takeaway";
-      await prisma.order.create({
-        data: {
-          tableNo: d.tableNo,
-          status: d.status,
-          paymentStatus: d.paymentStatus,
-          subtotal,
-          total: subtotal,
-          paidAmount: paid ? subtotal : 0,
-          costTotal,
-          cashierId: paid ? cashier.id : null,
-          waiterId: viaManager ? manager.id : cashier.id,
-          items: { create: lines.map((l) => ({ ...l, addedById: viaManager ? manager.id : cashier.id })) },
-          payments: paid
-            ? {
-                create: viaManager
-                  ? { amount: subtotal, collectedById: manager.id, handedToId: cashier.id }
-                  : { amount: subtotal, collectedById: cashier.id },
-              }
-            : undefined,
-        },
-      });
-    }
-  }
-
-  const moveCount = await prisma.stockMovement.count();
-  if (moveCount === 0) {
-    await prisma.stockMovement.create({
-      data: {
-        storeItemId: oil.id,
-        type: "OUT",
-        quantity: -1,
-        ratePerUnit: oil.ratePerUnit,
-        note: "Demo wastage / stock out",
-      },
-    });
-    await prisma.storeItem.update({
-      where: { id: oil.id },
-      data: { quantityOnHand: { decrement: 1 } },
-    });
-    await prisma.stockMovement.create({
-      data: {
-        storeItemId: chilli.id,
-        type: "IN",
-        quantity: 2,
-        ratePerUnit: 900,
-        note: "Demo purchase stock in",
-      },
-    });
-  }
 }
 
 main()
-  .then(() => prisma.$disconnect())
-  .catch(async (e) => {
+  .catch((e) => {
     console.error(e);
-    await prisma.$disconnect();
     process.exit(1);
-  });
+  })
+  .finally(() => prisma.$disconnect());

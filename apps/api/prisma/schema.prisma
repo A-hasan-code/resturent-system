@@ -55,20 +55,49 @@ enum PrintJobStatus {
   FAILED
 }
 
+/// Kitchen routing station — maps to KOT printers (Beverages / Cooking / BBQ).
+enum KitchenStation {
+  BEVERAGES
+  COOKING
+  BBQ
+}
+
+/// MENU = normal dish; PER_HEAD = cover charge (settings-priced, no kitchen print).
+enum OrderLineKind {
+  MENU
+  PER_HEAD
+}
+
 model Setting {
   key       String   @id
   value     String
   updatedAt DateTime @updatedAt
 }
 
+/// Floor area / section (Hall, Lawn, …). Tables are unique within a partition.
+model TablePartition {
+  id        String            @id @default(cuid())
+  name      String            @unique
+  sortOrder Int               @default(0)
+  active    Boolean           @default(true)
+  tables    RestaurantTable[]
+  createdAt DateTime          @default(now())
+}
+
 model RestaurantTable {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  area      String?
-  seats     Int      @default(4)
-  sortOrder Int      @default(0)
-  active    Boolean  @default(true)
-  createdAt DateTime @default(now())
+  id          String         @id @default(cuid())
+  name        String
+  /// Legacy free-text area (kept for display); prefer partition.
+  area        String?
+  partitionId String
+  partition   TablePartition @relation(fields: [partitionId], references: [id])
+  seats       Int            @default(4)
+  sortOrder   Int            @default(0)
+  active      Boolean        @default(true)
+  orders      Order[]
+  createdAt   DateTime       @default(now())
+
+  @@unique([partitionId, name])
 }
 
 model Printer {
@@ -143,14 +172,15 @@ model User {
   /// Default bill printer for this cashier (industrial: each counter → own network printer)
   billPrinterId String?
   billPrinter   Printer? @relation("UserBillPrinter", fields: [billPrinterId], references: [id], onDelete: SetNull)
-  orders        Order[]  @relation("OrderCashier")
-  waiterOrders  Order[]  @relation("OrderWaiter")
-  itemsAdded    OrderItem[] @relation("OrderItemAddedBy")
-  paymentsCollected Payment[] @relation("PaymentCollectedBy")
-  cashReceived      Payment[] @relation("PaymentHandedTo")
+  orders            Order[]     @relation("OrderCashier")
+  waiterOrders      Order[]     @relation("OrderWaiter")
+  assignedOrders    Order[]     @relation("OrderAssignedCashier")
+  itemsAdded        OrderItem[] @relation("OrderItemAddedBy")
+  paymentsCollected Payment[]   @relation("PaymentCollectedBy")
+  cashReceived      Payment[]   @relation("PaymentHandedTo")
   tipShares         TipShare[]
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
 }
 
 model StoreCategory {
@@ -226,23 +256,28 @@ model RecipeIngredient {
 }
 
 model MenuItem {
-  id           String      @id @default(cuid())
-  name         String
-  category     String?
-  sellUnit     UnitType
-  sellingPrice Decimal     @db.Decimal(14, 2)
-  recipeId     String?
-  recipe       Recipe?     @relation(fields: [recipeId], references: [id])
-  active       Boolean     @default(true)
-  orderItems   OrderItem[]
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  id             String         @id @default(cuid())
+  name           String
+  category       String?
+  /// Kitchen printer station (Beverages / Cooking / BBQ).
+  kitchenStation KitchenStation @default(COOKING)
+  sellUnit       UnitType
+  sellingPrice   Decimal        @db.Decimal(14, 2)
+  recipeId       String?
+  recipe         Recipe?        @relation(fields: [recipeId], references: [id])
+  active         Boolean        @default(true)
+  orderItems     OrderItem[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 }
 
 model Order {
   id            String          @id @default(cuid())
   orderNo       Int             @default(autoincrement())
+  /// Display label e.g. "Hall · T-1"
   tableNo       String?
+  tableId       String?
+  table         RestaurantTable? @relation(fields: [tableId], references: [id], onDelete: SetNull)
   status        OrderStatus     @default(PENDING)
   paymentStatus PaymentStatus   @default(UNPAID)
   notes         String?
@@ -254,9 +289,12 @@ model Order {
   costTotal     Decimal         @default(0) @db.Decimal(14, 2)
   cashierId     String?
   cashier       User?           @relation("OrderCashier", fields: [cashierId], references: [id])
-  /// Who took / placed the order (waiter, manager, or cashier).
+  /// Who took / placed the order (supervisor, waiter, or cashier).
   waiterId      String?
   waiter        User?           @relation("OrderWaiter", fields: [waiterId], references: [id])
+  /// Cashier selected at place-time (Main Cashier or Cashier) for billing.
+  assignedCashierId String?
+  assignedCashier   User?       @relation("OrderAssignedCashier", fields: [assignedCashierId], references: [id])
   /// Free-text name of who served the table (not a system user).
   servedByName  String?
   kotRounds     Int             @default(1)
@@ -268,6 +306,10 @@ model Order {
   tipShares     TipShare[]
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
+
+  @@index([assignedCashierId])
+  @@index([tableId])
+  @@index([waiterId])
 }
 
 /// One payment taken for an order. Staff without a cash drawer (managers) hand the cash
@@ -308,21 +350,25 @@ model TipShare {
 }
 
 model OrderItem {
-  id              String    @id @default(cuid())
+  id              String        @id @default(cuid())
   orderId         String
-  order           Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  menuItemId      String
-  menuItem        MenuItem  @relation(fields: [menuItemId], references: [id])
+  order           Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  lineKind        OrderLineKind @default(MENU)
+  /// Null for PER_HEAD cover-charge lines.
+  menuItemId      String?
+  menuItem        MenuItem?     @relation(fields: [menuItemId], references: [id])
   name            String
   sellUnit        UnitType
-  quantity        Decimal   @db.Decimal(14, 3)
-  ratePerUnit     Decimal   @db.Decimal(14, 2)
-  amount          Decimal   @db.Decimal(14, 2)
-  unitCost        Decimal   @default(0) @db.Decimal(14, 2)
-  costAmount      Decimal   @default(0) @db.Decimal(14, 2)
+  quantity        Decimal       @db.Decimal(14, 3)
+  ratePerUnit     Decimal       @db.Decimal(14, 2)
+  amount          Decimal       @db.Decimal(14, 2)
+  unitCost        Decimal       @default(0) @db.Decimal(14, 2)
+  costAmount      Decimal       @default(0) @db.Decimal(14, 2)
   notes           String?
-  kotRound        Int       @default(1)
+  kotRound        Int           @default(1)
   addedById       String?
-  addedBy         User?     @relation("OrderItemAddedBy", fields: [addedById], references: [id])
-  createdAt       DateTime  @default(now())
+  addedBy         User?         @relation("OrderItemAddedBy", fields: [addedById], references: [id])
+  createdAt       DateTime      @default(now())
+
+  @@index([orderId, lineKind])
 }

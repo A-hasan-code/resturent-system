@@ -12,7 +12,8 @@ type Staff = { id: string; name: string; roleCode: string; roleName: string };
 
 const DEMOS: { roleKey: MessageKey; username: string; password: string }[] = [
   { roleKey: "role.ADMIN", username: "admin", password: "admin123" },
-  { roleKey: "role.MANAGER", username: "manager", password: "manager123" },
+  { roleKey: "role.SUPERVISOR", username: "supervisor", password: "super123" },
+  { roleKey: "role.MAIN_CASHIER", username: "maincashier", password: "main123" },
   { roleKey: "role.CASHIER", username: "cashier", password: "cashier123" },
   { roleKey: "role.KITCHEN", username: "kitchen", password: "kitchen123" },
   { roleKey: "role.STORE", username: "store", password: "store123" },
