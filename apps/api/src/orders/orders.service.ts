@@ -38,6 +38,7 @@ const orderInclude = {
     orderBy: { createdAt: "asc" },
     include: { collectedBy: { select: { name: true } }, handedTo: { select: { name: true } } },
   },
+  creditCustomer: { select: { id: true, name: true, phone: true } },
 } satisfies Prisma.OrderInclude;
 
 type FullOrder = Prisma.OrderGetPayload<{ include: typeof orderInclude }>;
@@ -97,6 +98,7 @@ export class OrdersService {
       where: {
         ...(paymentStatus ? { paymentStatus: paymentStatus as PaymentStatus } : {}),
         ...(status ? { status: status as OrderStatus } : {}),
+        ...(billing ? { creditCustomerId: null } : {}),
         ...(ownOnly
           ? { waiterId: user.id }
           : seesAllOrders(user)
@@ -125,14 +127,23 @@ export class OrdersService {
     if (table) {
       const open = await this.prisma.order.findFirst({
         where: {
-          ...OPEN_ORDER_WHERE,
-          OR: [{ tableId: table.id }, { tableNo: table.label }, { tableNo: table.name }],
+          AND: [
+            OPEN_ORDER_WHERE,
+            { OR: [{ tableId: table.id }, { tableNo: table.label }, { tableNo: table.name }] },
+          ],
         },
         include: { waiter: { select: { id: true, name: true } } },
         orderBy: { createdAt: "desc" },
       });
       if (open) {
         this.assertCanModify(user, open);
+        if (dto.creditCustomerId && open.creditCustomerId && dto.creditCustomerId !== open.creditCustomerId) {
+          throw new BadRequestException("This table is already on another credit account");
+        }
+        if (dto.creditCustomerId && !open.creditCustomerId) {
+          const customerId = await this.resolveCreditCustomer(user, dto.creditCustomerId);
+          await this.prisma.order.update({ where: { id: open.id }, data: { creditCustomerId: customerId } });
+        }
         return this.addItems(user, open.id, {
           items: dto.items,
           printKot: dto.printKot,
@@ -142,6 +153,9 @@ export class OrdersService {
     }
 
     const assignedCashierId = await this.resolveAssignedCashier(user, dto.assignedCashierId);
+    const creditCustomerId = dto.creditCustomerId
+      ? await this.resolveCreditCustomer(user, dto.creditCustomerId, !table)
+      : null;
     const { lines, subtotal, costTotal } = await this.buildLines(user, dto.items);
     const servedByName = cleanName(dto.servedByName);
     const hasKitchen = lines.some((l) => l.lineKind === "MENU");
@@ -158,6 +172,7 @@ export class OrdersService {
         waiterId: user.id,
         assignedCashierId,
         servedByName,
+        creditCustomerId,
         kotRounds: hasKitchen ? 1 : 0,
         items: {
           create: lines.map(({ recipeId: _r, ...rest }) => ({
@@ -198,7 +213,17 @@ export class OrdersService {
     if (!order) throw new NotFoundException("Order not found");
     if (order.paymentStatus === "PAID") throw new BadRequestException("Bill already paid — start a new order");
     if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
+    if (order.creditCustomerId && order.status === "COMPLETED") {
+      throw new BadRequestException("This credit visit is closed. Place a new order for the next sitting");
+    }
     this.assertCanModify(user, order);
+    if (dto.creditCustomerId && order.creditCustomerId && dto.creditCustomerId !== order.creditCustomerId) {
+      throw new BadRequestException("This table is already on another credit account");
+    }
+    if (dto.creditCustomerId && !order.creditCustomerId) {
+      const customerId = await this.resolveCreditCustomer(user, dto.creditCustomerId, !order.tableId);
+      await this.prisma.order.update({ where: { id }, data: { creditCustomerId: customerId } });
+    }
 
     const { lines } = await this.buildLines(user, dto.items);
     const menuLines = lines.filter((l) => l.lineKind === "MENU");
@@ -390,6 +415,9 @@ export class OrdersService {
     if (!order) throw new NotFoundException("Order not found");
     if (order.paymentStatus === "PAID") throw new BadRequestException("Bill is already paid");
     if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
+    if (order.creditCustomerId) {
+      throw new BadRequestException("This bill is on a credit account. Clear it from Credit Customers");
+    }
 
     const total = toNumber(order.total);
     const due = total - toNumber(order.paidAmount);
@@ -463,6 +491,24 @@ export class OrdersService {
         from: user.name,
       });
     }
+    return this.toDto(updated, canSeeCost(user));
+  }
+
+  /** Guest has left. The table frees; the invoice stays on the credit account until they pay. */
+  async releaseCredit(user: AuthUser, id: string) {
+    const order = await this.prisma.order.findUnique({ where: { id }, include: orderInclude });
+    if (!order) throw new NotFoundException("Order not found");
+    if (!order.creditCustomerId) throw new BadRequestException("This order is not on credit");
+    if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
+    if (order.status === "COMPLETED" || order.paymentStatus === "PAID") {
+      return this.toDto(order, canSeeCost(user));
+    }
+    const updated = await this.prisma.order.update({
+      where: { id },
+      data: { status: "COMPLETED" },
+      include: orderInclude,
+    });
+    this.realtime.orderChanged(this.event(updated), "status");
     return this.toDto(updated, canSeeCost(user));
   }
 
@@ -674,6 +720,16 @@ export class OrdersService {
     }
   }
 
+  private async resolveCreditCustomer(user: AuthUser, id: string, takeaway = false) {
+    if (!user.permissions.includes("order.pay")) {
+      throw new ForbiddenException("Only a cashier can put a table on credit");
+    }
+    if (takeaway) throw new BadRequestException("Credit is only for a seated table");
+    const customer = await this.prisma.creditCustomer.findFirst({ where: { id, active: true } });
+    if (!customer) throw new BadRequestException("Credit customer not found");
+    return customer.id;
+  }
+
   private event(o: FullOrder) {
     return {
       id: o.id,
@@ -713,6 +769,9 @@ export class OrdersService {
       assignedCashier: this.staffDto(o.assignedCashier),
       servedBy: o.servedByName,
       servedByName: o.servedByName,
+      creditCustomer: o.creditCustomer
+        ? { id: o.creditCustomer.id, name: o.creditCustomer.name, phone: o.creditCustomer.phone }
+        : null,
       kotRounds: o.kotRounds,
       billRequestedAt: o.billRequestedAt,
       createdAt: o.createdAt,

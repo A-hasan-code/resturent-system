@@ -69,10 +69,10 @@ export class DashboardService {
       this.prisma.order.count({ where: { status: "READY" } }),
       this.prisma.order.count({ where: { status: "COMPLETED" } }),
       this.prisma.order.count({
-        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] } },
+        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] }, creditCustomerId: null },
       }),
       this.prisma.order.aggregate({
-        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] } },
+        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] }, creditCustomerId: null },
         _sum: { total: true },
       }),
       this.prisma.order.count({ where: { paymentStatus: "PAID" } }),
@@ -110,7 +110,7 @@ export class DashboardService {
         take: 15,
       }),
       this.prisma.order.findMany({
-        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] } },
+        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] }, creditCustomerId: null },
         include: { items: true },
         orderBy: { createdAt: "asc" },
         take: 12,

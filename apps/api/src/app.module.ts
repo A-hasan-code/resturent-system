@@ -14,6 +14,7 @@ import { DashboardModule } from "./dashboard/dashboard.module";
 import { UsersModule } from "./users/users.controller";
 import { PaymentsModule } from "./payments/payments.controller";
 import { AuditModule } from "./audit/audit.controller";
+import { CreditModule } from "./credit/credit.module";
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { AuditModule } from "./audit/audit.controller";
     UsersModule,
     PaymentsModule,
     AuditModule,
+    CreditModule,
   ],
 })
 export class AppModule {}
