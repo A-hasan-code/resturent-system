@@ -14,6 +14,8 @@ type Day = {
   purchasesOut: number;
   sales: number;
   tips: number;
+  stockUsed?: number;
+  profit?: number;
 };
 
 type ChartBucket = {
@@ -71,6 +73,8 @@ type Report = {
     purchasesOut: number;
     purchaseCount: number;
     foodCost: number;
+    stockUsed?: number;
+    profit?: number;
     unpaidAmount: number;
     unpaidCount: number;
   };
@@ -447,6 +451,16 @@ export function AuditPage() {
           <strong>{s ? money(s.foodCost) : "—"}</strong>
         </div>
         <div className="panel stat">
+          <span>{t("store.stockUsedToday")}</span>
+          <strong>{s ? money(s.stockUsed ?? 0) : "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("store.dayProfit")}</span>
+          <strong style={{ color: (s?.profit ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
+            {s ? money(s.profit ?? 0) : "—"}
+          </strong>
+        </div>
+        <div className="panel stat">
           <span>{t("dash.unpaid")}</span>
           <strong>
             {s?.unpaidCount ?? "—"}
@@ -470,6 +484,30 @@ export function AuditPage() {
             <Bars days={report.days} />
           ) : (
             <div className="empty">{t("common.noMatch")}</div>
+          )}
+          {report && report.days.length > 0 && (
+            <table style={{ marginTop: "0.8rem" }}>
+              <thead>
+                <tr>
+                  <th>{t("common.date")}</th>
+                  <th>{t("audit.sales")}</th>
+                  <th>{t("store.stockUsedToday")}</th>
+                  <th>{t("store.dayProfit")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.days
+                  .filter((d) => d.sales || d.stockUsed || d.orders)
+                  .map((d) => (
+                    <tr key={d.date}>
+                      <td>{d.date}</td>
+                      <td>{money(d.sales)}</td>
+                      <td>{money(d.stockUsed ?? 0)}</td>
+                      <td>{money(d.profit ?? d.sales - (d.stockUsed ?? 0))}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
           )}
         </div>
         <div className="panel panel-pad">

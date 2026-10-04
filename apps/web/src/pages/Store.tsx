@@ -7,6 +7,8 @@ import { Modal } from "../components/Modal";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 import { downloadExcelCsv } from "../csv";
+import { StorePurchasing } from "./StorePurchasing";
+import { StoreDayUse } from "./StoreDayUse";
 
 const PAGE_SIZE = 15;
 
@@ -74,7 +76,7 @@ export function StorePage() {
   const toast = useToast();
   const t = useT();
   const { ts } = useI18n();
-  const [tab, setTab] = useState<"stock" | "moves" | "usage" | "alerts">("stock");
+  const [tab, setTab] = useState<"stock" | "buy" | "suppliers" | "daily" | "moves" | "usage" | "alerts">("stock");
   const [cats, setCats] = useState<Cat[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [moves, setMoves] = useState<Movement[]>([]);
@@ -290,28 +292,24 @@ export function StorePage() {
     matchesSearch(q, m.itemName, m.category, m.type, m.note, m.orderNo, m.tableNo)
   );
 
-  const filteredUsage = usage.filter((u) =>
-    matchesSearch(q, u.itemName, u.category, u.orderNos)
-  );
-
   const filteredLow = low.filter((i) => matchesSearch(q, i.name, i.category));
 
   useEffect(() => {
     setPage(1);
   }, [tab, filter, q]);
 
+  const stockTabs = tab === "stock" || tab === "moves" || tab === "alerts";
   const listTotal =
     tab === "stock"
       ? shown.length
       : tab === "moves"
         ? filteredMoves.length
-        : tab === "usage"
-          ? filteredUsage.length
-          : filteredLow.length;
+        : tab === "alerts"
+          ? filteredLow.length
+          : 0;
 
   const pageStock = paginate(shown, page, PAGE_SIZE);
   const pageMoves = paginate(filteredMoves, page, PAGE_SIZE);
-  const pageUsage = paginate(filteredUsage, page, PAGE_SIZE);
   const pageLow = paginate(filteredLow, page, PAGE_SIZE);
 
   function exportStock() {
@@ -380,8 +378,7 @@ export function StorePage() {
         <div>
           <h1>{t("store.title")}</h1>
           <p>
-            {t("store.stockIn")} · {t("store.stockOut")} · {t("store.adjust")} ·{" "}
-            {t("store.ledger")} · {t("common.search")}
+            {t("store.stockIn")} · {t("store.tabBuy")} · {t("store.tabUsed")} · {t("store.ledger")}
           </p>
         </div>
         <div className="row">
@@ -400,11 +397,11 @@ export function StorePage() {
           )}
           {can("store.manage") && (
             <>
+              <button type="button" className="btn sm" onClick={() => setTab("buy")}>
+                {t("store.newPurchase")}
+              </button>
               <button type="button" className="btn ok sm" onClick={() => openMove("IN")}>
                 {t("store.stockIn")}
-              </button>
-              <button type="button" className="btn warn sm" onClick={() => openMove("OUT")}>
-                {t("store.stockOut")}
               </button>
               <button type="button" className="btn ghost sm" onClick={() => openMove("ADJUST")}>
                 {t("store.adjust")}
@@ -444,6 +441,9 @@ export function StorePage() {
         {(
           [
             ["stock", "store.tabList"],
+            ["buy", "store.tabBuy"],
+            ["suppliers", "store.tabSuppliers"],
+            ["daily", "store.tabDaily"],
             ["moves", "store.tabMoves"],
             ["usage", "store.tabUsed"],
             ["alerts", "store.tabLow"],
@@ -527,13 +527,6 @@ export function StorePage() {
                           </button>
                           <button
                             type="button"
-                            className="btn warn sm"
-                            onClick={() => openMove("OUT", i)}
-                          >
-                            {t("store.stockOut")}
-                          </button>
-                          <button
-                            type="button"
                             className="btn ghost sm"
                             onClick={() => openRateEdit(i)}
                           >
@@ -549,6 +542,15 @@ export function StorePage() {
             {!shown.length && <div className="empty">{t("store.noItems")}</div>}
           </div>
         </>
+      )}
+
+      {(tab === "buy" || tab === "suppliers" || tab === "daily") && (
+        <StorePurchasing
+          view={tab}
+          items={flat}
+          canManage={can("store.manage")}
+          onChanged={() => void load()}
+        />
       )}
 
       {tab === "moves" && (
@@ -610,43 +612,7 @@ export function StorePage() {
         </div>
       )}
 
-      {tab === "usage" && (
-        <div className="panel panel-pad">
-          <p className="muted" style={{ marginTop: 0 }}>
-            {t("store.usedHint")}
-          </p>
-          <table>
-            <thead>
-              <tr>
-                <th>{t("common.item")}</th>
-                <th>{t("store.used")}</th>
-                <th>{t("common.value")}</th>
-                <th>{t("store.orders")}</th>
-                <th>{t("store.orderNos")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pageUsage.map((u) => (
-                <tr key={u.itemId}>
-                  <td>
-                    {u.itemName}
-                    <div className="tiny muted">{u.category}</div>
-                  </td>
-                  <td>
-                    {u.totalUsed} {unitLabel(u.unit)}
-                  </td>
-                  <td>{money(u.totalValue)}</td>
-                  <td>{u.orderCount}</td>
-                  <td className="tiny">{u.orderNos || "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!filteredUsage.length && (
-            <div className="empty">{t("store.noUsed")}</div>
-          )}
-        </div>
-      )}
+      {tab === "usage" && <StoreDayUse canManage={can("store.manage")} onChanged={() => void load()} />}
 
       {tab === "alerts" && (
         <div className="panel panel-pad">
@@ -702,12 +668,14 @@ export function StorePage() {
         </div>
       )}
 
-      <Pagination
-        page={page}
-        pageSize={PAGE_SIZE}
-        total={listTotal}
-        onChange={setPage}
-      />
+      {stockTabs && (
+        <Pagination
+          page={page}
+          pageSize={PAGE_SIZE}
+          total={listTotal}
+          onChange={setPage}
+        />
+      )}
 
       <Modal open={!!moveOpen} title={moveTitle} onClose={() => setMoveOpen(null)}>
         <form onSubmit={submitMove}>
@@ -758,10 +726,13 @@ export function StorePage() {
             <input value={qty} onChange={(e) => setQty(e.target.value)} required />
           </div>
           {moveOpen === "IN" && (
-            <div className="field">
-              <label>{t("store.purchaseRate")}</label>
-              <input value={rate} onChange={(e) => setRate(e.target.value)} />
-            </div>
+            <>
+              <p className="muted tiny">{t("store.stockInHint")}</p>
+              <div className="field">
+                <label>{t("store.purchaseRate")}</label>
+                <input value={rate} onChange={(e) => setRate(e.target.value)} />
+              </div>
+            </>
           )}
           {moveOpen === "OUT" && (
             <div className="field">

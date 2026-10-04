@@ -2332,6 +2332,11 @@ td .row {
   background: var(--accent-soft) !important;
 }
 
+.purchase-layout {
+  display: grid;
+  gap: 0.85rem;
+}
+
 .waiter-item-qty {
   position: absolute;
   bottom: 0.45rem;
