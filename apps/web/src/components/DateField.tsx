@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useT } from "../i18n";
 
 type Props = {
@@ -9,6 +10,8 @@ type Props = {
   max?: string;
   disabled?: boolean;
 };
+
+type PopPos = { top: number; left: number };
 
 function parseDay(iso: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
@@ -38,13 +41,19 @@ function clampIso(iso: string, min?: string, max?: string) {
 }
 
 const WEEKDAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+const POP_WIDTH = 280;
+const POP_GAP = 6;
+const VIEW_PAD = 8;
 
 export function DateField({ id, value, onChange, min, max, disabled }: Props) {
   const t = useT();
   const autoId = useId();
   const inputId = id ?? autoId;
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<PopPos | null>(null);
   const selected = parseDay(value);
   const [view, setView] = useState(() => startOfMonth(selected ?? new Date()));
 
@@ -52,10 +61,54 @@ export function DateField({ id, value, onChange, min, max, disabled }: Props) {
     if (open) setView(startOfMonth(selected ?? new Date()));
   }, [open, value]);
 
+  useLayoutEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+
+    const place = () => {
+      const trigger = triggerRef.current;
+      const pop = popRef.current;
+      if (!trigger) return;
+
+      const rect = trigger.getBoundingClientRect();
+      const popH = pop?.offsetHeight ?? 320;
+      const popW = Math.min(POP_WIDTH, window.innerWidth - VIEW_PAD * 2);
+      const spaceBelow = window.innerHeight - rect.bottom - VIEW_PAD;
+      const openUp = spaceBelow < popH && rect.top > spaceBelow;
+
+      let top = openUp ? rect.top - popH - POP_GAP : rect.bottom + POP_GAP;
+      top = Math.max(VIEW_PAD, Math.min(top, window.innerHeight - popH - VIEW_PAD));
+
+      // Prefer left-align with trigger; if that overflows, right-align to trigger.
+      let left = rect.left;
+      if (left + popW > window.innerWidth - VIEW_PAD) {
+        left = rect.right - popW;
+      }
+      left = Math.max(VIEW_PAD, Math.min(left, window.innerWidth - popW - VIEW_PAD));
+
+      setPos({ top, left });
+    };
+
+    place();
+    // Second pass after paint so measured pop height is accurate.
+    const raf = requestAnimationFrame(place);
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, view]);
+
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (rootRef.current?.contains(target) || popRef.current?.contains(target)) return;
+      setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
@@ -94,11 +147,89 @@ export function DateField({ id, value, onChange, min, max, disabled }: Props) {
     setOpen(false);
   }
 
+  const popover =
+    open &&
+    createPortal(
+      <div
+        className="date-pop"
+        role="dialog"
+        aria-label={title}
+        ref={popRef}
+        style={
+          pos
+            ? { top: pos.top, left: pos.left, width: Math.min(POP_WIDTH, window.innerWidth - VIEW_PAD * 2) }
+            : { visibility: "hidden", top: 0, left: 0 }
+        }
+      >
+        <div className="date-pop-head">
+          <strong>{title}</strong>
+          <div className="date-pop-nav">
+            <button type="button" className="date-nav-btn" aria-label="Previous month" onClick={() => setView((v) => addMonths(v, -1))}>
+              ‹
+            </button>
+            <button type="button" className="date-nav-btn" aria-label="Next month" onClick={() => setView((v) => addMonths(v, 1))}>
+              ›
+            </button>
+          </div>
+        </div>
+
+        <div className="date-pop-week">
+          {WEEKDAYS.map((w) => (
+            <span key={w}>{w}</span>
+          ))}
+        </div>
+
+        <div className="date-pop-grid">
+          {days.map((day) => (
+            <button
+              key={day.iso + String(day.inMonth)}
+              type="button"
+              disabled={day.disabledDay}
+              className={[
+                "date-day",
+                day.inMonth ? "" : "muted",
+                day.isSelected ? "selected" : "",
+                day.isToday && !day.isSelected ? "today" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              onClick={() => pick(day.iso)}
+            >
+              {day.d.getDate()}
+            </button>
+          ))}
+        </div>
+
+        <div className="date-pop-foot">
+          <button
+            type="button"
+            className="date-foot-btn"
+            onClick={() => {
+              onChange("");
+              setOpen(false);
+            }}
+          >
+            {t("common.clear")}
+          </button>
+          <button
+            type="button"
+            className="date-foot-btn"
+            disabled={(!!min && toIso(new Date()) < min) || (!!max && toIso(new Date()) > max)}
+            onClick={() => pick(clampIso(toIso(new Date()), min, max))}
+          >
+            {t("common.today")}
+          </button>
+        </div>
+      </div>,
+      document.body
+    );
+
   return (
     <div className={`date-field${open ? " open" : ""}`} ref={rootRef}>
       <button
         type="button"
         id={inputId}
+        ref={triggerRef}
         className="date-field-trigger"
         disabled={disabled}
         aria-haspopup="dialog"
@@ -111,70 +242,7 @@ export function DateField({ id, value, onChange, min, max, disabled }: Props) {
           <path d="M8 3.5v3.5M16 3.5v3.5M3.5 10h17" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
         </svg>
       </button>
-
-      {open && (
-        <div className="date-pop" role="dialog" aria-label={title}>
-          <div className="date-pop-head">
-            <strong>{title}</strong>
-            <div className="date-pop-nav">
-              <button type="button" className="date-nav-btn" aria-label="Previous month" onClick={() => setView((v) => addMonths(v, -1))}>
-                ‹
-              </button>
-              <button type="button" className="date-nav-btn" aria-label="Next month" onClick={() => setView((v) => addMonths(v, 1))}>
-                ›
-              </button>
-            </div>
-          </div>
-
-          <div className="date-pop-week">
-            {WEEKDAYS.map((w) => (
-              <span key={w}>{w}</span>
-            ))}
-          </div>
-
-          <div className="date-pop-grid">
-            {days.map((day) => (
-              <button
-                key={day.iso + String(day.inMonth)}
-                type="button"
-                disabled={day.disabledDay}
-                className={[
-                  "date-day",
-                  day.inMonth ? "" : "muted",
-                  day.isSelected ? "selected" : "",
-                  day.isToday && !day.isSelected ? "today" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                onClick={() => pick(day.iso)}
-              >
-                {day.d.getDate()}
-              </button>
-            ))}
-          </div>
-
-          <div className="date-pop-foot">
-            <button
-              type="button"
-              className="date-foot-btn"
-              onClick={() => {
-                onChange("");
-                setOpen(false);
-              }}
-            >
-              {t("common.clear")}
-            </button>
-            <button
-              type="button"
-              className="date-foot-btn"
-              disabled={(!!min && toIso(new Date()) < min) || (!!max && toIso(new Date()) > max)}
-              onClick={() => pick(clampIso(toIso(new Date()), min, max))}
-            >
-              {t("common.today")}
-            </button>
-          </div>
-        </div>
-      )}
+      {popover}
     </div>
   );
 }

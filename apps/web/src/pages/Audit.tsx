@@ -5,6 +5,7 @@ import { useToast } from "../toast";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 import { DateField } from "../components/DateField";
+import { MonthField } from "../components/MonthField";
 
 type Day = {
   date: string;
@@ -388,7 +389,18 @@ export function AuditPage() {
             </div>
             <div className="field" style={{ margin: 0 }}>
               <label htmlFor="audit-month">{t("audit.jumpMonth")}</label>
-              <input id="audit-month" type="month" value={month} max={thisMonth} onChange={(e) => pickMonth(e.target.value)} />
+              <MonthField
+                id="audit-month"
+                value={month}
+                max={thisMonth}
+                onChange={(ym) => {
+                  if (!ym) {
+                    setMonth("");
+                    return;
+                  }
+                  pickMonth(ym);
+                }}
+              />
             </div>
             <div className="field" style={{ margin: 0 }}>
               <label htmlFor="audit-staff">{t("audit.staffFilter")}</label>

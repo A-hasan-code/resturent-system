@@ -101,14 +101,22 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
 
   return (
     <form onSubmit={save}>
-      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", marginBottom: "0.75rem" }}>
-        <div>
+      <div
+        className="row"
+        style={{
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          marginBottom: "0.75rem",
+          gap: "1rem",
+        }}
+      >
+        <div style={{ flex: "1 1 16rem", minWidth: 0 }}>
           <h2 style={{ margin: 0 }}>{t("store.tabUsed")}</h2>
           <p className="muted" style={{ margin: "0.25rem 0 0" }}>
             {t("store.dayUseHint")}
           </p>
         </div>
-        <div style={{ textAlign: "right" }}>
+        <div style={{ textAlign: "right", flex: "0 0 auto", marginLeft: "auto" }}>
           <div className="tiny muted">{t("store.dayDate")}</div>
           <strong>{sheet?.businessDate ?? "—"}</strong>
           <div className="tiny muted">
@@ -137,72 +145,75 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
       </div>
 
       <div className="panel panel-pad">
-        <table>
-          <thead>
-            <tr>
-              <th>{t("common.item")}</th>
-              <th>{t("store.onHand")}</th>
-              <th>{t("store.billUsed")}</th>
-              <th>{t("store.extraUsed")}</th>
-              <th>{t("store.reason")}</th>
-              <th>{t("common.value")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {shown.map((i) => {
-              const extraQty = Math.max(0, Number(extra[i.id]) || 0);
-              return (
-                <tr key={i.id}>
-                  <td>
-                    {i.name}
-                    <div className="tiny muted">{i.category}</div>
-                  </td>
-                  <td>
-                    {i.onHand} {unitLabel(i.unit)}
-                  </td>
-                  <td>
-                    {i.autoQty} {unitLabel(i.unit)}
-                  </td>
-                  <td>
-                    <input
-                      type="number"
-                      min={0}
-                      step="0.001"
-                      value={extra[i.id] ?? ""}
-                      disabled={!canManage}
-                      onChange={(e) => setExtra((prev) => ({ ...prev, [i.id]: e.target.value }))}
-                      placeholder="0"
-                      style={{ width: 90 }}
-                    />
-                  </td>
-                  <td>
-                    <select
-                      value={reason[i.id] || REASONS[0].value}
-                      disabled={!canManage || extraQty <= 0}
-                      onChange={(e) => setReason((prev) => ({ ...prev, [i.id]: e.target.value }))}
-                    >
-                      {REASONS.map((r) => (
-                        <option key={r.value} value={r.value}>
-                          {t(r.key)}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>{money((i.autoQty + extraQty) * i.rate)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <div className="table-wrap">
+          <table className="day-use-table">
+            <thead>
+              <tr>
+                <th>{t("common.item")}</th>
+                <th>{t("store.onHand")}</th>
+                <th>{t("store.billUsed")}</th>
+                <th>{t("store.extraUsed")}</th>
+                <th>{t("store.reason")}</th>
+                <th>{t("common.value")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((i) => {
+                const extraQty = Math.max(0, Number(extra[i.id]) || 0);
+                return (
+                  <tr key={i.id}>
+                    <td>
+                      {i.name}
+                      <div className="tiny muted">{i.category}</div>
+                    </td>
+                    <td className="nowrap">
+                      {i.onHand} {unitLabel(i.unit)}
+                    </td>
+                    <td className="nowrap">
+                      {i.autoQty} {unitLabel(i.unit)}
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        className="field-ctrl sm"
+                        min={0}
+                        step="0.001"
+                        value={extra[i.id] ?? ""}
+                        disabled={!canManage}
+                        onChange={(e) => setExtra((prev) => ({ ...prev, [i.id]: e.target.value }))}
+                        placeholder="0"
+                      />
+                    </td>
+                    <td>
+                      <select
+                        className="field-ctrl wide"
+                        value={reason[i.id] || REASONS[0].value}
+                        disabled={!canManage || extraQty <= 0}
+                        onChange={(e) => setReason((prev) => ({ ...prev, [i.id]: e.target.value }))}
+                      >
+                        {REASONS.map((r) => (
+                          <option key={r.value} value={r.value}>
+                            {t(r.key)}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="nowrap">{money((i.autoQty + extraQty) * i.rate)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
         {!shown.length && <div className="empty">{t("store.noItems")}</div>}
-        {canManage && (
-          <div className="form-actions">
-            <button className="btn" type="submit" disabled={busy || !sheet}>
-              {busy ? t("common.saving") : t("store.saveDayUse")}
-            </button>
-          </div>
-        )}
       </div>
+      {canManage && (
+        <div className="form-actions day-use-actions">
+          <button className="btn" type="submit" disabled={busy || !sheet}>
+            {busy ? t("common.saving") : t("store.saveDayUse")}
+          </button>
+        </div>
+      )}
     </form>
   );
 }
