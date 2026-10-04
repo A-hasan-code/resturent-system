@@ -58,7 +58,7 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
     kpiRow(doc, contentW, [
       { label: "Purchases out", value: money(s.purchasesOut), note: `${s.purchaseCount} stock-ins` },
       { label: "Cash left", value: money(cashLeft), note: "Payments − purchases" },
-      { label: "Food cost", value: money(s.foodCost), note: "Paid bills only" },
+      { label: "Food cost", value: money(s.foodCost), note: "Recipe cost on paid bills" },
       { label: "Unpaid amount", value: money(s.unpaidAmount), note: `${s.unpaidCount} open bills` },
     ]);
 
@@ -95,18 +95,18 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
     table(
       doc,
       contentW,
-      ["Date", "Orders", "Sales", "Tips", "Payments in", "Purchases"],
+      ["Date", "Sales", "Stock used", "Profit", "Payments", "Purchases"],
       report.days
-        .filter((d) => d.orders || d.paymentsIn || d.purchasesOut || d.sales)
+        .filter((d) => d.orders || d.paymentsIn || d.purchasesOut || d.sales || d.stockUsed)
         .map((d) => [
           dayLabel(d.date),
-          String(d.orders),
           money(d.sales),
-          money(d.tips),
+          money(d.stockUsed),
+          money(d.profit),
           money(d.paymentsIn),
           money(d.purchasesOut),
         ]),
-      [0.16, 0.12, 0.18, 0.16, 0.2, 0.18]
+      [0.16, 0.16, 0.17, 0.17, 0.17, 0.17]
     );
 
     ensureSpace(doc, 120);

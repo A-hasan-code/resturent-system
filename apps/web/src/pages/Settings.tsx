@@ -29,6 +29,7 @@ type Restaurant = {
   phone: string;
   accent?: string;
   logoUrl?: string | null;
+  dayStart?: string;
 };
 
 type Printer = {
@@ -121,7 +122,7 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
   const { refresh, logoSrc } = useBrand();
   const [info, setInfo] = useState<ServerInfo | null>(null);
   const [serverName, setServerName] = useState("");
-  const [r, setR] = useState<Restaurant>({ name: "", tagline: "", address: "", phone: "", accent: "#0f7a6c" });
+  const [r, setR] = useState<Restaurant>({ name: "", tagline: "", address: "", phone: "", accent: "#0f7a6c", dayStart: "11:00" });
   const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
@@ -147,6 +148,7 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
           address: r.address,
           phone: r.phone,
           accent: r.accent,
+          dayStart: r.dayStart || "11:00",
         }),
       });
       applyAccent(r.accent || "#0f7a6c");
@@ -264,6 +266,19 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
         <div className="field">
           <label>{t("settings.serverName")}</label>
           <input value={serverName} disabled={!canEdit} onChange={(e) => setServerName(e.target.value)} />
+        </div>
+        <div className="field">
+          <label htmlFor="day-start">{t("settings.dayStart")}</label>
+          <input
+            id="day-start"
+            type="time"
+            value={r.dayStart || "11:00"}
+            disabled={!canEdit}
+            onChange={(e) => setR({ ...r, dayStart: e.target.value })}
+          />
+          <p className="tiny muted" style={{ margin: "0.3rem 0 0" }}>
+            {t("settings.dayStartHint")}
+          </p>
         </div>
         {canEdit && (
           <div className="form-footer">

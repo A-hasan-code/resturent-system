@@ -41,6 +41,8 @@ class UpdateSettingsDto {
   @IsOptional() @IsString() @Matches(/^[01]$/) perHeadEnabled?: string;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) perHeadAmount?: number;
   @IsOptional() @IsString() @MaxLength(40) perHeadLabel?: string;
+  /** Business day starts at this server time, HH:mm. Runs until the same time next day. */
+  @IsOptional() @IsString() @Matches(/^([01]\d|2[0-3]):[0-5]\d$/) dayStart?: string;
 }
 
 @Controller()
@@ -118,6 +120,7 @@ export class SystemController {
       ["kotFooter", "print.kot.footer"],
       ["perHeadEnabled", "billing.perHeadEnabled"],
       ["perHeadLabel", "billing.perHeadLabel"],
+      ["dayStart", "restaurant.dayStart"],
     ];
     for (const [field, key] of map) {
       const v = dto[field];

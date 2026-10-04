@@ -36,6 +36,12 @@ enum StockMoveType {
   SALE
 }
 
+/// Cash = paid with the invoice. Credit = some or all still outstanding.
+enum PurchasePayKind {
+  CASH
+  CREDIT
+}
+
 enum PrinterKind {
   WINDOWS
   NETWORK
@@ -179,6 +185,7 @@ model User {
   paymentsCollected Payment[]   @relation("PaymentCollectedBy")
   cashReceived      Payment[]   @relation("PaymentHandedTo")
   tipShares         TipShare[]
+  dayCloses         DayStockClose[]
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 }
@@ -203,10 +210,71 @@ model StoreItem {
   active         Boolean             @default(true)
   ingredients    RecipeIngredient[]
   movements      StockMovement[]
+  purchaseLines  PurchaseLine[]
+  dayCloseLines  DayStockCloseLine[]
   createdAt      DateTime            @default(now())
   updatedAt      DateTime            @updatedAt
 
   @@unique([categoryId, name])
+}
+
+model Supplier {
+  id        String            @id @default(cuid())
+  name      String
+  phone     String?
+  notes     String?
+  active    Boolean           @default(true)
+  purchases Purchase[]
+  payments  SupplierPayment[]
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@index([name])
+}
+
+model Purchase {
+  id          String          @id @default(cuid())
+  supplierId  String
+  supplier    Supplier        @relation(fields: [supplierId], references: [id])
+  /// Noon-local timestamp of the business day the goods arrived.
+  purchasedAt DateTime
+  payKind     PurchasePayKind
+  /// Cash paid on this invoice (cash purchases = full total).
+  paidAmount  Decimal         @default(0) @db.Decimal(14, 2)
+  total       Decimal         @db.Decimal(14, 2)
+  note        String?
+  lines       PurchaseLine[]
+  movements   StockMovement[]
+  createdAt   DateTime        @default(now())
+
+  @@index([purchasedAt])
+  @@index([supplierId])
+}
+
+model PurchaseLine {
+  id           String    @id @default(cuid())
+  purchaseId   String
+  purchase     Purchase  @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  storeItemId  String
+  storeItem    StoreItem @relation(fields: [storeItemId], references: [id])
+  categoryName String
+  unit         UnitType
+  quantity     Decimal   @db.Decimal(14, 3)
+  /// Rate on this invoice. Never rewritten when a later purchase changes the item rate.
+  ratePerUnit  Decimal   @db.Decimal(14, 2)
+  amount       Decimal   @db.Decimal(14, 2)
+}
+
+model SupplierPayment {
+  id         String   @id @default(cuid())
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+  amount     Decimal  @db.Decimal(14, 2)
+  paidAt     DateTime
+  note       String?
+  createdAt  DateTime @default(now())
+
+  @@index([supplierId, paidAt])
 }
 
 model StockMovement {
@@ -219,7 +287,41 @@ model StockMovement {
   note        String?
   orderId     String?
   order       Order?        @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  purchaseId  String?
+  purchase    Purchase?     @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
+  dayCloseId  String?
+  dayClose    DayStockClose? @relation(fields: [dayCloseId], references: [id], onDelete: SetNull)
   createdAt   DateTime      @default(now())
+}
+
+/// One stock close per business day (day starts at the time set in Settings).
+model DayStockClose {
+  id             String              @id @default(cuid())
+  businessDate   String              @unique
+  stockUsedValue Decimal             @db.Decimal(14, 2)
+  sales          Decimal             @default(0) @db.Decimal(14, 2)
+  profit         Decimal             @default(0) @db.Decimal(14, 2)
+  closedById     String?
+  closedBy       User?               @relation(fields: [closedById], references: [id], onDelete: SetNull)
+  lines          DayStockCloseLine[]
+  movements      StockMovement[]
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+}
+
+model DayStockCloseLine {
+  id          String        @id @default(cuid())
+  closeId     String
+  close       DayStockClose @relation(fields: [closeId], references: [id], onDelete: Cascade)
+  storeItemId String
+  storeItem   StoreItem     @relation(fields: [storeItemId], references: [id])
+  autoQty     Decimal       @db.Decimal(14, 3)
+  extraQty    Decimal       @default(0) @db.Decimal(14, 3)
+  reason      String?
+  ratePerUnit Decimal       @db.Decimal(14, 2)
+  amount      Decimal       @db.Decimal(14, 2)
+
+  @@unique([closeId, storeItemId])
 }
 
 model RecipeCategory {

@@ -5,6 +5,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
 import { dataDir } from "../config/env";
 import { toNumber } from "../common/units";
+import { businessDateOf, businessWindow } from "../common/business-day";
 import { renderAuditPdf } from "./audit-pdf";
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -22,6 +23,8 @@ export type AuditDay = {
   billsPaid: number;
   sales: number;
   tips: number;
+  stockUsed: number;
+  profit: number;
 };
 
 export type AuditReport = {
@@ -41,6 +44,10 @@ export type AuditReport = {
     purchasesOut: number;
     purchaseCount: number;
     foodCost: number;
+    /** Bill deductions plus the day's saved extra usage (flour, salad, wastage). */
+    stockUsed: number;
+    /** Food sales minus stock used. */
+    profit: number;
     unpaidAmount: number;
     unpaidCount: number;
   };
@@ -130,8 +137,10 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   async report(from: string, to: string, staffName?: string): Promise<AuditReport> {
-    const start = dayStart(from);
-    const end = dayEndExclusive(to);
+    if (!DATE.test(from) || !DATE.test(to)) throw new BadRequestException("Dates must be YYYY-MM-DD");
+    const day = await this.settings.dayStart();
+    const start = businessWindow(from, day.h, day.m).from;
+    const end = businessWindow(to, day.h, day.m).to;
     if (end <= start) throw new BadRequestException("End date is before the start date");
     if (end.getTime() - start.getTime() > MAX_DAYS * 86400000) {
       throw new BadRequestException("Date range is too long");
@@ -142,7 +151,7 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
       ? { contains: staffFilter, mode: "insensitive" as const }
       : undefined;
 
-    const [orders, payments, purchases, firstSaleDate] = await Promise.all([
+    const [orders, payments, purchases, saleMoves, closes, firstSaleDate] = await Promise.all([
       this.prisma.order.findMany({
         where: {
           createdAt: { gte: start, lt: end },
@@ -201,6 +210,14 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         orderBy: { createdAt: "asc" },
         take: 8000,
       }),
+      this.prisma.stockMovement.findMany({
+        where: { type: "SALE", createdAt: { gte: start, lt: end } },
+        select: { quantity: true, ratePerUnit: true, createdAt: true },
+      }),
+      this.prisma.dayStockClose.findMany({
+        where: { businessDate: { gte: from, lte: to } },
+        include: { lines: { select: { extraQty: true, ratePerUnit: true } } },
+      }),
       this.firstSaleDate(),
     ]);
 
@@ -216,9 +233,11 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         billsPaid: 0,
         sales: 0,
         tips: 0,
+        stockUsed: 0,
+        profit: 0,
       });
     }
-    const bucket = (d: Date) => days.get(isoDay(d));
+    const bucket = (d: Date) => days.get(businessDateOf(d, day.h, day.m));
 
     let cancelled = 0;
     let unpaidAmount = 0;
@@ -290,6 +309,25 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
       collectors.set(key, s);
     }
 
+    const autoByDay = new Map<string, number>();
+    for (const m of saleMoves) {
+      const key = businessDateOf(m.createdAt, day.h, day.m);
+      const value = Math.abs(toNumber(m.quantity)) * toNumber(m.ratePerUnit);
+      autoByDay.set(key, (autoByDay.get(key) ?? 0) + value);
+    }
+    const extraByDay = new Map<string, number>();
+    for (const c of closes) {
+      const extra = c.lines.reduce((s, l) => s + toNumber(l.extraQty) * toNumber(l.ratePerUnit), 0);
+      extraByDay.set(c.businessDate, extra);
+    }
+    let stockUsed = 0;
+    for (const row of days.values()) {
+      row.stockUsed = Math.round(((autoByDay.get(row.date) ?? 0) + (extraByDay.get(row.date) ?? 0)) * 100) / 100;
+      row.profit = Math.round((row.sales - row.stockUsed) * 100) / 100;
+      stockUsed += row.stockUsed;
+    }
+    stockUsed = Math.round(stockUsed * 100) / 100;
+
     let purchasesOut = 0;
     const purchaseRows = purchases.map((m) => {
       const amount = Math.abs(toNumber(m.quantity)) * toNumber(m.ratePerUnit);
@@ -322,6 +360,8 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         purchasesOut,
         purchaseCount: purchases.length,
         foodCost,
+        stockUsed,
+        profit: Math.round((salesTotal - stockUsed) * 100) / 100,
         unpaidAmount,
         unpaidCount,
       },

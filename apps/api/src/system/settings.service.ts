@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "f
 import { extname, join } from "path";
 import { PrismaService } from "../prisma/prisma.service";
 import { dataDir } from "../config/env";
+import { parseDayStart } from "../common/business-day";
 
 export const RESTAURANT_KEYS = [
   "restaurant.name",
@@ -54,7 +55,12 @@ export class SettingsService {
       phone: s["restaurant.phone"] || "",
       accent: ACCENT_RE.test(s["restaurant.accent"] || "") ? s["restaurant.accent"] : "#0f7a6c",
       logoUrl: logo || null,
+      dayStart: parseDayStart(s["restaurant.dayStart"]).label,
     };
+  }
+
+  async dayStart() {
+    return parseDayStart(await this.get("restaurant.dayStart", "11:00"));
   }
 
   /** Cover charge / person-per-head (Settings → Billing). */

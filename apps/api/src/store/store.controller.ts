@@ -9,21 +9,100 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { StoreService } from "./store.service";
+import { PurchasesService } from "./purchases.service";
+import { DayUseService } from "./day-use.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
-import { RequirePerms } from "../common/decorators";
+import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
 import {
+  CreatePurchaseDto,
   CreateStoreItemDto,
+  CreateSupplierDto,
+  SaveDayUseDto,
   StockAdjustDto,
   StockInDto,
   StockOutDto,
+  SupplierPaymentDto,
   UpdateStoreItemDto,
+  UpdateSupplierDto,
 } from "./dto";
 
 @Controller("store")
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class StoreController {
-  constructor(private readonly store: StoreService) {}
+  constructor(
+    private readonly store: StoreService,
+    private readonly purchases: PurchasesService,
+    private readonly dayUse: DayUseService
+  ) {}
+
+  @Get("day-use")
+  @RequirePerms("store.view", "store.manage")
+  dayUseSheet() {
+    return this.dayUse.sheet();
+  }
+
+  @Post("day-use")
+  @RequirePerms("store.manage")
+  saveDayUse(@CurrentUser() user: AuthUser, @Body() dto: SaveDayUseDto) {
+    return this.dayUse.save(user, dto);
+  }
+
+  @Get("suppliers")
+  @RequirePerms("store.view", "store.manage")
+  suppliers() {
+    return this.purchases.listSuppliers();
+  }
+
+  @Post("suppliers")
+  @RequirePerms("store.manage")
+  createSupplier(@Body() dto: CreateSupplierDto) {
+    return this.purchases.createSupplier(dto);
+  }
+
+  @Patch("suppliers/:id")
+  @RequirePerms("store.manage")
+  updateSupplier(@Param("id") id: string, @Body() dto: UpdateSupplierDto) {
+    return this.purchases.updateSupplier(id, dto);
+  }
+
+  @Get("suppliers/:id/ledger")
+  @RequirePerms("store.view", "store.manage")
+  supplierLedger(@Param("id") id: string) {
+    return this.purchases.ledger(id);
+  }
+
+  @Post("suppliers/:id/payments")
+  @RequirePerms("store.manage")
+  paySupplier(@Param("id") id: string, @Body() dto: SupplierPaymentDto) {
+    return this.purchases.paySupplier(id, dto);
+  }
+
+  @Get("purchases/dates")
+  @RequirePerms("store.view", "store.manage")
+  purchaseDates() {
+    return this.purchases.recentDates();
+  }
+
+  @Get("purchases/recent")
+  @RequirePerms("store.view", "store.manage")
+  recentPurchases() {
+    return this.purchases.recentPurchases();
+  }
+
+  @Get("purchases")
+  @RequirePerms("store.view", "store.manage")
+  dailyPurchases(@Query("date") date?: string) {
+    const today = new Date();
+    const fallback = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+    return this.purchases.daily(date || fallback);
+  }
+
+  @Post("purchases")
+  @RequirePerms("store.manage")
+  createPurchase(@Body() dto: CreatePurchaseDto) {
+    return this.purchases.createPurchase(dto);
+  }
 
   @Get("categories")
   @RequirePerms("store.view", "store.manage", "recipe.manage", "menu.manage")
