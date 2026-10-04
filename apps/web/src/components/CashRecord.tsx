@@ -61,7 +61,7 @@ export function CashRecord() {
         <p className="muted" style={{ margin: 0 }}>
           {t("cash.recordHint")}
         </p>
-        <div className="field" style={{ margin: 0 }}>
+        <div className="field cash-day-field" style={{ margin: 0 }}>
           <label htmlFor="cash-day">{t("cash.day")}</label>
           <DateField id="cash-day" value={day} max={isoDay(new Date())} onChange={setDay} />
         </div>

@@ -437,245 +437,250 @@ export function StorePage() {
         <SearchField value={q} onChange={setQ} placeholder={t("store.search")} />
       </div>
 
-      <div className="chips">
-        {(
-          [
-            ["stock", "store.tabList"],
-            ["buy", "store.tabBuy"],
-            ["suppliers", "store.tabSuppliers"],
-            ["daily", "store.tabDaily"],
-            ["moves", "store.tabMoves"],
-            ["usage", "store.tabUsed"],
-            ["alerts", "store.tabLow"],
-          ] as const
-        ).map(([k, key]) => (
-          <button
-            key={k}
-            type="button"
-            className={`chip ${tab === k ? "active" : ""}`}
-            onClick={() => setTab(k)}
-          >
-            {t(key)}
-          </button>
-        ))}
-      </div>
-
-      {tab === "stock" && (
-        <>
-          <div className="chips">
-            <button
-              type="button"
-              className={`chip ${filter === "ALL" ? "active" : ""}`}
-              onClick={() => setFilter("ALL")}
-            >
-              {t("common.all")}
-            </button>
-            {cats.map((c) => (
+      <div className="store-layout">
+        <nav className="store-nav" aria-label={t("store.title")}>
+          {(
+            [
+              ["stock", "store.tabList"],
+              ["buy", "store.tabBuy"],
+              ["suppliers", "store.tabSuppliers"],
+              ["daily", "store.tabDaily"],
+              ["moves", "store.tabMoves"],
+              ["usage", "store.tabUsed"],
+              ["alerts", "store.tabLow"],
+            ] as const
+          ).map(([k, key]) => (
+            <div key={k} className="store-nav-group">
               <button
-                key={c.id}
                 type="button"
-                className={`chip ${filter === c.code ? "active" : ""}`}
-                onClick={() => setFilter(c.code)}
+                className={`store-nav-link ${tab === k ? "active" : ""}`}
+                onClick={() => setTab(k)}
               >
-                {c.name}
+                {t(key)}
               </button>
-            ))}
-          </div>
-          <div className="panel panel-pad">
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("common.category")}</th>
-                  <th>{t("common.item")}</th>
-                  <th>{t("store.onHand")}</th>
-                  <th>{t("common.rate")}</th>
-                  <th>{t("common.value")}</th>
-                  <th>{t("common.status")}</th>
-                  {can("store.manage") && <th>{t("common.actions")}</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {pageStock.map((i) => (
-                  <tr key={i.id}>
-                    <td>
-                      <span className="badge">{i.category}</span>
-                    </td>
-                    <td>{i.name}</td>
-                    <td>
-                      {i.quantityOnHand} {unitLabel(i.unit)}
-                    </td>
-                    <td>
-                      {money(i.ratePerUnit)}/{unitLabel(i.unit)}
-                    </td>
-                    <td>{money(i.stockValue)}</td>
-                    <td>
-                      {i.lowStock ? (
-                        <span className="badge unpaid">{ts("LOW")}</span>
-                      ) : (
-                        <span className="badge paid">{ts("OK")}</span>
-                      )}
-                    </td>
-                    {can("store.manage") && (
-                      <td>
-                        <div className="row">
-                          <button
-                            type="button"
-                            className="btn ok sm"
-                            onClick={() => openMove("IN", i)}
-                          >
-                            {t("store.stockIn")}
-                          </button>
-                          <button
-                            type="button"
-                            className="btn ghost sm"
-                            onClick={() => openRateEdit(i)}
-                          >
-                            {t("store.editRate")}
-                          </button>
-                        </div>
-                      </td>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {!shown.length && <div className="empty">{t("store.noItems")}</div>}
-          </div>
-        </>
-      )}
-
-      {(tab === "buy" || tab === "suppliers" || tab === "daily") && (
-        <StorePurchasing
-          view={tab}
-          items={flat}
-          canManage={can("store.manage")}
-          onChanged={() => void load()}
-        />
-      )}
-
-      {tab === "moves" && (
-        <div className="panel panel-pad">
-          <table>
-            <thead>
-              <tr>
-                <th>{t("common.when")}</th>
-                <th>{t("common.type")}</th>
-                <th>{t("common.item")}</th>
-                <th>{t("common.qty")}</th>
-                <th>{t("common.order")}</th>
-                <th>{t("store.reason")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pageMoves.map((m) => (
-                <tr key={m.id}>
-                  <td className="tiny">
-                    {new Date(m.createdAt).toLocaleString("en-PK")}
-                  </td>
-                  <td>
-                    <span
-                      className={`badge ${
-                        m.type === "IN"
-                          ? "paid"
-                          : m.type === "OUT" || m.type === "SALE"
-                            ? "unpaid"
-                            : "pending"
-                      }`}
+              {k === "stock" && tab === "stock" && (
+                <div className="store-nav-sub">
+                  <button
+                    type="button"
+                    className={`store-nav-link sub ${filter === "ALL" ? "active" : ""}`}
+                    onClick={() => setFilter("ALL")}
+                  >
+                    {t("common.all")}
+                  </button>
+                  {cats.map((c) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      className={`store-nav-link sub ${filter === c.code ? "active" : ""}`}
+                      onClick={() => setFilter(c.code)}
                     >
-                      {ts(m.type)}
-                    </span>
-                  </td>
-                  <td>
-                    {m.itemName}
-                    <div className="tiny muted">{m.category}</div>
-                  </td>
-                  <td>
-                    {m.quantity > 0 ? "+" : ""}
-                    {m.quantity} {unitLabel(m.unit)}
-                  </td>
-                  <td>
-                    {m.orderNo != null ? (
-                      <>
-                        #{m.orderNo}
-                        <div className="tiny muted">{m.tableNo || ""}</div>
-                      </>
-                    ) : (
-                      "—"
-                    )}
-                  </td>
-                  <td className="tiny">{m.note || "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!filteredMoves.length && <div className="empty">{t("store.noMoves")}</div>}
-        </div>
-      )}
+                      {c.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </nav>
 
-      {tab === "usage" && <StoreDayUse canManage={can("store.manage")} onChanged={() => void load()} />}
-
-      {tab === "alerts" && (
-        <div className="panel panel-pad">
-          {!filteredLow.length ? (
-            <div className="empty">{t("store.allOk")}</div>
-          ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("common.item")}</th>
-                  <th>{t("store.onHand")}</th>
-                  <th>{t("store.reorder")}</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {pageLow.map((i) => (
-                  <tr key={i.id}>
-                    <td>
-                      {i.name}
-                      <div className="tiny muted">{i.category}</div>
-                    </td>
-                    <td>
-                      {i.quantityOnHand} {unitLabel(i.unit)}
-                    </td>
-                    <td>
-                      {i.reorderLevel} {unitLabel(i.unit)}
-                    </td>
-                    <td>
-                      {can("store.manage") && (
-                        <button
-                          type="button"
-                          className="btn ok sm"
-                          onClick={() =>
-                            openMove("IN", {
-                              ...i,
-                              category: i.category || "",
-                              categoryCode: "",
-                              stockValue: 0,
-                              lowStock: true,
-                            })
-                          }
-                        >
-                          {t("store.stockIn")}
-                        </button>
-                      )}
-                    </td>
+        <div className="store-main">
+          {tab === "stock" && (
+            <div className="panel panel-pad">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("common.category")}</th>
+                    <th>{t("common.item")}</th>
+                    <th>{t("store.onHand")}</th>
+                    <th>{t("common.rate")}</th>
+                    <th>{t("common.value")}</th>
+                    <th>{t("common.status")}</th>
+                    {can("store.manage") && <th>{t("common.actions")}</th>}
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {pageStock.map((i) => (
+                    <tr key={i.id}>
+                      <td>
+                        <span className="badge">{i.category}</span>
+                      </td>
+                      <td>{i.name}</td>
+                      <td>
+                        {i.quantityOnHand} {unitLabel(i.unit)}
+                      </td>
+                      <td>
+                        {money(i.ratePerUnit)}/{unitLabel(i.unit)}
+                      </td>
+                      <td>{money(i.stockValue)}</td>
+                      <td>
+                        {i.lowStock ? (
+                          <span className="badge unpaid">{ts("LOW")}</span>
+                        ) : (
+                          <span className="badge paid">{ts("OK")}</span>
+                        )}
+                      </td>
+                      {can("store.manage") && (
+                        <td>
+                          <div className="row">
+                            <button
+                              type="button"
+                              className="btn ok sm"
+                              onClick={() => openMove("IN", i)}
+                            >
+                              {t("store.stockIn")}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn ghost sm"
+                              onClick={() => openRateEdit(i)}
+                            >
+                              {t("store.editRate")}
+                            </button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!shown.length && <div className="empty">{t("store.noItems")}</div>}
+            </div>
+          )}
+
+          {(tab === "buy" || tab === "suppliers" || tab === "daily") && (
+            <StorePurchasing
+              view={tab}
+              items={flat}
+              canManage={can("store.manage")}
+              onChanged={() => void load()}
+            />
+          )}
+
+          {tab === "moves" && (
+            <div className="panel panel-pad">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("common.when")}</th>
+                    <th>{t("common.type")}</th>
+                    <th>{t("common.item")}</th>
+                    <th>{t("common.qty")}</th>
+                    <th>{t("common.order")}</th>
+                    <th>{t("store.reason")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageMoves.map((m) => (
+                    <tr key={m.id}>
+                      <td className="tiny">
+                        {new Date(m.createdAt).toLocaleString("en-PK")}
+                      </td>
+                      <td>
+                        <span
+                          className={`badge ${
+                            m.type === "IN"
+                              ? "paid"
+                              : m.type === "OUT" || m.type === "SALE"
+                                ? "unpaid"
+                                : "pending"
+                          }`}
+                        >
+                          {ts(m.type)}
+                        </span>
+                      </td>
+                      <td>
+                        {m.itemName}
+                        <div className="tiny muted">{m.category}</div>
+                      </td>
+                      <td>
+                        {m.quantity > 0 ? "+" : ""}
+                        {m.quantity} {unitLabel(m.unit)}
+                      </td>
+                      <td>
+                        {m.orderNo != null ? (
+                          <>
+                            #{m.orderNo}
+                            <div className="tiny muted">{m.tableNo || ""}</div>
+                          </>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="tiny">{m.note || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!filteredMoves.length && <div className="empty">{t("store.noMoves")}</div>}
+            </div>
+          )}
+
+          {tab === "usage" && <StoreDayUse canManage={can("store.manage")} onChanged={() => void load()} />}
+
+          {tab === "alerts" && (
+            <div className="panel panel-pad">
+              {!filteredLow.length ? (
+                <div className="empty">{t("store.allOk")}</div>
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{t("common.item")}</th>
+                      <th>{t("store.onHand")}</th>
+                      <th>{t("store.reorder")}</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pageLow.map((i) => (
+                      <tr key={i.id}>
+                        <td>
+                          {i.name}
+                          <div className="tiny muted">{i.category}</div>
+                        </td>
+                        <td>
+                          {i.quantityOnHand} {unitLabel(i.unit)}
+                        </td>
+                        <td>
+                          {i.reorderLevel} {unitLabel(i.unit)}
+                        </td>
+                        <td>
+                          {can("store.manage") && (
+                            <button
+                              type="button"
+                              className="btn ok sm"
+                              onClick={() =>
+                                openMove("IN", {
+                                  ...i,
+                                  category: i.category || "",
+                                  categoryCode: "",
+                                  stockValue: 0,
+                                  lowStock: true,
+                                })
+                              }
+                            >
+                              {t("store.stockIn")}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+
+          {stockTabs && (
+            <Pagination
+              page={page}
+              pageSize={PAGE_SIZE}
+              total={listTotal}
+              onChange={setPage}
+            />
           )}
         </div>
-      )}
-
-      {stockTabs && (
-        <Pagination
-          page={page}
-          pageSize={PAGE_SIZE}
-          total={listTotal}
-          onChange={setPage}
-        />
-      )}
+      </div>
 
       <Modal open={!!moveOpen} title={moveTitle} onClose={() => setMoveOpen(null)}>
         <form onSubmit={submitMove}>
