@@ -47,10 +47,11 @@ class UpdateTableDto {
   @IsOptional() @IsBoolean() active?: boolean;
 }
 
-/** An order keeps its table busy until it is paid or cancelled. */
+/** Cash bills keep the table until paid. A credit meal frees the table once the guest has left (order completed). */
 export const OPEN_ORDER_WHERE = {
   status: { not: "CANCELLED" as const },
   paymentStatus: { not: "PAID" as const },
+  OR: [{ creditCustomerId: null }, { status: { not: "COMPLETED" as const } }],
 };
 
 export function tableLabel(partitionName: string | null | undefined, tableName: string) {

@@ -373,6 +373,19 @@ model MenuItem {
   updatedAt      DateTime       @updatedAt
 }
 
+/// Seated guest who eats now and pays the whole account later. Not supplier credit.
+model CreditCustomer {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String   @unique
+  address   String?
+  cnic      String?  @unique
+  active    Boolean  @default(true)
+  orders    Order[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model Order {
   id            String          @id @default(cuid())
   orderNo       Int             @default(autoincrement())
@@ -401,6 +414,9 @@ model Order {
   servedByName  String?
   kotRounds     Int             @default(1)
   billRequestedAt DateTime?
+  /// Set when the meal is on a credit account. Cash is collected later, in one settlement.
+  creditCustomerId String?
+  creditCustomer   CreditCustomer? @relation(fields: [creditCustomerId], references: [id])
   items         OrderItem[]
   stockMoves    StockMovement[]
   printJobs     PrintJob[]
@@ -412,6 +428,7 @@ model Order {
   @@index([assignedCashierId])
   @@index([tableId])
   @@index([waiterId])
+  @@index([creditCustomerId])
 }
 
 /// One payment taken for an order. Staff without a cash drawer (managers) hand the cash

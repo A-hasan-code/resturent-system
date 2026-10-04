@@ -68,6 +68,11 @@ export class CreateOrderDto {
   @IsOptional()
   @IsBoolean()
   printKot?: boolean;
+
+  /** Seated credit account. The order is the invoice; cash is collected later. */
+  @IsOptional()
+  @IsString()
+  creditCustomerId?: string;
 }
 
 export class EditLineDto {
@@ -102,6 +107,10 @@ export class AddItemsDto {
   @IsString()
   @IsOptional()
   servedByName?: string;
+
+  @IsOptional()
+  @IsString()
+  creditCustomerId?: string;
 }
 
 export class PrintKotDto {

@@ -1,6 +1,15 @@
-import { Injectable } from "@nestjs/common";
+import { BadRequestException, Injectable } from "@nestjs/common";
+import { UnitType } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { convertQty, toNumber, unitCostFromRate } from "./units";
+
+const UNIT_LABEL: Record<UnitType, string> = { KG: "kg", G: "g", L: "L", ML: "ml", PCS: "pcs" };
+
+function qtyLabel(n: number, unit: UnitType) {
+  const rounded = Math.round(n * 1000) / 1000;
+  const text = Number.isInteger(rounded) ? String(rounded) : String(rounded);
+  return `${text} ${UNIT_LABEL[unit] ?? unit}`;
+}
 
 @Injectable()
 export class CostingService {
@@ -24,6 +33,56 @@ export class CostingService {
 
     const baseQty = toNumber(recipe.baseQty) || 1;
     return { recipe, costPerBase: cost / baseQty, totalForBase: cost };
+  }
+
+  /** Block the order when any recipe ingredient is short. Shared ingredients in one order are added together. */
+  async assertCanSell(lines: { recipeId: string; quantity: number; name: string }[]) {
+    const wanted = lines.filter((l) => l.recipeId && l.quantity > 0);
+    if (!wanted.length) return;
+
+    const recipes = await this.prisma.recipe.findMany({
+      where: { id: { in: [...new Set(wanted.map((l) => l.recipeId))] } },
+      include: { ingredients: { include: { storeItem: true } } },
+    });
+    const byId = new Map(recipes.map((r) => [r.id, r]));
+
+    type Need = {
+      name: string;
+      unit: UnitType;
+      need: number;
+      onHand: number;
+      dishes: Set<string>;
+    };
+    const needs = new Map<string, Need>();
+
+    for (const line of wanted) {
+      const recipe = byId.get(line.recipeId);
+      if (!recipe) continue;
+      const scale = line.quantity / (toNumber(recipe.baseQty) || 1);
+      for (const ing of recipe.ingredients) {
+        const deduct = convertQty(toNumber(ing.quantity) * scale, ing.unit, ing.storeItem.unit);
+        const row = needs.get(ing.storeItemId) ?? {
+          name: ing.storeItem.name,
+          unit: ing.storeItem.unit,
+          need: 0,
+          onHand: toNumber(ing.storeItem.quantityOnHand),
+          dishes: new Set<string>(),
+        };
+        row.need += deduct;
+        row.dishes.add(line.name);
+        needs.set(ing.storeItemId, row);
+      }
+    }
+
+    const short = [...needs.values()].filter((n) => n.need - n.onHand > 0.0001);
+    if (!short.length) return;
+
+    const parts = short.map((n) => {
+      const dishes = [...n.dishes].join(", ");
+      const state = n.onHand <= 0.0001 ? "is out of stock" : "is short";
+      return `${dishes}: ${n.name} ${state} (${qtyLabel(n.onHand, n.unit)} in store, this order needs ${qtyLabel(n.need, n.unit)})`;
+    });
+    throw new BadRequestException(`${parts.join(". ")}. Order was not placed.`);
   }
 
   /** Cost for selling `qty` of a menu item (from linked recipe). */

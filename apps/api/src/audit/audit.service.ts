@@ -174,6 +174,7 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
           tipAmount: true,
           paidAmount: true,
           costTotal: true,
+          creditCustomerId: true,
           createdAt: true,
           servedByName: true,
           waiter: { select: { name: true, role: { select: { name: true } } } },
@@ -264,7 +265,7 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
       const taker = takers.get(takerName) ?? { name: takerName, role: takerRole, orders: 0, sales: 0, tips: 0 };
       taker.orders += 1;
 
-      if (o.paymentStatus === "PAID") {
+      if (o.paymentStatus === "PAID" || o.creditCustomerId) {
         billsPaid += 1;
         foodCost += toNumber(o.costTotal);
         salesTotal += total;

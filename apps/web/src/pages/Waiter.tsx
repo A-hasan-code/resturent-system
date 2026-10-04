@@ -87,6 +87,7 @@ type Order = {
   servedBy?: string | null;
   orderedBy?: { id: string; name: string; roleCode: string; roleName: string } | null;
   assignedCashier?: { id: string; name: string; roleCode: string; roleName: string } | null;
+  creditCustomer?: { id: string; name: string; phone: string } | null;
   items: OrderItem[];
 };
 
@@ -161,6 +162,18 @@ export function WaiterPage() {
   const [editQty, setEditQty] = useState<Record<string, number>>({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [perHead, setPerHead] = useState<PerHeadCfg | null>(null);
+  const [creditOn, setCreditOn] = useState(false);
+  const [creditPick, setCreditPick] = useState<{ id: string; name: string; phone: string } | null>(null);
+  const [creditQ, setCreditQ] = useState("");
+  const [creditHits, setCreditHits] = useState<{ id: string; name: string; phone: string }[]>([]);
+  const [creditLookup, setCreditLookup] = useState<"idle" | "loading" | "done">("idle");
+
+  useEffect(() => {
+    setCreditOn(false);
+    setCreditPick(null);
+    setCreditQ("");
+    setCreditHits([]);
+  }, [selected]);
 
   const selectedTable = tables.find((tbl) => tbl.id === selected) ?? null;
   const selectedTakeaway = isTwKey(selected)
@@ -386,8 +399,62 @@ export function WaiterPage() {
     setCart((prev) => prev.map((p) => (p.cartKey === id ? { ...p, notes } : p)));
   }
 
+  useEffect(() => {
+    if (!creditOn || creditPick) return;
+    const term = creditQ.trim();
+    if (term.length < 1) {
+      setCreditHits([]);
+      setCreditLookup("idle");
+      return;
+    }
+    setCreditLookup("loading");
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      void api<{ id: string; name: string; phone: string }[]>(`/credit-customers?q=${encodeURIComponent(term)}`)
+        .then((rows) => {
+          if (cancelled) return;
+          setCreditHits(rows);
+          setCreditLookup("done");
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setCreditHits([]);
+          setCreditLookup("done");
+          toast.push(e instanceof Error ? e.message : t("credit.loadFailed"), "err");
+        });
+    }, 280);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [creditQ, creditOn, creditPick]);
+
+  async function releaseCreditTable() {
+    if (!order) return;
+    setBusy(true);
+    try {
+      const updated = await api<Order>(`/orders/${order.id}/release-credit`, { method: "POST" });
+      setOrder(null);
+      setCart([]);
+      if (updated.creditCustomer) {
+        setCreditOn(true);
+        setCreditPick(updated.creditCustomer);
+      }
+      toast.push(t("waiter.released"), "ok");
+      void loadTables();
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("waiter.sendFailed"), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function sendToKitchen() {
     if (!cart.length) return;
+    if (can("order.pay") && !isTakeawayView && creditOn && !creditPick && !order?.creditCustomer) {
+      toast.push(t("waiter.creditNeed"), "err");
+      return;
+    }
     setPickServer(true);
   }
 
@@ -423,9 +490,17 @@ export function WaiterPage() {
       const tableNo = isTakeaway
         ? walkInName.trim() || order?.tableNo || "Takeaway"
         : selectedTable?.label || selectedTable?.name || "";
-      const body = { items, printKot: hasMenu && !preview, servedByName: serverName };
-      const res = order
-        ? await api<Order>(`/orders/${order.id}/items`, { method: "POST", body: JSON.stringify(body) })
+      const visitClosed = !!order?.creditCustomer && order.status === "COMPLETED";
+      const openOrder = order && !visitClosed ? order : null;
+      const creditId = !isTakeaway && creditPick && (!openOrder || !openOrder.creditCustomer) ? creditPick.id : undefined;
+      const body = {
+        items,
+        printKot: hasMenu && !preview,
+        servedByName: serverName,
+        ...(creditId ? { creditCustomerId: creditId } : {}),
+      };
+      const res = openOrder
+        ? await api<Order>(`/orders/${openOrder.id}/items`, { method: "POST", body: JSON.stringify(body) })
         : await api<Order>("/orders", {
             method: "POST",
             body: JSON.stringify({
@@ -934,6 +1009,66 @@ export function WaiterPage() {
             </div>
           )}
 
+          {can("order.pay") && !isTakeawayView && !order?.creditCustomer && (
+            <div className="waiter-credit">
+              <label className="check tiny">
+                <input type="checkbox" checked={creditOn} onChange={(e) => setCreditOn(e.target.checked)} />
+                {t("waiter.credit")}
+              </label>
+              {creditOn && (
+                <>
+                  <p className="tiny muted" style={{ margin: "0.35rem 0" }}>
+                    {t("waiter.creditHint")}
+                  </p>
+                  {creditPick ? (
+                    <div className="row" style={{ justifyContent: "space-between" }}>
+                      <strong>
+                        {creditPick.name} <span className="tiny muted">{creditPick.phone}</span>
+                      </strong>
+                      <button type="button" className="btn ghost sm" onClick={() => setCreditPick(null)}>
+                        {t("credit.change")}
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <SearchField value={creditQ} onChange={setCreditQ} placeholder={t("waiter.creditSearch")} />
+                      {creditLookup === "done" && creditQ.trim() && !creditHits.length && (
+                        <div className="tiny muted" style={{ marginTop: "0.35rem" }}>
+                          {t("credit.noMatch")}
+                        </div>
+                      )}
+                      {creditHits.length > 0 && (
+                        <ul className="credit-suggest">
+                          {creditHits.map((hit) => (
+                            <li key={hit.id}>
+                              <button type="button" onClick={() => setCreditPick(hit)}>
+                                <strong>{hit.name}</strong>
+                                <span className="tiny muted">{hit.phone}</span>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+          {order?.creditCustomer && (
+            <div className="waiter-credit">
+              <strong>
+                {t("waiter.onCredit")}: {order.creditCustomer.name}
+              </strong>
+              <div className="tiny muted">{order.creditCustomer.phone}</div>
+              {order.status !== "COMPLETED" && order.paymentStatus !== "PAID" && (
+                <button type="button" className="btn ghost sm" style={{ marginTop: "0.4rem" }} disabled={busy} onClick={() => void releaseCreditTable()}>
+                  {t("waiter.guestLeft")}
+                </button>
+              )}
+            </div>
+          )}
+
           <button
             type="button"
             className="btn waiter-send"
@@ -980,7 +1115,7 @@ export function WaiterPage() {
                   {t("waiter.printBill")}
                 </button>
               )}
-              {can("order.pay") && (
+              {can("order.pay") && !order.creditCustomer && (
                 <button type="button" className="btn ok" style={{ flex: 1 }} onClick={() => setPaying(true)}>
                   {t("waiter.takePayment")} {money(order.total - (order.paidAmount ?? 0))}
                 </button>
