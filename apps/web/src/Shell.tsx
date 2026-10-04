@@ -19,6 +19,7 @@ const GROUPS: { titleKey: MessageKey; tabs: Tab[] }[] = [
       { to: "/", labelKey: "nav.dashboard", perms: [], hideFor: ["WAITER", "SUPERVISOR"] },
       { to: "/waiter", labelKey: "nav.waiter", perms: ["order.viewOwn", "order.addItems", "order.create"] },
       { to: "/bills", labelKey: "nav.bills", perms: ["bill.view", "order.pay"] },
+      { to: "/credit", labelKey: "nav.credit", perms: ["bill.view", "order.pay"] },
       { to: "/kitchen", labelKey: "nav.kitchen", perms: ["kitchen.view"] },
     ],
   },

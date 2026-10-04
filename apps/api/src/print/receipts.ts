@@ -25,6 +25,7 @@ export type BillPayload = {
   restaurant: Restaurant;
   orderNo: number;
   tableNo: string | null;
+  creditName?: string | null;
   cashier: string | null;
   waiter: string | null;
   /** Order-taker with role, e.g. "Ali (Manager)". */
@@ -108,6 +109,7 @@ export function renderBill(p: BillPayload, paperWidth: number) {
   e.align("left").rule("=");
   e.align("center").bold().line("CUSTOMER BILL").bold(false).align("left");
   e.pair(`Bill #${p.orderNo}`, `Table: ${p.tableNo || "-"}`);
+  if (p.creditName) e.bold().line(`Credit: ${p.creditName}`).bold(false);
   e.line(when(p.time));
   const orderedBy = p.orderedBy ?? p.waiter;
   if (p.showOrderBy !== false && orderedBy) e.bold().line(`Order taken by: ${orderedBy}`).bold(false);

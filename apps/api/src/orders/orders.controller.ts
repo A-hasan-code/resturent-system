@@ -97,6 +97,12 @@ export class OrdersController {
     return this.orders.pay(user, id, dto);
   }
 
+  @Post(":id/release-credit")
+  @RequirePerms("order.pay")
+  releaseCredit(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    return this.orders.releaseCredit(user, id);
+  }
+
   @Patch(":id/status")
   @RequirePerms("kitchen.update")
   updateStatus(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: UpdateStatusDto) {

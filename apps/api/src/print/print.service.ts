@@ -172,6 +172,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
         items: { orderBy: { createdAt: "asc" } },
         waiter: { select: { name: true, role: { select: { name: true } } } },
         cashier: { select: { name: true } },
+        creditCustomer: { select: { name: true } },
         payments: { select: { collectedBy: { select: { name: true } } } },
       },
     });
@@ -187,6 +188,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       restaurant: await this.settings.restaurant(),
       orderNo: order.orderNo,
       tableNo: order.tableNo,
+      creditName: order.creditCustomer?.name ?? null,
       cashier,
       waiter: order.waiter?.name ?? null,
       orderedBy: staffLabel(order.waiter),

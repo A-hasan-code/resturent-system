@@ -68,6 +68,11 @@ export class CreateOrderDto {
   @IsOptional()
   @IsBoolean()
   printKot?: boolean;
+
+  /** Seated credit account. The order is the invoice; cash is collected later. */
+  @IsOptional()
+  @IsString()
+  creditCustomerId?: string;
 }
 
 export class EditLineDto {
@@ -85,6 +90,24 @@ export class EditOrderDto {
   @ValidateNested({ each: true })
   @Type(() => EditLineDto)
   items!: EditLineDto[];
+
+  /** Move the open bill onto this table. The previous table is released. */
+  @IsOptional()
+  @IsString()
+  tableId?: string;
+
+  @IsOptional()
+  @IsString()
+  assignedCashierId?: string;
+
+  /** Order taker. Must be a supervisor when changed. */
+  @IsOptional()
+  @IsString()
+  waiterId?: string;
+
+  @IsOptional()
+  @IsString()
+  servedByName?: string;
 }
 
 export class AddItemsDto {
@@ -102,6 +125,10 @@ export class AddItemsDto {
   @IsString()
   @IsOptional()
   servedByName?: string;
+
+  @IsOptional()
+  @IsString()
+  creditCustomerId?: string;
 }
 
 export class PrintKotDto {

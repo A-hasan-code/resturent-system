@@ -38,6 +38,7 @@ const orderInclude = {
     orderBy: { createdAt: "asc" },
     include: { collectedBy: { select: { name: true } }, handedTo: { select: { name: true } } },
   },
+  creditCustomer: { select: { id: true, name: true, phone: true } },
 } satisfies Prisma.OrderInclude;
 
 type FullOrder = Prisma.OrderGetPayload<{ include: typeof orderInclude }>;
@@ -97,6 +98,7 @@ export class OrdersService {
       where: {
         ...(paymentStatus ? { paymentStatus: paymentStatus as PaymentStatus } : {}),
         ...(status ? { status: status as OrderStatus } : {}),
+        ...(billing ? { creditCustomerId: null } : {}),
         ...(ownOnly
           ? { waiterId: user.id }
           : seesAllOrders(user)
@@ -125,14 +127,23 @@ export class OrdersService {
     if (table) {
       const open = await this.prisma.order.findFirst({
         where: {
-          ...OPEN_ORDER_WHERE,
-          OR: [{ tableId: table.id }, { tableNo: table.label }, { tableNo: table.name }],
+          AND: [
+            OPEN_ORDER_WHERE,
+            { OR: [{ tableId: table.id }, { tableNo: table.label }, { tableNo: table.name }] },
+          ],
         },
         include: { waiter: { select: { id: true, name: true } } },
         orderBy: { createdAt: "desc" },
       });
       if (open) {
         this.assertCanModify(user, open);
+        if (dto.creditCustomerId && open.creditCustomerId && dto.creditCustomerId !== open.creditCustomerId) {
+          throw new BadRequestException("This table is already on another credit account");
+        }
+        if (dto.creditCustomerId && !open.creditCustomerId) {
+          const customerId = await this.resolveCreditCustomer(user, dto.creditCustomerId);
+          await this.prisma.order.update({ where: { id: open.id }, data: { creditCustomerId: customerId } });
+        }
         return this.addItems(user, open.id, {
           items: dto.items,
           printKot: dto.printKot,
@@ -141,8 +152,12 @@ export class OrdersService {
       }
     }
 
-    const assignedCashierId = await this.resolveAssignedCashier(user, dto.assignedCashierId);
     const { lines, subtotal, costTotal } = await this.buildLines(user, dto.items);
+    await this.ensureStock(lines);
+    const assignedCashierId = await this.resolveAssignedCashier(user, dto.assignedCashierId);
+    const creditCustomerId = dto.creditCustomerId
+      ? await this.resolveCreditCustomer(user, dto.creditCustomerId, !table)
+      : null;
     const servedByName = cleanName(dto.servedByName);
     const hasKitchen = lines.some((l) => l.lineKind === "MENU");
     const order = await this.prisma.order.create({
@@ -158,6 +173,7 @@ export class OrdersService {
         waiterId: user.id,
         assignedCashierId,
         servedByName,
+        creditCustomerId,
         kotRounds: hasKitchen ? 1 : 0,
         items: {
           create: lines.map(({ recipeId: _r, ...rest }) => ({
@@ -198,11 +214,22 @@ export class OrdersService {
     if (!order) throw new NotFoundException("Order not found");
     if (order.paymentStatus === "PAID") throw new BadRequestException("Bill already paid — start a new order");
     if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
+    if (order.creditCustomerId && order.status === "COMPLETED") {
+      throw new BadRequestException("This credit visit is closed. Place a new order for the next sitting");
+    }
     this.assertCanModify(user, order);
+    if (dto.creditCustomerId && order.creditCustomerId && dto.creditCustomerId !== order.creditCustomerId) {
+      throw new BadRequestException("This table is already on another credit account");
+    }
+    if (dto.creditCustomerId && !order.creditCustomerId) {
+      const customerId = await this.resolveCreditCustomer(user, dto.creditCustomerId, !order.tableId);
+      await this.prisma.order.update({ where: { id }, data: { creditCustomerId: customerId } });
+    }
 
     const { lines } = await this.buildLines(user, dto.items);
     const menuLines = lines.filter((l) => l.lineKind === "MENU");
     const perHeadLines = lines.filter((l) => l.lineKind === "PER_HEAD");
+    await this.ensureStock(menuLines);
     const servedByName = dto.servedByName !== undefined ? cleanName(dto.servedByName) : undefined;
     // First kitchen send on an order that only had per-head: kotRounds was 0 → become 1
     const nextRound = menuLines.length ? (order.kotRounds < 1 ? 1 : order.kotRounds + 1) : order.kotRounds;
@@ -299,6 +326,27 @@ export class OrdersService {
 
     let subDelta = 0;
     let costDelta = 0;
+    const increases: { menuItemId: string; quantity: number; name: string }[] = [];
+    for (const change of dto.items) {
+      const line = order.items.find((i) => i.id === change.id);
+      if (!line?.menuItemId) continue;
+      const qtyDiff = Math.max(0, change.quantity) - toNumber(line.quantity);
+      if (qtyDiff > 0) increases.push({ menuItemId: line.menuItemId, quantity: qtyDiff, name: line.name });
+    }
+    const billMeta = await this.resolveBillEdit(order, dto);
+    if (increases.length) {
+      const menus = await this.prisma.menuItem.findMany({
+        where: { id: { in: increases.map((i) => i.menuItemId) } },
+        select: { id: true, recipeId: true },
+      });
+      const recipeOf = new Map(menus.map((m) => [m.id, m.recipeId]));
+      await this.ensureStock(
+        increases.flatMap((i) => {
+          const recipeId = recipeOf.get(i.menuItemId);
+          return recipeId ? [{ recipeId, quantity: i.quantity, name: i.name }] : [];
+        })
+      );
+    }
     for (const change of dto.items) {
       const line = order.items.find((i) => i.id === change.id);
       if (!line) throw new BadRequestException(`Item not found: ${change.id}`);
@@ -346,6 +394,7 @@ export class OrdersService {
         subtotal: { increment: subDelta },
         total: { increment: subDelta },
         costTotal: { increment: costDelta },
+        ...billMeta,
       },
       include: orderInclude,
     });
@@ -390,6 +439,9 @@ export class OrdersService {
     if (!order) throw new NotFoundException("Order not found");
     if (order.paymentStatus === "PAID") throw new BadRequestException("Bill is already paid");
     if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
+    if (order.creditCustomerId) {
+      throw new BadRequestException("This bill is on a credit account. Clear it from Credit Customers");
+    }
 
     const total = toNumber(order.total);
     const due = total - toNumber(order.paidAmount);
@@ -463,6 +515,24 @@ export class OrdersService {
         from: user.name,
       });
     }
+    return this.toDto(updated, canSeeCost(user));
+  }
+
+  /** Guest has left. The table frees; the invoice stays on the credit account until they pay. */
+  async releaseCredit(user: AuthUser, id: string) {
+    const order = await this.prisma.order.findUnique({ where: { id }, include: orderInclude });
+    if (!order) throw new NotFoundException("Order not found");
+    if (!order.creditCustomerId) throw new BadRequestException("This order is not on credit");
+    if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
+    if (order.status === "COMPLETED" || order.paymentStatus === "PAID") {
+      return this.toDto(order, canSeeCost(user));
+    }
+    const updated = await this.prisma.order.update({
+      where: { id },
+      data: { status: "COMPLETED" },
+      include: orderInclude,
+    });
+    this.realtime.orderChanged(this.event(updated), "status");
     return this.toDto(updated, canSeeCost(user));
   }
 
@@ -558,6 +628,49 @@ export class OrdersService {
     }
     // Walk-in / free-text label (no restaurant table row)
     return null;
+  }
+
+  private async resolveBillEdit(
+    order: { id: string; tableId: string | null; assignedCashierId: string | null; waiterId: string | null },
+    dto: EditOrderDto
+  ) {
+    const data: Prisma.OrderUpdateInput = {};
+    if (dto.tableId && dto.tableId !== order.tableId) {
+      const table = await this.prisma.restaurantTable.findFirst({
+        where: { id: dto.tableId, active: true },
+        include: { partition: { select: { name: true } } },
+      });
+      if (!table) throw new BadRequestException("Table not found");
+      const label = tableLabel(table.partition.name, table.name);
+      const occupied = await this.prisma.order.findFirst({
+        where: {
+          id: { not: order.id },
+          AND: [OPEN_ORDER_WHERE, { OR: [{ tableId: table.id }, { tableNo: label }, { tableNo: table.name }] }],
+        },
+        select: { id: true },
+      });
+      if (occupied) throw new BadRequestException("That table already has an open bill");
+      data.table = { connect: { id: table.id } };
+      data.tableNo = label;
+    }
+    if (dto.assignedCashierId && dto.assignedCashierId !== order.assignedCashierId) {
+      const cashier = await this.prisma.user.findFirst({
+        where: { id: dto.assignedCashierId, active: true, role: { code: { in: ["MAIN_CASHIER", "CASHIER"] } } },
+        select: { id: true },
+      });
+      if (!cashier) throw new BadRequestException("Select Main Cashier or Cashier for this bill");
+      data.assignedCashier = { connect: { id: cashier.id } };
+    }
+    if (dto.waiterId && dto.waiterId !== order.waiterId) {
+      const supervisor = await this.prisma.user.findFirst({
+        where: { id: dto.waiterId, active: true, role: { code: "SUPERVISOR" } },
+        select: { id: true },
+      });
+      if (!supervisor) throw new BadRequestException("Select a supervisor");
+      data.waiter = { connect: { id: supervisor.id } };
+    }
+    if (dto.servedByName !== undefined) data.servedByName = cleanName(dto.servedByName);
+    return data;
   }
 
   private async resolveAssignedCashier(user: AuthUser, assignedCashierId?: string) {
@@ -662,6 +775,12 @@ export class OrdersService {
     return { lines, subtotal, costTotal };
   }
 
+  private ensureStock(lines: { recipeId: string | null; quantity: number; name: string }[]) {
+    return this.costing.assertCanSell(
+      lines.flatMap((l) => (l.recipeId ? [{ recipeId: l.recipeId, quantity: l.quantity, name: l.name }] : []))
+    );
+  }
+
   private async deductStock(lines: Line[], orderNo: number, tableNo: string | null, orderId: string) {
     for (const line of lines) {
       if (!line.recipeId) continue;
@@ -672,6 +791,16 @@ export class OrdersService {
         orderId
       );
     }
+  }
+
+  private async resolveCreditCustomer(user: AuthUser, id: string, takeaway = false) {
+    if (!user.permissions.includes("order.pay")) {
+      throw new ForbiddenException("Only a cashier can put a table on credit");
+    }
+    if (takeaway) throw new BadRequestException("Credit is only for a seated table");
+    const customer = await this.prisma.creditCustomer.findFirst({ where: { id, active: true } });
+    if (!customer) throw new BadRequestException("Credit customer not found");
+    return customer.id;
   }
 
   private event(o: FullOrder) {
@@ -713,6 +842,9 @@ export class OrdersService {
       assignedCashier: this.staffDto(o.assignedCashier),
       servedBy: o.servedByName,
       servedByName: o.servedByName,
+      creditCustomer: o.creditCustomer
+        ? { id: o.creditCustomer.id, name: o.creditCustomer.name, phone: o.creditCustomer.phone }
+        : null,
       kotRounds: o.kotRounds,
       billRequestedAt: o.billRequestedAt,
       createdAt: o.createdAt,
