@@ -3,6 +3,7 @@ import { api, money, unitLabel } from "../api";
 import { Modal } from "../components/Modal";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
+import { DateField } from "../components/DateField";
 
 export type PurchaseItem = {
   id: string;
@@ -350,7 +351,7 @@ function BuyView({
             </div>
             <div className="field">
               <label>{t("common.date")}</label>
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+              <DateField value={date} onChange={setDate} />
             </div>
           </div>
 
@@ -552,67 +553,71 @@ function BuyView({
           )}
 
           {lines.length > 0 && (
-            <table style={{ marginTop: "0.75rem" }}>
-              <thead>
-                <tr>
-                  <th>{t("common.item")}</th>
-                  <th>{t("store.quantity")}</th>
-                  <th>{t("common.rate")}</th>
-                  <th>{t("common.amount")}</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {lines.map((l) => {
-                  const item = allItems.find((i) => i.id === l.itemId);
-                  const amount = (Number(l.qty) || 0) * (Number(l.rate) || 0);
-                  return (
-                    <tr key={l.itemId}>
-                      <td>
-                        {item?.name}
-                        <div className="tiny muted">
-                          {item?.category} · {unitLabel(item?.unit || "")}
-                        </div>
-                      </td>
-                      <td>
-                        <input
-                          type="number"
-                          min={0}
-                          step="0.001"
-                          value={l.qty}
-                          onChange={(e) =>
-                            setLines((prev) => prev.map((p) => (p.itemId === l.itemId ? { ...p, qty: e.target.value } : p)))
-                          }
-                          style={{ width: 90 }}
-                        />
-                      </td>
-                      <td>
-                        <input
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          value={l.rate}
-                          onChange={(e) =>
-                            setLines((prev) => prev.map((p) => (p.itemId === l.itemId ? { ...p, rate: e.target.value } : p)))
-                          }
-                          style={{ width: 100 }}
-                        />
-                      </td>
-                      <td>{money(amount)}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="btn ghost sm"
-                          onClick={() => setLines((prev) => prev.filter((p) => p.itemId !== l.itemId))}
-                        >
-                          {t("common.remove")}
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            <div className="table-wrap purchase-lines-wrap">
+              <table className="purchase-lines">
+                <thead>
+                  <tr>
+                    <th>{t("common.item")}</th>
+                    <th>{t("store.quantity")}</th>
+                    <th>{t("common.rate")}</th>
+                    <th>{t("common.amount")}</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {lines.map((l) => {
+                    const item = allItems.find((i) => i.id === l.itemId);
+                    const amount = (Number(l.qty) || 0) * (Number(l.rate) || 0);
+                    return (
+                      <tr key={l.itemId}>
+                        <td data-label={t("common.item")}>
+                          {item?.name}
+                          <div className="tiny muted">
+                            {item?.category} · {unitLabel(item?.unit || "")}
+                          </div>
+                        </td>
+                        <td data-label={t("store.quantity")}>
+                          <input
+                            type="number"
+                            className="field-ctrl sm"
+                            min={0}
+                            step="0.001"
+                            value={l.qty}
+                            onChange={(e) =>
+                              setLines((prev) => prev.map((p) => (p.itemId === l.itemId ? { ...p, qty: e.target.value } : p)))
+                            }
+                          />
+                        </td>
+                        <td data-label={t("common.rate")}>
+                          <input
+                            type="number"
+                            className="field-ctrl sm"
+                            min={0}
+                            step="0.01"
+                            value={l.rate}
+                            onChange={(e) =>
+                              setLines((prev) => prev.map((p) => (p.itemId === l.itemId ? { ...p, rate: e.target.value } : p)))
+                            }
+                          />
+                        </td>
+                        <td data-label={t("common.amount")} className="nowrap">
+                          {money(amount)}
+                        </td>
+                        <td data-label="">
+                          <button
+                            type="button"
+                            className="btn ghost sm"
+                            onClick={() => setLines((prev) => prev.filter((p) => p.itemId !== l.itemId))}
+                          >
+                            {t("common.remove")}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
 
           <div className="panel" style={{ marginTop: "0.85rem", padding: "0.75rem" }}>
@@ -705,44 +710,46 @@ function BuyView({
         <h3 style={{ marginTop: 0 }}>{t("store.recentBills")}</h3>
         {!recent.length && <div className="empty">{t("store.noPurchases")}</div>}
         {recent.length > 0 && (
-          <table>
-            <thead>
-              <tr>
-                <th>{t("common.date")}</th>
-                <th>{t("store.supplier")}</th>
-                <th>{t("common.items")}</th>
-                <th>{t("store.inventoryValue")}</th>
-                <th>{t("store.extraExpense")}</th>
-                <th>{t("store.paidToSupplier")}</th>
-                <th>{t("store.creditDue")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recent.map((b) => (
-                <tr key={b.id}>
-                  <td>{b.purchasedOn}</td>
-                  <td>{b.supplier}</td>
-                  <td>{b.lineCount}</td>
-                  <td>{money(b.total)}</td>
-                  <td>
-                    {b.extraExpense > 0 ? (
-                      <>
-                        {money(b.extraExpense)}
-                        <div className="tiny muted">
-                          {b.extraExpensePaidBy === "SELF" ? t("store.extraPaidSelf") : t("store.extraPaidSupplier")}
-                          {b.extraExpenseNote ? ` · ${b.extraExpenseNote}` : ""}
-                        </div>
-                      </>
-                    ) : (
-                      money(0)
-                    )}
-                  </td>
-                  <td>{money(b.paidAmount)}</td>
-                  <td>{b.outstanding > 0 ? <span className="badge unpaid">{money(b.outstanding)}</span> : money(0)}</td>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("common.date")}</th>
+                  <th>{t("store.supplier")}</th>
+                  <th>{t("common.items")}</th>
+                  <th>{t("store.inventoryValue")}</th>
+                  <th>{t("store.extraExpense")}</th>
+                  <th>{t("store.paidToSupplier")}</th>
+                  <th>{t("store.creditDue")}</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {recent.map((b) => (
+                  <tr key={b.id}>
+                    <td>{b.purchasedOn}</td>
+                    <td>{b.supplier}</td>
+                    <td>{b.lineCount}</td>
+                    <td>{money(b.total)}</td>
+                    <td>
+                      {b.extraExpense > 0 ? (
+                        <>
+                          {money(b.extraExpense)}
+                          <div className="tiny muted">
+                            {b.extraExpensePaidBy === "SELF" ? t("store.extraPaidSelf") : t("store.extraPaidSupplier")}
+                            {b.extraExpenseNote ? ` · ${b.extraExpenseNote}` : ""}
+                          </div>
+                        </>
+                      ) : (
+                        money(0)
+                      )}
+                    </td>
+                    <td>{money(b.paidAmount)}</td>
+                    <td>{b.outstanding > 0 ? <span className="badge unpaid">{money(b.outstanding)}</span> : money(0)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>
@@ -1273,7 +1280,7 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
             </div>
             <div className="field">
               <label>{t("common.date")}</label>
-              <input type="date" value={paidOn} onChange={(e) => setPaidOn(e.target.value)} required />
+              <DateField value={paidOn} onChange={setPaidOn} />
             </div>
           </div>
           <div className="field">
@@ -1333,7 +1340,7 @@ function DailyView() {
   return (
     <div>
       <div className="row" style={{ marginBottom: "0.7rem", gap: "0.6rem", alignItems: "center" }}>
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        <DateField value={date} onChange={setDate} />
         <strong>
           {t("store.inventoryValue")} {money(total)}
           {extraTotal > 0 ? ` · ${t("store.extraExpense")} ${money(extraTotal)}` : ""}
