@@ -137,11 +137,13 @@ export function DashboardPage() {
         ? t("dash.titleKitchen")
         : role === "STORE"
           ? t("dash.titleStore")
-          : role === "MANAGER"
-            ? t("dash.titleManager")
-            : role === "WAITER"
-              ? t("dash.titleWaiter")
-              : t("dash.titleAdmin");
+          : role === "SUPERVISOR"
+            ? t("dash.titleSupervisor")
+            : role === "MAIN_CASHIER"
+              ? t("dash.titleCashier")
+              : role === "WAITER"
+                ? t("dash.titleWaiter")
+                : t("dash.titleAdmin");
 
   return (
     <div>
@@ -163,8 +165,9 @@ export function DashboardPage() {
       {role === "KITCHEN" && <KitchenDash data={data} can={can} />}
       {role === "STORE" && <StoreDash data={data} can={can} />}
       {role === "WAITER" && <WaiterDash data={data} can={can} />}
-      {role === "MANAGER" && <ManagerDash data={data} can={can} />}
-      {!["ADMIN", "CASHIER", "KITCHEN", "STORE", "WAITER", "MANAGER"].includes(role) && (
+      {role === "SUPERVISOR" && <ManagerDash data={data} can={can} />}
+      {role === "MAIN_CASHIER" && <CashierDash data={data} can={can} />}
+      {!["ADMIN", "CASHIER", "MAIN_CASHIER", "KITCHEN", "STORE", "WAITER", "SUPERVISOR"].includes(role) && (
         <AdminDash data={data} can={can} />
       )}
     </div>
@@ -311,7 +314,7 @@ function CashierDash({
       <StaleAlert
         orders={data?.staleOrders ?? []}
         minutes={data?.staleMinutes ?? 10}
-        link="/orders"
+        link="/waiter"
         linkLabel={t("dash.openPos")}
         message={t("dash.delayedWaiting")}
       />
@@ -879,9 +882,9 @@ function Shortcuts({
     <div className="panel panel-pad">
       <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>{t("dash.shortcuts")}</h2>
       <div className="row">
-        {show("orders") && can("order.create") && (
-          <Link className="btn" to="/orders">
-            {t("dash.newOrder")}
+        {show("orders") && can("order.create", "order.addItems", "order.viewOwn") && (
+          <Link className="btn" to="/waiter">
+            {t("nav.waiter")}
           </Link>
         )}
         {show("bills") && can("bill.view") && (

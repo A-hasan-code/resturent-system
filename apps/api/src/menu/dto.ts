@@ -6,7 +6,7 @@ import {
   Min,
   MinLength,
 } from "class-validator";
-import { UnitType } from "@prisma/client";
+import { KitchenStation, UnitType } from "@prisma/client";
 
 export class CreateMenuItemDto {
   @IsString()
@@ -16,6 +16,10 @@ export class CreateMenuItemDto {
   @IsString()
   @IsOptional()
   category?: string;
+
+  @IsEnum(KitchenStation)
+  @IsOptional()
+  kitchenStation?: KitchenStation;
 
   @IsEnum(UnitType)
   sellUnit!: UnitType;
@@ -38,6 +42,10 @@ export class UpdateMenuItemDto {
   @IsString()
   @IsOptional()
   category?: string | null;
+
+  @IsEnum(KitchenStation)
+  @IsOptional()
+  kitchenStation?: KitchenStation;
 
   @IsEnum(UnitType)
   @IsOptional()

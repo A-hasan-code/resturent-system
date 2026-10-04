@@ -51,6 +51,7 @@ export class CostingService {
     for (const order of orders) {
       let costTotal = 0;
       for (const item of order.items) {
+        if (!item.menuItemId) continue;
         const { unitCost, costAmount } = await this.menuItemCost(
           item.menuItemId,
           toNumber(item.quantity)

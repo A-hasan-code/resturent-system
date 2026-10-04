@@ -6,7 +6,6 @@ import { DashboardPage } from "./pages/Dashboard";
 import { StorePage } from "./pages/Store";
 import { RecipesPage } from "./pages/Recipes";
 import { MenuPage } from "./pages/Menu";
-import { OrdersPage } from "./pages/Orders";
 import { BillsPage } from "./pages/Bills";
 import { KitchenPage } from "./pages/Kitchen";
 import { WaiterPage } from "./pages/Waiter";
@@ -23,7 +22,7 @@ function Private({ children }: { children: React.ReactNode }) {
 
 function Home() {
   const { user } = useAuth();
-  if (user?.roleCode === "WAITER" || user?.roleCode === "MANAGER") return <Navigate to="/waiter" replace />;
+  if (user?.roleCode === "WAITER" || user?.roleCode === "SUPERVISOR") return <Navigate to="/waiter" replace />;
   return <DashboardPage />;
 }
 
@@ -44,7 +43,7 @@ export function App() {
         <Route path="store" element={<StorePage />} />
         <Route path="recipes" element={<RecipesPage />} />
         <Route path="menu" element={<MenuPage />} />
-        <Route path="orders" element={<OrdersPage />} />
+        <Route path="orders" element={<Navigate to="/waiter" replace />} />
         <Route path="bills" element={<BillsPage />} />
         <Route path="kitchen" element={<KitchenPage />} />
         <Route path="settings" element={<SettingsPage />} />

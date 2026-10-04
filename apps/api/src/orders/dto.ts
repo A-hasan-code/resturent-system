@@ -3,19 +3,27 @@ import {
   IsArray,
   IsBoolean,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
   IsString,
   Min,
+  ValidateIf,
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
 import { OrderStatus } from "@prisma/client";
 
 export class OrderLineDto {
+  /** MENU (default) or PER_HEAD cover charge. */
+  @IsOptional()
+  @IsIn(["MENU", "PER_HEAD"])
+  kind?: "MENU" | "PER_HEAD";
+
+  @ValidateIf((o: OrderLineDto) => (o.kind ?? "MENU") !== "PER_HEAD")
   @IsString()
-  menuItemId!: string;
+  menuItemId?: string;
 
   @IsNumber()
   @Min(0.001)
@@ -30,6 +38,16 @@ export class CreateOrderDto {
   @IsString()
   @IsOptional()
   tableNo?: string;
+
+  /** Preferred: restaurant table id (partition-safe). */
+  @IsString()
+  @IsOptional()
+  tableId?: string;
+
+  /** Cashier who will bill this order (MAIN_CASHIER or CASHIER). */
+  @IsString()
+  @IsOptional()
+  assignedCashierId?: string;
 
   @IsString()
   @IsOptional()
@@ -50,6 +68,23 @@ export class CreateOrderDto {
   @IsOptional()
   @IsBoolean()
   printKot?: boolean;
+}
+
+export class EditLineDto {
+  @IsString()
+  id!: string;
+
+  @IsNumber()
+  @Min(0)
+  quantity!: number;
+}
+
+export class EditOrderDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => EditLineDto)
+  items!: EditLineDto[];
 }
 
 export class AddItemsDto {

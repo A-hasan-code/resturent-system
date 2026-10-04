@@ -23,6 +23,7 @@ export class MenuService {
         id: m.id,
         name: m.name,
         category: m.category,
+        kitchenStation: m.kitchenStation,
         sellUnit: m.sellUnit,
         sellingPrice: toNumber(m.sellingPrice),
       }));
@@ -40,6 +41,7 @@ export class MenuService {
         id: m.id,
         name: m.name,
         category: m.category,
+        kitchenStation: m.kitchenStation,
         sellUnit: m.sellUnit,
         sellingPrice: sell,
         costPerUnit: cost,
@@ -51,7 +53,16 @@ export class MenuService {
   }
 
   create(dto: CreateMenuItemDto) {
-    return this.prisma.menuItem.create({ data: dto });
+    return this.prisma.menuItem.create({
+      data: {
+        name: dto.name,
+        category: dto.category,
+        kitchenStation: dto.kitchenStation ?? "COOKING",
+        sellUnit: dto.sellUnit,
+        sellingPrice: dto.sellingPrice,
+        recipeId: dto.recipeId,
+      },
+    });
   }
 
   async update(id: string, dto: UpdateMenuItemDto) {
@@ -61,6 +72,7 @@ export class MenuService {
         data: {
           ...(dto.name != null ? { name: dto.name } : {}),
           ...(dto.category !== undefined ? { category: dto.category } : {}),
+          ...(dto.kitchenStation != null ? { kitchenStation: dto.kitchenStation } : {}),
           ...(dto.sellUnit != null ? { sellUnit: dto.sellUnit } : {}),
           ...(dto.sellingPrice != null
             ? { sellingPrice: dto.sellingPrice }

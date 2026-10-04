@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { OrderStatus, PaymentStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { CostingService } from "../common/costing.service";
@@ -6,16 +6,31 @@ import { toNumber } from "../common/units";
 import { AuthUser } from "../common/decorators";
 import { PrintService } from "../print/print.service";
 import { RealtimeService } from "../realtime/realtime.service";
-import { OPEN_ORDER_WHERE } from "../tables/tables.controller";
-import { AddItemsDto, CreateOrderDto, OrderLineDto, PayOrderDto, UpdateOrderDto, UpdateStatusDto } from "./dto";
+import { OPEN_ORDER_WHERE, tableLabel } from "../tables/tables.controller";
+import { AddItemsDto, CreateOrderDto, EditOrderDto, OrderLineDto, PayOrderDto, UpdateOrderDto, UpdateStatusDto } from "./dto";
 import { TipService } from "../system/tip.service";
+import { SettingsService } from "../system/settings.service";
 
 const staffSelect = { id: true, name: true, role: { select: { code: true, name: true } } } as const;
 
+const canChargePerHead = (u: AuthUser) =>
+  u.roleCode === "SUPERVISOR" ||
+  u.roleCode === "ADMIN" ||
+  u.roleCode === "MANAGER" || // legacy cached sessions
+  u.permissions.includes("users.manage");
+
 const orderInclude = {
-  items: { orderBy: { createdAt: "asc" }, include: { addedBy: { select: { name: true } } } },
+  items: {
+    orderBy: { createdAt: "asc" },
+    include: {
+      addedBy: { select: { name: true } },
+      menuItem: { select: { category: true, kitchenStation: true } },
+    },
+  },
   cashier: { select: { name: true } },
   waiter: { select: staffSelect },
+  assignedCashier: { select: staffSelect },
+  table: { include: { partition: { select: { id: true, name: true } } } },
   tipShares: {
     include: { user: { select: { id: true, name: true } } },
   },
@@ -28,7 +43,8 @@ const orderInclude = {
 type FullOrder = Prisma.OrderGetPayload<{ include: typeof orderInclude }>;
 
 type Line = {
-  menuItemId: string;
+  lineKind: "MENU" | "PER_HEAD";
+  menuItemId: string | null;
   name: string;
   sellUnit: Prisma.OrderItemCreateWithoutOrderInput["sellUnit"];
   quantity: number;
@@ -41,7 +57,6 @@ type Line = {
 };
 
 const canSeeCost = (u: AuthUser) => u.permissions.includes("reports.view");
-// Paid bills are private to whoever took the money (or received it in a handover); only admins see all.
 const paidBillsScope = (u: AuthUser): Prisma.OrderWhereInput =>
   u.permissions.includes("payments.view")
     ? {}
@@ -54,6 +69,10 @@ const paidBillsScope = (u: AuthUser): Prisma.OrderWhereInput =>
 const seesAllOrders = (u: AuthUser) =>
   ["bill.view", "kitchen.view", "order.pay"].some((p) => u.permissions.includes(p));
 
+/** Floor roles: kitchen/list shows only orders they placed (not the whole kitchen queue). */
+const floorOwnOrdersOnly = (u: AuthUser, billing: boolean) =>
+  !billing && (u.roleCode === "SUPERVISOR" || u.roleCode === "WAITER");
+
 @Injectable()
 export class OrdersService {
   private readonly log = new Logger("Orders");
@@ -63,15 +82,29 @@ export class OrdersService {
     private readonly costing: CostingService,
     private readonly print: PrintService,
     private readonly realtime: RealtimeService,
-    private readonly tips: TipService
+    private readonly tips: TipService,
+    private readonly settings: SettingsService
   ) {}
 
+  perHeadConfig() {
+    return this.settings.perHead();
+  }
+
   async list(user: AuthUser, paymentStatus?: string, status?: string, billing = false) {
+    const cashierScope = this.cashierBillingScope(user, billing);
+    const ownOnly = floorOwnOrdersOnly(user, billing);
     const orders = await this.prisma.order.findMany({
       where: {
         ...(paymentStatus ? { paymentStatus: paymentStatus as PaymentStatus } : {}),
         ...(status ? { status: status as OrderStatus } : {}),
-        ...(seesAllOrders(user) ? (billing ? paidBillsScope(user) : {}) : { waiterId: user.id }),
+        ...(ownOnly
+          ? { waiterId: user.id }
+          : seesAllOrders(user)
+            ? {
+                ...(billing ? paidBillsScope(user) : {}),
+                ...cashierScope,
+              }
+            : { waiterId: user.id }),
       },
       include: orderInclude,
       orderBy: { createdAt: "desc" },
@@ -87,21 +120,35 @@ export class OrdersService {
   }
 
   async create(user: AuthUser, dto: CreateOrderDto) {
-    const tableNo = dto.tableNo?.trim() || undefined;
-    if (tableNo) {
-      const isTable = await this.prisma.restaurantTable.findFirst({ where: { name: tableNo, active: true } });
-      const open = isTable
-        ? await this.prisma.order.findFirst({ where: { ...OPEN_ORDER_WHERE, tableNo }, orderBy: { createdAt: "desc" } })
-        : null;
-      if (open) return this.addItems(user, open.id, { items: dto.items, printKot: dto.printKot, servedByName: dto.servedByName });
+    const table = await this.resolveTable(dto.tableId, dto.tableNo);
+    const walkInLabel = !table && dto.tableNo?.trim() ? dto.tableNo.trim() : null;
+    if (table) {
+      const open = await this.prisma.order.findFirst({
+        where: {
+          ...OPEN_ORDER_WHERE,
+          OR: [{ tableId: table.id }, { tableNo: table.label }, { tableNo: table.name }],
+        },
+        include: { waiter: { select: { id: true, name: true } } },
+        orderBy: { createdAt: "desc" },
+      });
+      if (open) {
+        this.assertCanModify(user, open);
+        return this.addItems(user, open.id, {
+          items: dto.items,
+          printKot: dto.printKot,
+          servedByName: dto.servedByName,
+        });
+      }
     }
 
-    const { lines, subtotal, costTotal } = await this.buildLines(dto.items);
+    const assignedCashierId = await this.resolveAssignedCashier(user, dto.assignedCashierId);
+    const { lines, subtotal, costTotal } = await this.buildLines(user, dto.items);
     const servedByName = cleanName(dto.servedByName);
-    // waiterId is whoever took the order (waiter, cashier or manager); cashierId is set when it is paid.
+    const hasKitchen = lines.some((l) => l.lineKind === "MENU");
     const order = await this.prisma.order.create({
       data: {
-        tableNo,
+        tableNo: table?.label ?? walkInLabel ?? undefined,
+        tableId: table?.id ?? null,
         notes: dto.notes,
         status: "PENDING",
         paymentStatus: "UNPAID",
@@ -109,52 +156,210 @@ export class OrdersService {
         total: subtotal,
         costTotal,
         waiterId: user.id,
+        assignedCashierId,
         servedByName,
-        kotRounds: 1,
-        items: { create: lines.map(({ recipeId: _r, ...rest }) => ({ ...rest, kotRound: 1, addedById: user.id })) },
+        kotRounds: hasKitchen ? 1 : 0,
+        items: {
+          create: lines.map(({ recipeId: _r, ...rest }) => ({
+            lineKind: rest.lineKind,
+            ...(rest.menuItemId ? { menuItemId: rest.menuItemId } : {}),
+            name: rest.name,
+            sellUnit: rest.sellUnit,
+            quantity: rest.quantity,
+            ratePerUnit: rest.ratePerUnit,
+            amount: rest.amount,
+            unitCost: rest.unitCost,
+            costAmount: rest.costAmount,
+            notes: rest.notes,
+            kotRound: rest.lineKind === "MENU" ? 1 : 0,
+            addedById: user.id,
+          })),
+        },
       },
     });
 
-    await this.deductStock(lines, order.orderNo, order.tableNo, order.id);
-    if (dto.printKot !== false) await this.queueKot(order.id, 1, user.id);
+    await this.deductStock(
+      lines.filter((l) => l.lineKind === "MENU"),
+      order.orderNo,
+      order.tableNo,
+      order.id
+    );
+    if (dto.printKot !== false && hasKitchen) await this.queueKot(order.id, 1, user.id);
     const full = await this.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     this.realtime.orderChanged(this.event(full), "created");
     return this.toDto(full, canSeeCost(user));
   }
 
   async addItems(user: AuthUser, id: string, dto: AddItemsDto) {
-    const order = await this.prisma.order.findUnique({ where: { id } });
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      include: { waiter: { select: { id: true, name: true } } },
+    });
     if (!order) throw new NotFoundException("Order not found");
     if (order.paymentStatus === "PAID") throw new BadRequestException("Bill already paid — start a new order");
     if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
+    this.assertCanModify(user, order);
 
-    const round = order.kotRounds + 1;
-    const { lines, subtotal, costTotal } = await this.buildLines(dto.items);
+    const { lines } = await this.buildLines(user, dto.items);
+    const menuLines = lines.filter((l) => l.lineKind === "MENU");
+    const perHeadLines = lines.filter((l) => l.lineKind === "PER_HEAD");
     const servedByName = dto.servedByName !== undefined ? cleanName(dto.servedByName) : undefined;
+    // First kitchen send on an order that only had per-head: kotRounds was 0 → become 1
+    const nextRound = menuLines.length ? (order.kotRounds < 1 ? 1 : order.kotRounds + 1) : order.kotRounds;
+
+    if (perHeadLines.length) {
+      const addQty = perHeadLines.reduce((s, l) => s + l.quantity, 0);
+      const rate = perHeadLines[0]!.ratePerUnit;
+      const name = perHeadLines[0]!.name;
+      const existing = await this.prisma.orderItem.findFirst({
+        where: { orderId: id, lineKind: "PER_HEAD" },
+      });
+      if (existing) {
+        const newQty = toNumber(existing.quantity) + addQty;
+        await this.prisma.orderItem.update({
+          where: { id: existing.id },
+          data: { quantity: newQty, amount: rate * newQty, ratePerUnit: rate, name },
+        });
+      } else {
+        await this.prisma.orderItem.create({
+          data: {
+            orderId: id,
+            lineKind: "PER_HEAD",
+            menuItemId: null,
+            name,
+            sellUnit: "PCS",
+            quantity: addQty,
+            ratePerUnit: rate,
+            amount: rate * addQty,
+            kotRound: 0,
+            addedById: user.id,
+          },
+        });
+      }
+    }
+
+      if (menuLines.length) {
+      await this.prisma.orderItem.createMany({
+        data: menuLines.map((rest) => ({
+          orderId: id,
+          lineKind: "MENU" as const,
+          menuItemId: rest.menuItemId!,
+          name: rest.name,
+          sellUnit: rest.sellUnit,
+          quantity: rest.quantity,
+          ratePerUnit: rest.ratePerUnit,
+          amount: rest.amount,
+          unitCost: rest.unitCost,
+          costAmount: rest.costAmount,
+          notes: rest.notes ?? null,
+          kotRound: nextRound,
+          addedById: user.id,
+        })),
+      });
+    }
+
+    const allItems = await this.prisma.orderItem.findMany({ where: { orderId: id } });
+    const sum = allItems.reduce((s, i) => s + toNumber(i.amount), 0);
+    const costSum = allItems.reduce((s, i) => s + toNumber(i.costAmount), 0);
+
     await this.prisma.order.update({
       where: { id },
       data: {
-        kotRounds: round,
-        subtotal: { increment: subtotal },
-        total: { increment: subtotal },
-        costTotal: { increment: costTotal },
+        ...(menuLines.length ? { kotRounds: nextRound } : {}),
+        subtotal: sum,
+        total: sum,
+        costTotal: costSum,
         billRequestedAt: null,
         status: order.status === "READY" || order.status === "COMPLETED" ? "PENDING" : order.status,
         paymentStatus: toNumber(order.paidAmount) > 0 ? "PARTIAL" : order.paymentStatus,
         ...(order.waiterId ? {} : { waiterId: user.id }),
         ...(servedByName !== undefined ? { servedByName } : {}),
-        items: { create: lines.map(({ recipeId: _r, ...rest }) => ({ ...rest, kotRound: round, addedById: user.id })) },
       },
     });
 
-    await this.deductStock(lines, order.orderNo, order.tableNo, order.id);
-    if (dto.printKot !== false) await this.queueKot(id, round, user.id);
+    await this.deductStock(menuLines, order.orderNo, order.tableNo, order.id);
+    if (dto.printKot !== false && menuLines.length) await this.queueKot(id, nextRound, user.id);
     const full = await this.prisma.order.findUniqueOrThrow({ where: { id }, include: orderInclude });
     this.realtime.orderChanged(this.event(full), "items-added");
     return this.toDto(full, canSeeCost(user));
   }
 
+  /** Main cashier: change quantities (0 = remove) on unpaid orders. */
+  async editItems(user: AuthUser, id: string, dto: EditOrderDto) {
+    if (!user.permissions.includes("order.edit")) {
+      throw new ForbiddenException("Only the Main Cashier can edit order items");
+    }
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      include: { items: true },
+    });
+    if (!order) throw new NotFoundException("Order not found");
+    if (order.paymentStatus === "PAID") throw new BadRequestException("Bill already paid");
+    if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
+
+    let subDelta = 0;
+    let costDelta = 0;
+    for (const change of dto.items) {
+      const line = order.items.find((i) => i.id === change.id);
+      if (!line) throw new BadRequestException(`Item not found: ${change.id}`);
+      const oldQty = toNumber(line.quantity);
+      const newQty = Math.max(0, change.quantity);
+      if (newQty === oldQty) continue;
+      const rate = toNumber(line.ratePerUnit);
+      const unitCost = toNumber(line.unitCost);
+      const qtyDiff = newQty - oldQty;
+      subDelta += rate * qtyDiff;
+      costDelta += unitCost * qtyDiff;
+
+      if (line.menuItemId && qtyDiff > 0) {
+        const menu = await this.prisma.menuItem.findUnique({ where: { id: line.menuItemId } });
+        if (menu?.recipeId) {
+          await this.costing.deductRecipeStock(
+            menu.recipeId,
+            qtyDiff,
+            `Order #${order.orderNo} · edit add`,
+            order.id
+          );
+        }
+      }
+
+      if (newQty <= 0) {
+        await this.prisma.orderItem.delete({ where: { id: line.id } });
+      } else {
+        await this.prisma.orderItem.update({
+          where: { id: line.id },
+          data: {
+            quantity: newQty,
+            amount: rate * newQty,
+            costAmount: unitCost * newQty,
+          },
+        });
+      }
+    }
+
+    const remaining = await this.prisma.orderItem.count({ where: { orderId: id } });
+    if (!remaining) throw new BadRequestException("Order must keep at least one item — cancel instead");
+
+    const updated = await this.prisma.order.update({
+      where: { id },
+      data: {
+        subtotal: { increment: subDelta },
+        total: { increment: subDelta },
+        costTotal: { increment: costDelta },
+      },
+      include: orderInclude,
+    });
+    this.realtime.orderChanged(this.event(updated), "edited");
+    return this.toDto(updated, canSeeCost(user));
+  }
+
   async requestBill(user: AuthUser, id: string) {
+    const existing = await this.prisma.order.findUnique({
+      where: { id },
+      include: { waiter: { select: { id: true, name: true } } },
+    });
+    if (!existing) throw new NotFoundException("Order not found");
+    this.assertCanModify(user, existing, true);
     const o = await this.prisma.order.update({
       where: { id },
       data: { billRequestedAt: new Date() },
@@ -201,7 +406,6 @@ export class OrdersService {
       servedByName = cleanName(dto.servedByName);
     }
 
-    // Staff without a cash drawer (e.g. the floor manager) must say which cashier received the money.
     let handedTo: { id: string; name: string } | null = null;
     if (!user.permissions.includes("cash.keep")) {
       if (!dto.handedToId) throw new BadRequestException("Select the cashier you handed the cash to");
@@ -263,9 +467,13 @@ export class OrdersService {
   }
 
   async updateMeta(user: AuthUser, id: string, dto: UpdateOrderDto) {
-    const order = await this.prisma.order.findUnique({ where: { id } });
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      include: { waiter: { select: { id: true, name: true } } },
+    });
     if (!order) throw new NotFoundException("Order not found");
     if (order.paymentStatus === "PAID") throw new BadRequestException("Bill already paid");
+    this.assertCanModify(user, order, true);
     const servedByName =
       dto.servedByName === null
         ? null
@@ -293,6 +501,89 @@ export class OrdersService {
 
   // ---------- helpers ----------
 
+  /** Regular cashiers only see bills assigned to them; Main Cashier (order.edit) sees all. */
+  private cashierBillingScope(user: AuthUser, billing: boolean): Prisma.OrderWhereInput {
+    if (!billing) return {};
+    if (user.permissions.includes("payments.view") || user.permissions.includes("order.edit")) return {};
+    if (!user.permissions.includes("order.pay")) return {};
+    return {
+      OR: [{ assignedCashierId: user.id }, { assignedCashierId: null }, { waiterId: user.id }, { cashierId: user.id }],
+    };
+  }
+
+  private assertCanModify(
+    user: AuthUser,
+    order: { waiterId: string | null; waiter?: { id: string; name: string } | null },
+    allowBillRequest = false
+  ) {
+    if (user.permissions.includes("users.manage") || user.permissions.includes("order.edit")) return;
+    if (!order.waiterId || order.waiterId === user.id) return;
+    if (allowBillRequest && user.permissions.includes("bill.request") && order.waiterId === user.id) return;
+    const who = order.waiter?.name ?? "another staff member";
+    throw new BadRequestException(`Table already booked by ${who}`);
+  }
+
+  private async resolveTable(tableId?: string, tableNo?: string) {
+    if (tableId) {
+      const t = await this.prisma.restaurantTable.findFirst({
+        where: { id: tableId, active: true },
+        include: { partition: { select: { name: true } } },
+      });
+      if (!t) throw new BadRequestException("Table not found");
+      return { id: t.id, name: t.name, label: tableLabel(t.partition.name, t.name) };
+    }
+    const raw = tableNo?.trim();
+    if (!raw) return null;
+    // Match "Hall · T-1" or plain "T-1"
+    const parts = raw.split("·").map((s) => s.trim());
+    if (parts.length === 2) {
+      const t = await this.prisma.restaurantTable.findFirst({
+        where: {
+          active: true,
+          name: parts[1],
+          partition: { name: parts[0], active: true },
+        },
+        include: { partition: { select: { name: true } } },
+      });
+      if (t) return { id: t.id, name: t.name, label: tableLabel(t.partition.name, t.name) };
+    }
+    const matches = await this.prisma.restaurantTable.findMany({
+      where: { active: true, name: raw },
+      include: { partition: { select: { name: true } } },
+      take: 2,
+    });
+    if (matches.length === 1) {
+      const t = matches[0];
+      return { id: t.id, name: t.name, label: tableLabel(t.partition.name, t.name) };
+    }
+    // Walk-in / free-text label (no restaurant table row)
+    return null;
+  }
+
+  private async resolveAssignedCashier(user: AuthUser, assignedCashierId?: string) {
+    if (assignedCashierId) {
+      const c = await this.prisma.user.findFirst({
+        where: {
+          id: assignedCashierId,
+          active: true,
+          role: { code: { in: ["MAIN_CASHIER", "CASHIER"] } },
+        },
+        select: { id: true },
+      });
+      if (!c) throw new BadRequestException("Select Main Cashier or Cashier for this bill");
+      return c.id;
+    }
+    // Cashier placing their own order → assign to self
+    if (user.permissions.includes("cash.keep") && user.permissions.includes("order.pay")) {
+      return user.id;
+    }
+    // Supervisor / floor: require explicit pick
+    if (user.permissions.includes("order.create") && !user.permissions.includes("order.pay")) {
+      throw new BadRequestException("Select which cashier will take this bill");
+    }
+    return null;
+  }
+
   private staffDto(u: { id: string; name: string; role: { code: string; name: string } } | null | undefined) {
     if (!u) return null;
     return { id: u.id, name: u.name, roleCode: u.role.code, roleName: u.role.name };
@@ -311,11 +602,41 @@ export class OrdersService {
     }
   }
 
-  private async buildLines(items: OrderLineDto[]) {
+  private async buildLines(user: AuthUser, items: OrderLineDto[]) {
     const lines: Line[] = [];
     let subtotal = 0;
     let costTotal = 0;
+    let perHeadCfg: Awaited<ReturnType<SettingsService["perHead"]>> | null = null;
+
     for (const line of items) {
+      const kind = line.kind === "PER_HEAD" ? "PER_HEAD" : "MENU";
+      if (kind === "PER_HEAD") {
+        if (!canChargePerHead(user)) {
+          throw new ForbiddenException("Only Supervisor can add per-head charges");
+        }
+        perHeadCfg ??= await this.settings.perHead();
+        if (!perHeadCfg.enabled) throw new BadRequestException("Per-head charge is disabled in Settings");
+        if (perHeadCfg.amount <= 0) throw new BadRequestException("Per-head amount is not set in Settings");
+        const rate = perHeadCfg.amount;
+        const amount = rate * line.quantity;
+        subtotal += amount;
+        lines.push({
+          lineKind: "PER_HEAD",
+          menuItemId: null,
+          name: perHeadCfg.label,
+          sellUnit: "PCS",
+          quantity: line.quantity,
+          ratePerUnit: rate,
+          amount,
+          unitCost: 0,
+          costAmount: 0,
+          notes: line.notes?.trim() || undefined,
+          recipeId: null,
+        });
+        continue;
+      }
+
+      if (!line.menuItemId) throw new BadRequestException("Menu item required");
       const menu = await this.prisma.menuItem.findUnique({ where: { id: line.menuItemId } });
       if (!menu || !menu.active) throw new BadRequestException("Menu item not available");
       const rate = toNumber(menu.sellingPrice);
@@ -325,6 +646,7 @@ export class OrdersService {
       subtotal += amount;
       costTotal += costAmount;
       lines.push({
+        lineKind: "MENU",
         menuItemId: menu.id,
         name: menu.name,
         sellUnit: menu.sellUnit,
@@ -360,6 +682,7 @@ export class OrdersService {
       status: o.status,
       paymentStatus: o.paymentStatus,
       waiterId: o.waiterId,
+      assignedCashierId: o.assignedCashierId,
     };
   }
 
@@ -369,6 +692,8 @@ export class OrdersService {
       id: o.id,
       orderNo: o.orderNo,
       tableNo: o.tableNo,
+      tableId: o.tableId,
+      partitionName: o.table?.partition?.name ?? null,
       notes: o.notes,
       status: o.status,
       paymentStatus: o.paymentStatus,
@@ -384,6 +709,8 @@ export class OrdersService {
       waiter: this.staffLabel(o.waiter),
       waiterId: o.waiterId,
       orderedBy: this.staffDto(o.waiter),
+      assignedCashierId: o.assignedCashierId,
+      assignedCashier: this.staffDto(o.assignedCashier),
       servedBy: o.servedByName,
       servedByName: o.servedByName,
       kotRounds: o.kotRounds,
@@ -397,6 +724,7 @@ export class OrdersService {
       })),
       items: o.items.map((i) => ({
         id: i.id,
+        lineKind: i.lineKind,
         name: i.name,
         sellUnit: i.sellUnit,
         quantity: toNumber(i.quantity),
@@ -405,6 +733,8 @@ export class OrdersService {
         notes: i.notes,
         kotRound: i.kotRound,
         addedBy: i.addedBy?.name ?? null,
+        category: i.menuItem?.category ?? (i.lineKind === "PER_HEAD" ? "Per head" : null),
+        kitchenStation: i.menuItem?.kitchenStation ?? null,
       })),
       payments: o.payments.map((p) => ({
         id: p.id,

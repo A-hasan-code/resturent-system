@@ -2321,6 +2321,17 @@ td .row {
   background: var(--accent-soft);
 }
 
+.waiter-item-perhead {
+  border-style: dashed;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.waiter-perhead-cart {
+  border: 1px dashed var(--accent) !important;
+  background: var(--accent-soft) !important;
+}
+
 .waiter-item-qty {
   position: absolute;
   bottom: 0.45rem;
@@ -2586,6 +2597,10 @@ td .row {
   transition: border-color 0.15s, background 0.15s;
 }
 
+.staff-btn.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+}
 .staff-btn:hover {
   border-color: #9fd4cb;
   background: var(--accent-soft);

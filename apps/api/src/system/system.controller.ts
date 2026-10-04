@@ -12,7 +12,8 @@ import {
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { memoryStorage } from "multer";
-import { IsOptional, IsString, Matches, MaxLength } from "class-validator";
+import { IsNumber, IsOptional, IsString, Matches, MaxLength, Min } from "class-validator";
+import { Type } from "class-transformer";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
 import { RequirePerms } from "../common/decorators";
@@ -37,6 +38,9 @@ class UpdateSettingsDto {
   @IsOptional() @IsString() @MaxLength(120) billFooter?: string;
   @IsOptional() @IsString() @Matches(/^[01]$/) kotShowOrderBy?: string;
   @IsOptional() @IsString() @MaxLength(120) kotFooter?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) perHeadEnabled?: string;
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) perHeadAmount?: number;
+  @IsOptional() @IsString() @MaxLength(40) perHeadLabel?: string;
 }
 
 @Controller()
@@ -70,15 +74,17 @@ export class SystemController {
 
   @Get("settings")
   async getSettings() {
-    const [tipSplit, bill, kot] = await Promise.all([
+    const [tipSplit, bill, kot, perHead] = await Promise.all([
       this.tips.tipSplit(),
       this.tips.printBillOpts(),
       this.tips.printKotOpts(),
+      this.settings.perHead(),
     ]);
     return {
       serverName: this.identity.name,
       restaurant: await this.settings.restaurant(),
       tip: { split: tipSplit },
+      billing: { perHead },
       print: {
         bill: {
           showOrderBy: bill.showOrderBy,
@@ -110,6 +116,8 @@ export class SystemController {
       ["billFooter", "print.bill.footer"],
       ["kotShowOrderBy", "print.kot.showOrderBy"],
       ["kotFooter", "print.kot.footer"],
+      ["perHeadEnabled", "billing.perHeadEnabled"],
+      ["perHeadLabel", "billing.perHeadLabel"],
     ];
     for (const [field, key] of map) {
       const v = dto[field];
@@ -117,6 +125,9 @@ export class SystemController {
         const raw = String(v).trim();
         await this.settings.set(key, field === "tipSplit" ? raw.toUpperCase() : raw);
       }
+    }
+    if (dto.perHeadAmount != null) {
+      await this.settings.set("billing.perHeadAmount", String(dto.perHeadAmount));
     }
     return this.getSettings();
   }

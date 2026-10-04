@@ -18,13 +18,14 @@ export async function serverPrint(kind: "kot" | "bill", orderId: string, opts: K
 
 /**
  * Per-user, per-device choice: show the kitchen slip on screen before it is printed.
- * Waiters print straight away by default; managers and cashiers preview first.
+ * Waiters print straight away by default; supervisors, cashiers and others preview first.
  */
 export function useKotPreviewPref(user: User | null) {
   const key = `kotPreview:${user?.id ?? ""}`;
   const [on, setOn] = useState(() => {
     const saved = localStorage.getItem(key);
-    return saved == null ? !!user && user.roleCode !== "WAITER" : saved === "1";
+    const directPrint = user?.roleCode === "WAITER";
+    return saved == null ? !!user && !directPrint : saved === "1";
   });
   const set = useCallback(
     (v: boolean) => {
