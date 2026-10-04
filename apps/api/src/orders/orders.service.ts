@@ -333,6 +333,7 @@ export class OrdersService {
       const qtyDiff = Math.max(0, change.quantity) - toNumber(line.quantity);
       if (qtyDiff > 0) increases.push({ menuItemId: line.menuItemId, quantity: qtyDiff, name: line.name });
     }
+    const billMeta = await this.resolveBillEdit(order, dto);
     if (increases.length) {
       const menus = await this.prisma.menuItem.findMany({
         where: { id: { in: increases.map((i) => i.menuItemId) } },
@@ -393,6 +394,7 @@ export class OrdersService {
         subtotal: { increment: subDelta },
         total: { increment: subDelta },
         costTotal: { increment: costDelta },
+        ...billMeta,
       },
       include: orderInclude,
     });
@@ -626,6 +628,49 @@ export class OrdersService {
     }
     // Walk-in / free-text label (no restaurant table row)
     return null;
+  }
+
+  private async resolveBillEdit(
+    order: { id: string; tableId: string | null; assignedCashierId: string | null; waiterId: string | null },
+    dto: EditOrderDto
+  ) {
+    const data: Prisma.OrderUpdateInput = {};
+    if (dto.tableId && dto.tableId !== order.tableId) {
+      const table = await this.prisma.restaurantTable.findFirst({
+        where: { id: dto.tableId, active: true },
+        include: { partition: { select: { name: true } } },
+      });
+      if (!table) throw new BadRequestException("Table not found");
+      const label = tableLabel(table.partition.name, table.name);
+      const occupied = await this.prisma.order.findFirst({
+        where: {
+          id: { not: order.id },
+          AND: [OPEN_ORDER_WHERE, { OR: [{ tableId: table.id }, { tableNo: label }, { tableNo: table.name }] }],
+        },
+        select: { id: true },
+      });
+      if (occupied) throw new BadRequestException("That table already has an open bill");
+      data.table = { connect: { id: table.id } };
+      data.tableNo = label;
+    }
+    if (dto.assignedCashierId && dto.assignedCashierId !== order.assignedCashierId) {
+      const cashier = await this.prisma.user.findFirst({
+        where: { id: dto.assignedCashierId, active: true, role: { code: { in: ["MAIN_CASHIER", "CASHIER"] } } },
+        select: { id: true },
+      });
+      if (!cashier) throw new BadRequestException("Select Main Cashier or Cashier for this bill");
+      data.assignedCashier = { connect: { id: cashier.id } };
+    }
+    if (dto.waiterId && dto.waiterId !== order.waiterId) {
+      const supervisor = await this.prisma.user.findFirst({
+        where: { id: dto.waiterId, active: true, role: { code: "SUPERVISOR" } },
+        select: { id: true },
+      });
+      if (!supervisor) throw new BadRequestException("Select a supervisor");
+      data.waiter = { connect: { id: supervisor.id } };
+    }
+    if (dto.servedByName !== undefined) data.servedByName = cleanName(dto.servedByName);
+    return data;
   }
 
   private async resolveAssignedCashier(user: AuthUser, assignedCashierId?: string) {

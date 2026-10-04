@@ -3106,6 +3106,68 @@ td .row {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
+.edit-bill {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0.7rem 0 0.35rem;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+}
+
+.edit-bill-title {
+  margin-bottom: 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.edit-bill-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem 0.55rem;
+}
+
+.edit-bill-grid label {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.edit-bill-grid label.span-2 {
+  grid-column: 1 / -1;
+}
+
+.edit-bill-grid select {
+  width: 100%;
+  min-height: 2.15rem;
+  padding: 0.32rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 0.88rem;
+}
+
+.edit-bill-grid select:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-color: var(--accent);
+}
+
+.edit-bill-items {
+  margin-top: 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
 .credit-form {
   display: grid;
   gap: 0.55rem;
