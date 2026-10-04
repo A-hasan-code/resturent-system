@@ -37,6 +37,7 @@ type Draft = {
 
 const ROLE_HELP: Record<string, MessageKey> = {
   ADMIN: "users.helpAdmin",
+  SYSTEM_MANAGER: "users.helpSystemManager",
   SUPERVISOR: "users.helpSupervisor",
   MAIN_CASHIER: "users.helpMainCashier",
   MANAGER: "users.helpSupervisor",
@@ -45,7 +46,6 @@ const ROLE_HELP: Record<string, MessageKey> = {
   KITCHEN: "users.helpKitchen",
   STORE: "users.helpStore",
 };
-
 const EMPTY: Draft = {
   name: "",
   username: "",

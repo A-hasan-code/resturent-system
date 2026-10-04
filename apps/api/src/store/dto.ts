@@ -12,7 +12,7 @@ import {
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
-import { UnitType } from "@prisma/client";
+import { ExtraExpensePaidBy, UnitType } from "@prisma/client";
 
 export class CreateStoreItemDto {
   @IsString()
@@ -107,6 +107,18 @@ export class CreateSupplierDto {
 
   @IsString()
   @IsOptional()
+  supplyOf?: string;
+
+  @IsString()
+  @IsOptional()
+  brand?: string;
+
+  @IsString()
+  @IsOptional()
+  address?: string;
+
+  @IsString()
+  @IsOptional()
   notes?: string;
 }
 
@@ -119,6 +131,18 @@ export class UpdateSupplierDto {
   @IsString()
   @IsOptional()
   phone?: string;
+
+  @IsString()
+  @IsOptional()
+  supplyOf?: string;
+
+  @IsString()
+  @IsOptional()
+  brand?: string;
+
+  @IsString()
+  @IsOptional()
+  address?: string;
 
   @IsString()
   @IsOptional()
@@ -153,11 +177,25 @@ export class CreatePurchaseDto {
   @IsIn(["CASH", "CREDIT"])
   payKind!: "CASH" | "CREDIT";
 
-  /** Amount paid on this invoice. Cash purchases ignore this and pay in full. */
+  /** Amount paid to the supplier on this invoice. Cash = full supplier due. */
   @IsNumber()
   @Min(0)
   @IsOptional()
   paidAmount?: number;
+
+  /** Travel / loading / other (not inventory). */
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  extraExpense?: number;
+
+  @IsString()
+  @IsOptional()
+  extraExpenseNote?: string;
+
+  @IsEnum(ExtraExpensePaidBy)
+  @IsOptional()
+  extraExpensePaidBy?: ExtraExpensePaidBy;
 
   @IsString()
   @IsOptional()
@@ -185,6 +223,17 @@ export class DayUseLineDto {
 }
 
 export class SaveDayUseDto {
+  /** Business day YYYY-MM-DD. Defaults to today’s business day. */
+  @IsString()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  @IsOptional()
+  businessDate?: string;
+
+  /** Kept for older clients; past-day edits are no longer allowed. */
+  @IsString()
+  @IsOptional()
+  editReason?: string;
+
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => DayUseLineDto)

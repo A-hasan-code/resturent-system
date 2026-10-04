@@ -28,10 +28,25 @@ const PERMS = [
   ["system.manage", "Server settings & backups"],
   ["cash.keep", "Keeps the cash drawer (receives handovers)"],
   ["payments.view", "View payment & cash handover records"],
+  ["expense.view", "View hotel expense sheet"],
+  ["expense.manage", "Add and edit hotel expenses"],
+  ["close.view", "View daily cash close report"],
+  ["close.manage", "Save daily cash close report"],
 ] as const;
 
 const ROLE_PERMS: Record<string, string[]> = {
   ADMIN: PERMS.map(([c]) => c),
+  SYSTEM_MANAGER: [
+    "close.view",
+    "close.manage",
+    "payments.view",
+    "reports.view",
+    "bill.view",
+    "expense.view",
+    "expense.manage",
+    "menu.view",
+    "store.view",
+  ],
   SUPERVISOR: [
     "order.create",
     "order.addItems",
@@ -40,6 +55,8 @@ const ROLE_PERMS: Record<string, string[]> = {
     "print.kot",
     "kitchen.view",
     "kitchen.update",
+    "expense.view",
+    "expense.manage",
   ],
   MAIN_CASHIER: [
     "menu.view",
@@ -75,6 +92,7 @@ const ROLE_PERMS: Record<string, string[]> = {
 
 const ROLES = [
   { code: "ADMIN", name: "Admin" },
+  { code: "SYSTEM_MANAGER", name: "System Manager" },
   { code: "SUPERVISOR", name: "Supervisor" },
   { code: "MAIN_CASHIER", name: "Main Cashier" },
   { code: "CASHIER", name: "Cashier" },
@@ -154,6 +172,7 @@ async function main() {
 
   const users = [
     { username: "admin", name: "Admin", pass: "admin123", role: "ADMIN" },
+    { username: "sysmanager", name: "System Manager", pass: "sys123", pin: "5555", role: "SYSTEM_MANAGER" },
     { username: "supervisor", name: "Supervisor Usman", pass: "super123", pin: "2222", role: "SUPERVISOR" },
     { username: "maincashier", name: "Main Cashier", pass: "main123", pin: "3333", role: "MAIN_CASHIER" },
     { username: "cashier", name: "Cashier Ali", pass: "cashier123", pin: "4444", role: "CASHIER" },

@@ -126,13 +126,28 @@ function isOurs(h: Health | null, trusted = false) {
 /** Called once at startup so the serverId gets pinned on first run. */
 export async function initConnection() {
   if (envBase) return;
+
+  // Browser/dev: always try this page's origin first (Vite proxies /api → :4000).
+  // Clears a stale saved LAN IP that keeps showing "Connecting to server…".
+  if (!isNative) {
+    const page = await probe("", 3000);
+    if (page) {
+      remember("", page);
+      setStatus("ok");
+      return;
+    }
+  }
+
   if (hasServerAddress()) {
     const origin = serverOrigin();
     const h = await probe(origin, 3000);
     if (isOurs(h, true)) {
       remember(origin, h!);
+      setStatus("ok");
       return;
     }
+    // Saved address is dead — drop it so search can use this device again.
+    if (origin) localStorage.removeItem(K_ORIGIN);
   }
   void reportLost();
 }
@@ -210,13 +225,26 @@ async function scanSubnet(prefix: string, port: number, lenient = false): Promis
  */
 async function findServer(lenient: boolean): Promise<boolean> {
   const saved = serverOrigin();
-  const trusted = isNative ? (saved ? [saved] : []) : [saved, ""];
-  const port = Number(localStorage.getItem(K_PORT) || location.port || 3000);
-  const candidates = [...trusted, `http://hotel.local:${port}`];
+  const trusted = isNative ? (saved ? [saved] : []) : ["", saved];
+  const uiPort = Number(location.port || localStorage.getItem(K_PORT) || 3000);
+  const apiPort = Number(localStorage.getItem(K_PORT) || 4000);
+  const host = location.hostname || "localhost";
+  const candidates = [
+    ...trusted,
+    `http://localhost:${uiPort}`,
+    `http://127.0.0.1:${uiPort}`,
+    `http://localhost:4000`,
+    `http://127.0.0.1:4000`,
+    `http://${host}:${uiPort}`,
+    `http://${host}:4000`,
+    `http://hotel.local:${uiPort}`,
+    `http://hotel.local:4000`,
+    apiPort !== uiPort && apiPort !== 4000 ? `http://localhost:${apiPort}` : "",
+  ].filter(Boolean) as string[];
   for (const origin of [...new Set(candidates)]) {
     progress = origin ? `Checking ${origin}` : "Checking this address";
     const h = await probe(origin);
-    if (isOurs(h, lenient || trusted.includes(origin))) {
+    if (isOurs(h, lenient || trusted.includes(origin) || origin === "")) {
       remember(origin, h!);
       return true;
     }
@@ -239,10 +267,12 @@ async function findServer(lenient: boolean): Promise<boolean> {
 
   for (const prefix of await subnetPrefixes()) {
     progress = `Scanning ${prefix}.x`;
-    const hit = await scanSubnet(prefix, port, lenient);
-    if (hit) {
-      remember(hit.origin, hit.h);
-      return true;
+    for (const scanPort of [...new Set([uiPort, 4000, apiPort])]) {
+      const hit = await scanSubnet(prefix, scanPort, lenient);
+      if (hit) {
+        remember(hit.origin, hit.h);
+        return true;
+      }
     }
   }
   return false;

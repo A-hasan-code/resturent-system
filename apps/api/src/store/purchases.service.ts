@@ -1,10 +1,26 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import { Prisma } from "@prisma/client";
+import { ExtraExpensePaidBy, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { toNumber } from "../common/units";
 import { CreatePurchaseDto, CreateSupplierDto, SupplierPaymentDto, UpdateSupplierDto } from "./dto";
 
 const money2 = (n: number) => Math.round(n * 100) / 100;
+
+/** Inventory total + supplier-side extra expense (self-paid extra is excluded). */
+function supplierDue(p: {
+  total: Prisma.Decimal | number;
+  extraExpense?: Prisma.Decimal | number | null;
+  extraExpensePaidBy?: ExtraExpensePaidBy | null;
+}) {
+  const inv = typeof p.total === "number" ? p.total : toNumber(p.total);
+  const extra =
+    p.extraExpensePaidBy === ExtraExpensePaidBy.SUPPLIER
+      ? typeof p.extraExpense === "number"
+        ? p.extraExpense
+        : toNumber(p.extraExpense ?? 0)
+      : 0;
+  return money2(inv + extra);
+}
 
 /** Local calendar day, matching how purchase timestamps are stored (noon local). */
 function dayStamp(isoDate: string) {
@@ -25,15 +41,63 @@ function localDate(d: Date) {
   return `${y}-${m}-${day}`;
 }
 
-type LedgerPurchase = { total: Prisma.Decimal; paidAmount: Prisma.Decimal };
-type LedgerPayment = { amount: Prisma.Decimal };
+type LedgerPurchase = {
+  total: Prisma.Decimal;
+  paidAmount: Prisma.Decimal;
+  extraExpense?: Prisma.Decimal | null;
+  extraExpensePaidBy?: ExtraExpensePaidBy | null;
+};
 
-export function supplierBalance(purchases: LedgerPurchase[], payments: LedgerPayment[]) {
-  const purchased = money2(purchases.reduce((s, p) => s + toNumber(p.total), 0));
-  const paidOnBills = money2(purchases.reduce((s, p) => s + toNumber(p.paidAmount), 0));
-  const paidLater = money2(payments.reduce((s, p) => s + toNumber(p.amount), 0));
-  const paid = money2(paidOnBills + paidLater);
+/** Account paid is stored on each bill (invoice day + later account payments allocated FIFO). */
+export function supplierBalance(purchases: LedgerPurchase[]) {
+  const purchased = money2(purchases.reduce((s, p) => s + supplierDue(p), 0));
+  const paid = money2(purchases.reduce((s, p) => s + toNumber(p.paidAmount), 0));
   return { purchased, paid, outstanding: money2(purchased - paid) };
+}
+
+type Tx = Prisma.TransactionClient;
+
+/** Apply unallocated account payments onto oldest open bills first. */
+async function allocateUnappliedPayments(tx: Tx, supplierId: string) {
+  const pending = await tx.supplierPayment.findMany({
+    where: { supplierId, allocated: false },
+    orderBy: [{ paidAt: "asc" }, { createdAt: "asc" }],
+  });
+  if (!pending.length) return;
+
+  for (const pay of pending) {
+    const purchases = await tx.purchase.findMany({
+      where: { supplierId },
+      orderBy: [{ purchasedAt: "asc" }, { createdAt: "asc" }],
+      select: {
+        id: true,
+        total: true,
+        paidAmount: true,
+        extraExpense: true,
+        extraExpensePaidBy: true,
+      },
+    });
+
+    let left = money2(toNumber(pay.amount));
+    for (const p of purchases) {
+      if (left <= 0.009) break;
+      const due = supplierDue(p);
+      const already = toNumber(p.paidAmount);
+      const gap = money2(due - already);
+      if (gap <= 0.009) continue;
+      const use = Math.min(gap, left);
+      await tx.purchase.update({
+        where: { id: p.id },
+        data: { paidAmount: money2(already + use) },
+      });
+      left = money2(left - use);
+    }
+
+    await tx.supplierPayment.update({
+      where: { id: pay.id },
+      data: { allocated: true },
+    });
+  }
 }
 
 @Injectable()
@@ -41,20 +105,32 @@ export class PurchasesService {
   constructor(private readonly prisma: PrismaService) {}
 
   async listSuppliers() {
+    const ids = (
+      await this.prisma.supplier.findMany({
+        where: { active: true },
+        select: { id: true },
+      })
+    ).map((s) => s.id);
+    for (const id of ids) {
+      await this.prisma.$transaction((tx) => allocateUnappliedPayments(tx, id));
+    }
+
     const rows = await this.prisma.supplier.findMany({
       where: { active: true },
       orderBy: { name: "asc" },
       include: {
-        purchases: { select: { total: true, paidAmount: true } },
-        payments: { select: { amount: true } },
+        purchases: { select: { total: true, paidAmount: true, extraExpense: true, extraExpensePaidBy: true } },
       },
     });
     return rows.map((s) => {
-      const bal = supplierBalance(s.purchases, s.payments);
+      const bal = supplierBalance(s.purchases);
       return {
         id: s.id,
         name: s.name,
         phone: s.phone,
+        supplyOf: s.supplyOf,
+        brand: s.brand,
+        address: s.address,
         notes: s.notes,
         ...bal,
       };
@@ -65,9 +141,27 @@ export class PurchasesService {
     const name = dto.name.trim();
     if (!name) throw new BadRequestException("Supplier name required");
     const row = await this.prisma.supplier.create({
-      data: { name, phone: dto.phone?.trim() || null, notes: dto.notes?.trim() || null },
+      data: {
+        name,
+        phone: dto.phone?.trim() || null,
+        supplyOf: dto.supplyOf?.trim() || null,
+        brand: dto.brand?.trim() || null,
+        address: dto.address?.trim() || null,
+        notes: dto.notes?.trim() || null,
+      },
     });
-    return { id: row.id, name: row.name, phone: row.phone, notes: row.notes, purchased: 0, paid: 0, outstanding: 0 };
+    return {
+      id: row.id,
+      name: row.name,
+      phone: row.phone,
+      supplyOf: row.supplyOf,
+      brand: row.brand,
+      address: row.address,
+      notes: row.notes,
+      purchased: 0,
+      paid: 0,
+      outstanding: 0,
+    };
   }
 
   async updateSupplier(id: string, dto: UpdateSupplierDto) {
@@ -77,17 +171,30 @@ export class PurchasesService {
         data: {
           ...(dto.name != null ? { name: dto.name.trim() } : {}),
           ...(dto.phone !== undefined ? { phone: dto.phone.trim() || null } : {}),
+          ...(dto.supplyOf !== undefined ? { supplyOf: dto.supplyOf.trim() || null } : {}),
+          ...(dto.brand !== undefined ? { brand: dto.brand.trim() || null } : {}),
+          ...(dto.address !== undefined ? { address: dto.address.trim() || null } : {}),
           ...(dto.notes !== undefined ? { notes: dto.notes.trim() || null } : {}),
           ...(dto.active !== undefined ? { active: dto.active } : {}),
         },
       });
-      return { id: row.id, name: row.name, phone: row.phone, active: row.active };
+      return {
+        id: row.id,
+        name: row.name,
+        phone: row.phone,
+        supplyOf: row.supplyOf,
+        brand: row.brand,
+        address: row.address,
+        active: row.active,
+      };
     } catch {
       throw new NotFoundException("Supplier not found");
     }
   }
 
   async ledger(id: string) {
+    await this.prisma.$transaction((tx) => allocateUnappliedPayments(tx, id));
+
     const supplier = await this.prisma.supplier.findUnique({
       where: { id },
       include: {
@@ -101,31 +208,41 @@ export class PurchasesService {
       },
     });
     if (!supplier) throw new NotFoundException("Supplier not found");
-    const bal = supplierBalance(supplier.purchases, supplier.payments);
+    const bal = supplierBalance(supplier.purchases);
     return {
       id: supplier.id,
       name: supplier.name,
       phone: supplier.phone,
+      supplyOf: supplier.supplyOf,
+      brand: supplier.brand,
+      address: supplier.address,
       notes: supplier.notes,
       ...bal,
-      purchases: supplier.purchases.map((p) => ({
-        id: p.id,
-        purchasedOn: localDate(p.purchasedAt),
-        payKind: p.payKind,
-        total: toNumber(p.total),
-        paidAmount: toNumber(p.paidAmount),
-        balance: money2(toNumber(p.total) - toNumber(p.paidAmount)),
-        note: p.note,
-        lines: p.lines.map((l) => ({
-          id: l.id,
-          item: l.storeItem.name,
-          category: l.categoryName,
-          unit: l.unit,
-          quantity: toNumber(l.quantity),
-          ratePerUnit: toNumber(l.ratePerUnit),
-          amount: toNumber(l.amount),
-        })),
-      })),
+      purchases: supplier.purchases.map((p) => {
+        const due = supplierDue(p);
+        const paidAmount = toNumber(p.paidAmount);
+        return {
+          id: p.id,
+          purchasedOn: localDate(p.purchasedAt),
+          payKind: p.payKind,
+          total: toNumber(p.total),
+          extraExpense: toNumber(p.extraExpense),
+          extraExpenseNote: p.extraExpenseNote,
+          extraExpensePaidBy: p.extraExpensePaidBy,
+          paidAmount,
+          balance: money2(due - paidAmount),
+          note: p.note,
+          lines: p.lines.map((l) => ({
+            id: l.id,
+            item: l.storeItem.name,
+            category: l.categoryName,
+            unit: l.unit,
+            quantity: toNumber(l.quantity),
+            ratePerUnit: toNumber(l.ratePerUnit),
+            amount: toNumber(l.amount),
+          })),
+        };
+      }),
       payments: supplier.payments.map((p) => ({
         id: p.id,
         paidOn: localDate(p.paidAt),
@@ -170,11 +287,30 @@ export class PurchasesService {
     const total = money2(lineRows.reduce((s, l) => s + l.amount, 0));
     if (total <= 0) throw new BadRequestException("Purchase total must be greater than zero");
 
-    let paid = dto.payKind === "CASH" ? total : money2(dto.paidAmount ?? 0);
-    if (paid < 0 || paid - total > 0.009) {
-      throw new BadRequestException("Paid amount cannot be more than the bill");
+    const extraExpense = money2(dto.extraExpense ?? 0);
+    let extraExpenseNote = dto.extraExpenseNote?.trim() || null;
+    let extraExpensePaidBy: ExtraExpensePaidBy | null = dto.extraExpensePaidBy ?? null;
+    if (extraExpense > 0) {
+      if (!extraExpenseNote) throw new BadRequestException("Extra expense needs a reason (e.g. travel)");
+      if (!extraExpensePaidBy) {
+        throw new BadRequestException("Say if extra expense was paid to supplier or self-paid");
+      }
+    } else {
+      extraExpenseNote = null;
+      extraExpensePaidBy = null;
     }
-    paid = Math.min(paid, total);
+
+    const due = supplierDue({
+      total,
+      extraExpense,
+      extraExpensePaidBy,
+    });
+
+    let paid = dto.payKind === "CASH" ? due : money2(dto.paidAmount ?? 0);
+    if (paid < 0 || paid - due > 0.009) {
+      throw new BadRequestException("Paid amount cannot be more than the supplier bill");
+    }
+    paid = Math.min(paid, due);
 
     const purchasedAt = dayStamp(dto.purchasedOn);
 
@@ -186,6 +322,9 @@ export class PurchasesService {
           payKind: dto.payKind,
           paidAmount: paid,
           total,
+          extraExpense,
+          extraExpenseNote,
+          extraExpensePaidBy,
           note: dto.note?.trim() || null,
           lines: { create: lineRows },
         },
@@ -210,6 +349,18 @@ export class PurchasesService {
           },
         });
       }
+      // Record cash paid with the bill so Hotel Expenses / profit use one cash ledger (SupplierPayment).
+      if (paid > 0.009) {
+        await tx.supplierPayment.create({
+          data: {
+            supplierId: supplier.id,
+            amount: paid,
+            paidAt: purchasedAt,
+            note: `purchase:${created.id}`,
+            allocated: true,
+          },
+        });
+      }
       return created;
     });
 
@@ -217,27 +368,35 @@ export class PurchasesService {
   }
 
   async paySupplier(id: string, dto: SupplierPaymentDto) {
+    await this.prisma.$transaction((tx) => allocateUnappliedPayments(tx, id));
+
     const supplier = await this.prisma.supplier.findUnique({
       where: { id },
       include: {
-        purchases: { select: { total: true, paidAmount: true } },
-        payments: { select: { amount: true } },
+        purchases: { select: { total: true, paidAmount: true, extraExpense: true, extraExpensePaidBy: true } },
       },
     });
     if (!supplier || !supplier.active) throw new NotFoundException("Supplier not found");
-    const bal = supplierBalance(supplier.purchases, supplier.payments);
+    const bal = supplierBalance(supplier.purchases);
     const amount = money2(dto.amount);
+    if (amount <= 0) throw new BadRequestException("Payment must be greater than zero");
     if (amount - bal.outstanding > 0.009) {
       throw new BadRequestException(`Payment is more than outstanding (Rs ${bal.outstanding})`);
     }
-    await this.prisma.supplierPayment.create({
-      data: {
-        supplierId: id,
-        amount,
-        paidAt: dayStamp(dto.paidOn || localDate(new Date())),
-        note: dto.note?.trim() || null,
-      },
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.supplierPayment.create({
+        data: {
+          supplierId: id,
+          amount,
+          paidAt: dayStamp(dto.paidOn || localDate(new Date())),
+          note: dto.note?.trim() || null,
+          allocated: false,
+        },
+      });
+      await allocateUnappliedPayments(tx, id);
     });
+
     return this.ledger(id);
   }
 
@@ -266,8 +425,26 @@ export class PurchasesService {
         amount: toNumber(l.amount),
       }))
     );
-    const total = money2(lines.reduce((s, l) => s + l.amount, 0));
-    return { date, purchaseCount: rows.length, lineCount: lines.length, total, lines };
+    const inventoryTotal = money2(lines.reduce((s, l) => s + l.amount, 0));
+    const extras = rows
+      .filter((p) => toNumber(p.extraExpense) > 0)
+      .map((p) => ({
+        purchaseId: p.id,
+        supplier: p.supplier.name,
+        amount: toNumber(p.extraExpense),
+        note: p.extraExpenseNote,
+        paidBy: p.extraExpensePaidBy,
+      }));
+    const extraTotal = money2(extras.reduce((s, e) => s + e.amount, 0));
+    return {
+      date,
+      purchaseCount: rows.length,
+      lineCount: lines.length,
+      total: inventoryTotal,
+      extraExpenseTotal: extraTotal,
+      extras,
+      lines,
+    };
   }
 
   async recentDates(limit = 45) {
@@ -291,16 +468,23 @@ export class PurchasesService {
       take: limit,
       include: { supplier: { select: { name: true } }, lines: true },
     });
-    return rows.map((p) => ({
-      id: p.id,
-      purchasedOn: localDate(p.purchasedAt),
-      supplier: p.supplier.name,
-      payKind: p.payKind,
-      total: toNumber(p.total),
-      paidAmount: toNumber(p.paidAmount),
-      outstanding: money2(toNumber(p.total) - toNumber(p.paidAmount)),
-      lineCount: p.lines.length,
-    }));
+    return rows.map((p) => {
+      const paidAmount = toNumber(p.paidAmount);
+      const due = supplierDue(p);
+      return {
+        id: p.id,
+        purchasedOn: localDate(p.purchasedAt),
+        supplier: p.supplier.name,
+        payKind: p.payKind,
+        total: toNumber(p.total),
+        extraExpense: toNumber(p.extraExpense),
+        extraExpenseNote: p.extraExpenseNote,
+        extraExpensePaidBy: p.extraExpensePaidBy,
+        paidAmount,
+        outstanding: money2(due - paidAmount),
+        lineCount: p.lines.length,
+      };
+    });
   }
 
   private async purchaseDto(id: string) {
@@ -308,14 +492,19 @@ export class PurchasesService {
       where: { id },
       include: { supplier: true, lines: { include: { storeItem: true } } },
     });
+    const paidAmount = toNumber(p.paidAmount);
+    const due = supplierDue(p);
     return {
       id: p.id,
       purchasedOn: localDate(p.purchasedAt),
       supplier: p.supplier.name,
       payKind: p.payKind,
       total: toNumber(p.total),
-      paidAmount: toNumber(p.paidAmount),
-      outstanding: money2(toNumber(p.total) - toNumber(p.paidAmount)),
+      extraExpense: toNumber(p.extraExpense),
+      extraExpenseNote: p.extraExpenseNote,
+      extraExpensePaidBy: p.extraExpensePaidBy,
+      paidAmount,
+      outstanding: money2(due - paidAmount),
       lines: p.lines.map((l) => ({
         item: l.storeItem.name,
         category: l.categoryName,

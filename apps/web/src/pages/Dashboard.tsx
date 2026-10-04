@@ -54,6 +54,16 @@ type StaffOrderRow = {
   amount: number;
 };
 
+type NetWindow = {
+  from: string;
+  to: string;
+  sales: number;
+  totalExpense: number;
+  manualExpenses: number;
+  supplierPaid: number;
+  netProfit: number;
+};
+
 type Stats = {
   role: string;
   staleMinutes: number;
@@ -89,6 +99,11 @@ type Stats = {
   myServedToday?: number;
   tipBoard?: TipRow[];
   staffOrdersToday?: StaffOrderRow[];
+  netProfit?: {
+    daily: NetWindow;
+    monthly: NetWindow;
+    yearly: NetWindow;
+  } | null;
 };
 
 function waitLabel(
@@ -161,15 +176,82 @@ export function DashboardPage() {
       </div>
 
       {role === "ADMIN" && <AdminDash data={data} can={can} />}
+      {role === "SYSTEM_MANAGER" && <AdminDash data={data} can={can} />}
       {role === "CASHIER" && <CashierDash data={data} can={can} />}
       {role === "KITCHEN" && <KitchenDash data={data} can={can} />}
       {role === "STORE" && <StoreDash data={data} can={can} />}
       {role === "WAITER" && <WaiterDash data={data} can={can} />}
       {role === "SUPERVISOR" && <ManagerDash data={data} can={can} />}
       {role === "MAIN_CASHIER" && <CashierDash data={data} can={can} />}
-      {!["ADMIN", "CASHIER", "MAIN_CASHIER", "KITCHEN", "STORE", "WAITER", "SUPERVISOR"].includes(role) && (
+      {!["ADMIN", "SYSTEM_MANAGER", "CASHIER", "MAIN_CASHIER", "KITCHEN", "STORE", "WAITER", "SUPERVISOR"].includes(role) && (
         <AdminDash data={data} can={can} />
       )}
+    </div>
+  );
+}
+
+function NetProfitPanel({ data }: { data: Stats | null }) {
+  const t = useT();
+  const [mode, setMode] = useState<"daily" | "monthly" | "yearly">("daily");
+  const win = data?.netProfit?.[mode];
+  if (!data?.netProfit) return null;
+  const isLoss = (win?.netProfit ?? 0) < 0;
+  return (
+    <div className="panel panel-pad" style={{ marginTop: "0.85rem" }}>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: "1.1rem" }}>
+            {isLoss ? t("dash.netTitleLoss") : t("dash.netTitle")}
+          </h2>
+          <p className="tiny muted" style={{ margin: "0.25rem 0 0" }}>
+            {isLoss ? t("dash.netLossHint") : t("dash.netHint")}
+            {win ? ` · ${win.from} → ${win.to}` : ""}
+          </p>
+        </div>
+        <div className="row" style={{ gap: 6 }}>
+          {(["daily", "monthly", "yearly"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              className={`btn sm ${mode === m ? "ok" : "ghost"}`}
+              onClick={() => setMode(m)}
+            >
+              {m === "daily" ? t("dash.netDaily") : m === "monthly" ? t("dash.netMonthly") : t("dash.netYearly")}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="stats" style={{ marginTop: "0.75rem" }}>
+        <div className="panel stat">
+          <span>{t("dash.netSales")}</span>
+          <strong>{money(win?.sales ?? 0)}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.netExpense")}</span>
+          <strong>{money(win?.totalExpense ?? 0)}</strong>
+          <span className="tiny muted">
+            {t("expense.manualTotal")} {money(win?.manualExpenses ?? 0)} · {t("expense.supplierPaid")}{" "}
+            {money(win?.supplierPaid ?? 0)}
+          </span>
+        </div>
+        <div className={`panel stat ${isLoss ? "alert-low" : ""}`}>
+          <span>{isLoss ? t("dash.netLoss") : t("dash.netProfit")}</span>
+          <strong style={{ color: isLoss ? "var(--danger)" : "var(--ok)" }}>
+            {isLoss ? (
+              <>
+                {t("expense.lossTag")} · {money(Math.abs(win?.netProfit ?? 0))}
+              </>
+            ) : (
+              <>
+                {t("expense.profitTag")} · {money(win?.netProfit ?? 0)}
+              </>
+            )}
+          </strong>
+          <span className="tiny muted">
+            <Link to="/expenses">{t("nav.expenses")}</Link>
+          </span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -193,6 +275,8 @@ function AdminDash({
       {(data?.lowStockCount ?? 0) > 0 && (
         <LowStockAlert items={data?.lowStock ?? []} count={data?.lowStockCount ?? 0} />
       )}
+
+      <NetProfitPanel data={data} />
 
       <div className="stats">
         <div className="panel stat">

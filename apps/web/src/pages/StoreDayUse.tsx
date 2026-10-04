@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, money, unitLabel } from "../api";
-import { useT, type MessageKey } from "../i18n";
+import { useAuth } from "../auth";
+import { useI18n, useT, type MessageKey } from "../i18n";
 import { useToast } from "../toast";
 import { SearchField, matchesSearch } from "../components/SearchField";
 
@@ -19,12 +20,32 @@ type Row = {
 
 type Sheet = {
   businessDate: string;
+  today: string;
+  isToday: boolean;
   dayStart: string;
   saved: boolean;
+  canEdit: boolean;
+  closedByName: string | null;
+  closedAt: string | null;
+  editedAt: string | null;
+  editedByName: string | null;
   sales: number;
   stockUsedValue: number;
   profit: number;
   items: Row[];
+};
+
+type HistoryRow = {
+  id: string;
+  businessDate: string;
+  stockUsedValue: number;
+  sales: number;
+  profit: number;
+  closedByName: string | null;
+  closedAt: string;
+  editedAt: string | null;
+  editedByName: string | null;
+  lineCount: number;
 };
 
 const REASONS: { value: string; key: MessageKey }[] = [
@@ -35,15 +56,21 @@ const REASONS: { value: string; key: MessageKey }[] = [
 
 export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onChanged: () => void }) {
   const t = useT();
+  const { ts } = useI18n();
   const toast = useToast();
+  const { user } = useAuth();
+  const isAdmin = user?.roleCode === "ADMIN";
+
   const [sheet, setSheet] = useState<Sheet | null>(null);
+  const [history, setHistory] = useState<HistoryRow[]>([]);
+  const [viewDate, setViewDate] = useState<string | null>(null);
   const [extra, setExtra] = useState<Record<string, string>>({});
   const [reason, setReason] = useState<Record<string, string>>({});
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
 
-  async function load() {
-    const data = await api<Sheet>("/store/day-use");
+  function applySheet(data: Sheet) {
     setSheet(data);
     const qty: Record<string, string> = {};
     const why: Record<string, string> = {};
@@ -53,10 +80,35 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
     }
     setExtra(qty);
     setReason(why);
+    setEditing(false);
+  }
+
+  async function loadHistory() {
+    const list = await api<HistoryRow[]>("/store/day-use/history?limit=90");
+    setHistory(list);
+  }
+
+  async function load(date?: string | null) {
+    const path = date ? `/store/day-use?date=${date}` : "/store/day-use";
+    const data = await api<Sheet>(path);
+    applySheet(data);
+    setViewDate(date && date !== data.today ? date : null);
+  }
+
+  function startEdit() {
+    if (!sheet?.canEdit || !(canManage || isAdmin)) return;
+    setEditing(true);
+  }
+
+  function cancelEdit() {
+    if (!sheet) return;
+    applySheet(sheet);
   }
 
   useEffect(() => {
-    load().catch((e) => toast.push(e instanceof Error ? e.message : t("store.loadFailed"), "err"));
+    Promise.all([load(null), loadHistory()]).catch((e) =>
+      toast.push(e instanceof Error ? e.message : t("store.loadFailed"), "err")
+    );
   }, []);
 
   const shown = useMemo(() => {
@@ -73,9 +125,29 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
     return { used, profit: sheet.sales - used };
   }, [sheet, extra]);
 
+  const isToday = sheet?.isToday !== false;
+  const canStartEdit = !!sheet?.canEdit && (canManage || isAdmin);
+  const editable = canStartEdit && editing;
+
+  async function openDate(date: string) {
+    try {
+      await load(date);
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("common.failed"), "err");
+    }
+  }
+
+  async function backToToday() {
+    try {
+      await load(null);
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("common.failed"), "err");
+    }
+  }
+
   async function save(e: FormEvent) {
     e.preventDefault();
-    if (!sheet || !canManage) return;
+    if (!sheet || !editable || !isToday) return;
     const lines = sheet.items
       .map((i) => ({
         storeItemId: i.id,
@@ -87,9 +159,13 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
     try {
       const data = await api<Sheet>("/store/day-use", {
         method: "POST",
-        body: JSON.stringify({ lines }),
+        body: JSON.stringify({
+          businessDate: sheet.businessDate,
+          lines,
+        }),
       });
-      setSheet(data);
+      applySheet(data);
+      await loadHistory();
       toast.push(t("store.daySaved"), "ok");
       onChanged();
     } catch (err) {
@@ -101,7 +177,7 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
 
   return (
     <form onSubmit={save}>
-      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", marginBottom: "0.75rem" }}>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", marginBottom: "0.75rem", gap: 12 }}>
         <div>
           <h2 style={{ margin: 0 }}>{t("store.tabUsed")}</h2>
           <p className="muted" style={{ margin: "0.25rem 0 0" }}>
@@ -111,10 +187,105 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
         <div style={{ textAlign: "right" }}>
           <div className="tiny muted">{t("store.dayDate")}</div>
           <strong>{sheet?.businessDate ?? "—"}</strong>
+          {isToday ? (
+            <div className="tiny" style={{ color: "var(--ok)", marginTop: 2 }}>
+              {t("store.todayBadge")}
+            </div>
+          ) : (
+            <div className="tiny muted" style={{ marginTop: 2 }}>
+              {t("store.viewOnlyBadge")}
+            </div>
+          )}
           <div className="tiny muted">
             {t("settings.dayStart")} {sheet?.dayStart ?? ""}
           </div>
+          {sheet?.saved && (
+            <div className="tiny muted">
+              {t("store.closedBy")}: {sheet.closedByName || "—"}
+              {sheet.closedAt ? ` · ${ts(sheet.closedAt)}` : ""}
+            </div>
+          )}
+          {sheet?.editedAt && (
+            <div className="tiny muted">
+              {t("store.editedBy")}: {sheet.editedByName || "—"} · {ts(sheet.editedAt)}
+            </div>
+          )}
         </div>
+      </div>
+
+      <div className="panel panel-pad" style={{ marginBottom: "0.85rem" }}>
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+          <div>
+            <strong>{t("store.dayHistory")}</strong>
+            <div className="tiny muted">{t("store.dayHistoryHint")}</div>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            {viewDate && (
+              <button type="button" className="btn ok sm" onClick={() => void backToToday()}>
+                {t("store.backToToday")}
+              </button>
+            )}
+            {canStartEdit && !editing && (
+              <button type="button" className="btn sm" onClick={startEdit}>
+                {sheet?.saved ? t("store.editClosing") : t("store.enterClosing")}
+              </button>
+            )}
+          </div>
+        </div>
+        {history.length ? (
+          <table style={{ marginTop: "0.6rem" }}>
+            <thead>
+              <tr>
+                <th>{t("common.date")}</th>
+                <th>{t("store.closedBy")}</th>
+                <th>{t("audit.sales")}</th>
+                <th>{t("store.stockUsedToday")}</th>
+                <th>{t("store.dayProfit")}</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((h) => {
+                const active = (viewDate || sheet?.businessDate) === h.businessDate;
+                const todayRow = h.businessDate === sheet?.today;
+                return (
+                  <tr key={h.id} className={active ? "row-active" : undefined}>
+                    <td>
+                      <strong>{h.businessDate}</strong>
+                      {todayRow && (
+                        <div className="tiny" style={{ color: "var(--ok)" }}>
+                          {t("store.todayBadge")}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      {h.closedByName || "—"}
+                      <div className="tiny muted">{ts(h.closedAt)}</div>
+                    </td>
+                    <td>{money(h.sales)}</td>
+                    <td>{money(h.stockUsedValue)}</td>
+                    <td style={{ color: h.profit >= 0 ? "var(--ok)" : "var(--danger)" }}>
+                      {money(h.profit)}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className={`btn sm ${active ? "ok" : "ghost"}`}
+                        onClick={() => void openDate(h.businessDate)}
+                      >
+                        {todayRow ? t("store.openToday") : t("store.viewReport")}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted" style={{ margin: "0.75rem 0 0" }}>
+            {t("store.dayHistoryEmpty")}
+          </p>
+        )}
       </div>
 
       <div className="stats">
@@ -128,11 +299,55 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
         </div>
         <div className="panel stat">
           <span>{t("store.dayProfit")}</span>
-          <strong style={{ color: preview.profit >= 0 ? "var(--ok)" : "var(--danger)" }}>{money(preview.profit)}</strong>
+          <strong style={{ color: preview.profit >= 0 ? "var(--ok)" : "var(--danger)" }}>
+            {money(preview.profit)}
+          </strong>
         </div>
       </div>
 
-      <div className="row" style={{ marginBottom: "0.7rem" }}>
+      {!isToday && (
+        <div
+          className="panel panel-pad"
+          style={{
+            marginBottom: "0.75rem",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+            borderColor: "var(--border)",
+            background: "color-mix(in srgb, var(--warn, #b08900) 8%, transparent)",
+          }}
+        >
+          <p className="muted" style={{ margin: 0 }}>
+            {t("store.dayPastReadOnly")}
+          </p>
+          <button type="button" className="btn ok sm" onClick={() => void backToToday()}>
+            {t("store.backToToday")}
+          </button>
+        </div>
+      )}
+
+      {isToday && canStartEdit && !editing && (
+        <div
+          className="panel panel-pad"
+          style={{
+            marginBottom: "0.75rem",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          <p className="muted" style={{ margin: 0 }}>
+            {sheet?.saved ? t("store.todaySavedHint") : t("store.todayEnterHint")}
+          </p>
+          <button type="button" className="btn" onClick={startEdit}>
+            {sheet?.saved ? t("store.editClosing") : t("store.enterClosing")}
+          </button>
+        </div>
+      )}
+
+      <div className="row" style={{ marginBottom: "0.7rem", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
         <SearchField value={q} onChange={setQ} placeholder={t("store.search")} />
       </div>
 
@@ -169,7 +384,7 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
                       min={0}
                       step="0.001"
                       value={extra[i.id] ?? ""}
-                      disabled={!canManage}
+                      disabled={!editable}
                       onChange={(e) => setExtra((prev) => ({ ...prev, [i.id]: e.target.value }))}
                       placeholder="0"
                       style={{ width: 90 }}
@@ -178,7 +393,7 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
                   <td>
                     <select
                       value={reason[i.id] || REASONS[0].value}
-                      disabled={!canManage || extraQty <= 0}
+                      disabled={!editable || extraQty <= 0}
                       onChange={(e) => setReason((prev) => ({ ...prev, [i.id]: e.target.value }))}
                     >
                       {REASONS.map((r) => (
@@ -195,10 +410,14 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
           </tbody>
         </table>
         {!shown.length && <div className="empty">{t("store.noItems")}</div>}
-        {canManage && (
+
+        {editable && (
           <div className="form-actions">
+            <button type="button" className="btn ghost" disabled={busy} onClick={cancelEdit}>
+              {t("common.cancel")}
+            </button>
             <button className="btn" type="submit" disabled={busy || !sheet}>
-              {busy ? t("common.saving") : t("store.saveDayUse")}
+              {busy ? t("common.saving") : sheet?.saved ? t("store.updateClosing") : t("store.saveDayUse")}
             </button>
           </div>
         )}

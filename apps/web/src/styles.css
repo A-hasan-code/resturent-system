@@ -2337,6 +2337,100 @@ td .row {
   gap: 0.85rem;
 }
 
+.supplier-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.supplier-card {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.supplier-card.is-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.supplier-card-top {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  align-items: flex-start;
+}
+
+.supplier-card-top h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  line-height: 1.25;
+}
+
+.supplier-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.55rem 0.85rem;
+  margin-top: 0.55rem;
+}
+
+.supplier-meta-item {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.supplier-meta-item span {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.supplier-meta-item strong {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.supplier-money {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+}
+
+.supplier-money .panel.stat {
+  min-width: 110px;
+  padding: 0.45rem 0.65rem;
+}
+
+.supplier-money .panel.stat span {
+  font-size: 0.72rem;
+}
+
+.supplier-money .panel.stat strong {
+  font-size: 0.98rem;
+}
+
+.supplier-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.supplier-profile {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.supplier-profile h3 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
 .waiter-item-qty {
   position: absolute;
   bottom: 0.45rem;

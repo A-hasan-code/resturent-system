@@ -1,5 +1,6 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, Fragment, useEffect, useMemo, useState } from "react";
 import { api, money, unitLabel } from "../api";
+import { Modal } from "../components/Modal";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
 
@@ -16,6 +17,9 @@ type SupplierRow = {
   id: string;
   name: string;
   phone: string | null;
+  supplyOf: string | null;
+  brand: string | null;
+  address: string | null;
   purchased: number;
   paid: number;
   outstanding: number;
@@ -27,6 +31,9 @@ type RecentBill = {
   supplier: string;
   payKind: "CASH" | "CREDIT";
   total: number;
+  extraExpense: number;
+  extraExpenseNote: string | null;
+  extraExpensePaidBy: "SUPPLIER" | "SELF" | null;
   paidAmount: number;
   outstanding: number;
   lineCount: number;
@@ -51,13 +58,22 @@ type Ledger = SupplierRow & {
     purchasedOn: string;
     payKind: string;
     total: number;
+    extraExpense: number;
+    extraExpenseNote: string | null;
+    extraExpensePaidBy: "SUPPLIER" | "SELF" | null;
     paidAmount: number;
+    balance: number;
+    note: string | null;
     lines: { id: string; item: string; category: string; unit: string; quantity: number; ratePerUnit: number; amount: number }[];
   }[];
   payments: { id: string; paidOn: string; amount: number; note: string | null }[];
 };
 
 type DraftLine = { itemId: string; qty: string; rate: string };
+
+type Cat = { id: string; code: string; name: string };
+
+const UNITS = ["KG", "G", "L", "ML", "PCS"] as const;
 
 function todayIso() {
   const d = new Date();
@@ -93,41 +109,79 @@ function BuyView({
   const toast = useToast();
   const [suppliers, setSuppliers] = useState<SupplierRow[]>([]);
   const [recent, setRecent] = useState<RecentBill[]>([]);
+  const [categories, setCategories] = useState<Cat[]>([]);
+  const [extraItems, setExtraItems] = useState<PurchaseItem[]>([]);
   const [supplierId, setSupplierId] = useState("");
   const [newName, setNewName] = useState("");
   const [newPhone, setNewPhone] = useState("");
+  const [newSupplyOf, setNewSupplyOf] = useState("");
+  const [newBrand, setNewBrand] = useState("");
+  const [newAddress, setNewAddress] = useState("");
   const [addingSupplier, setAddingSupplier] = useState(false);
   const [date, setDate] = useState(todayIso);
   const [payKind, setPayKind] = useState<"CASH" | "CREDIT">("CASH");
   const [paidNow, setPaidNow] = useState("");
   const [note, setNote] = useState("");
+  const [extraExpense, setExtraExpense] = useState("");
+  const [extraNote, setExtraNote] = useState("");
+  const [extraPaidBy, setExtraPaidBy] = useState<"SUPPLIER" | "SELF">("SELF");
+  const [lineMode, setLineMode] = useState<"existing" | "new">("existing");
+  const [filterCat, setFilterCat] = useState("");
   const [pick, setPick] = useState("");
+  const [newItemName, setNewItemName] = useState("");
+  const [newItemCat, setNewItemCat] = useState("");
+  const [newItemUnit, setNewItemUnit] = useState<string>("KG");
   const [lines, setLines] = useState<DraftLine[]>([]);
   const [busy, setBusy] = useState(false);
 
+  const allItems = useMemo(() => {
+    const map = new Map<string, PurchaseItem>();
+    for (const i of items) map.set(i.id, i);
+    for (const i of extraItems) if (!map.has(i.id)) map.set(i.id, i);
+    return [...map.values()];
+  }, [items, extraItems]);
+
+  const categoryNames = useMemo(() => {
+    const set = new Set<string>();
+    for (const i of allItems) if (i.category) set.add(i.category);
+    for (const c of categories) set.add(c.name);
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [allItems, categories]);
+
+  const filteredItems = useMemo(
+    () => (filterCat ? allItems.filter((i) => i.category === filterCat) : allItems),
+    [allItems, filterCat]
+  );
+
   async function load() {
-    const [s, r] = await Promise.all([
+    const [s, r, cats] = await Promise.all([
       api<SupplierRow[]>("/store/suppliers"),
       api<RecentBill[]>("/store/purchases/recent"),
+      api<Cat[]>("/store/categories"),
     ]);
     setSuppliers(s);
     setRecent(r);
+    setCategories(cats);
     setSupplierId((cur) => cur || s[0]?.id || "");
+    setNewItemCat((cur) => cur || cats[0]?.id || "");
   }
 
   useEffect(() => {
     load().catch((e) => toast.push(e instanceof Error ? e.message : t("store.loadFailed"), "err"));
   }, []);
 
-  const total = useMemo(
+  const inventoryTotal = useMemo(
     () => lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0),
     [lines]
   );
-  const paid = payKind === "CASH" ? total : Math.min(total, Math.max(0, Number(paidNow) || 0));
-  const due = Math.max(0, total - paid);
+  const extraAmt = Math.max(0, Number(extraExpense) || 0);
+  const supplierExtra = extraAmt > 0 && extraPaidBy === "SUPPLIER" ? extraAmt : 0;
+  const supplierDue = inventoryTotal + supplierExtra;
+  const paid = payKind === "CASH" ? supplierDue : Math.min(supplierDue, Math.max(0, Number(paidNow) || 0));
+  const credit = Math.max(0, supplierDue - paid);
 
-  function addLine(itemId: string) {
-    const item = items.find((i) => i.id === itemId);
+  function addLine(itemId: string, catalog = allItems) {
+    const item = catalog.find((i) => i.id === itemId);
     if (!item) return;
     setLines((prev) => {
       if (prev.some((l) => l.itemId === itemId)) return prev;
@@ -136,6 +190,57 @@ function BuyView({
     setPick("");
   }
 
+  async function addNewItemLine() {
+    const name = newItemName.trim();
+    if (!name) {
+      toast.push(t("store.newItemNameRequired"), "err");
+      return;
+    }
+    if (!newItemCat) {
+      toast.push(t("store.pickCategory"), "err");
+      return;
+    }
+    setBusy(true);
+    try {
+      const created = await api<{
+        id: string;
+        name: string;
+        unit: string;
+        ratePerUnit: number | string;
+        quantityOnHand: number | string;
+      }>("/store/items", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          categoryId: newItemCat,
+          unit: newItemUnit,
+          quantityOnHand: 0,
+          ratePerUnit: 0,
+        }),
+      });
+      const catName = categories.find((c) => c.id === newItemCat)?.name || "";
+      const row: PurchaseItem = {
+        id: created.id,
+        name: created.name,
+        category: catName,
+        unit: created.unit,
+        ratePerUnit: Number(created.ratePerUnit) || 0,
+        quantityOnHand: Number(created.quantityOnHand) || 0,
+      };
+      setExtraItems((prev) => [...prev.filter((p) => p.id !== row.id), row]);
+      addLine(row.id, [...allItems, row]);
+      setNewItemName("");
+      toast.push(t("store.itemAdded"), "ok");
+      onChanged();
+    } catch (err) {
+      toast.push(err instanceof Error ? err.message : t("store.addFailed"), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const selectedSupplier = suppliers.find((s) => s.id === supplierId) || null;
+
   async function createSupplier(e: { preventDefault(): void }) {
     e.preventDefault();
     if (!newName.trim()) return;
@@ -143,10 +248,19 @@ function BuyView({
     try {
       const row = await api<SupplierRow>("/store/suppliers", {
         method: "POST",
-        body: JSON.stringify({ name: newName.trim(), phone: newPhone.trim() || undefined }),
+        body: JSON.stringify({
+          name: newName.trim(),
+          phone: newPhone.trim() || undefined,
+          supplyOf: newSupplyOf.trim() || undefined,
+          brand: newBrand.trim() || undefined,
+          address: newAddress.trim() || undefined,
+        }),
       });
       setNewName("");
       setNewPhone("");
+      setNewSupplyOf("");
+      setNewBrand("");
+      setNewAddress("");
       setAddingSupplier(false);
       setSupplierId(row.id);
       toast.push(t("store.supplierAdded"), "ok");
@@ -171,6 +285,10 @@ function BuyView({
       toast.push(t("store.noLines"), "err");
       return;
     }
+    if (extraAmt > 0 && !extraNote.trim()) {
+      toast.push(t("store.extraExpenseReasonRequired"), "err");
+      return;
+    }
     setBusy(true);
     try {
       await api("/store/purchases", {
@@ -180,6 +298,9 @@ function BuyView({
           purchasedOn: date,
           payKind,
           paidAmount: payKind === "CREDIT" ? paid : undefined,
+          extraExpense: extraAmt > 0 ? extraAmt : undefined,
+          extraExpenseNote: extraAmt > 0 ? extraNote.trim() : undefined,
+          extraExpensePaidBy: extraAmt > 0 ? extraPaidBy : undefined,
           note: note.trim() || undefined,
           lines: payload,
         }),
@@ -189,6 +310,9 @@ function BuyView({
       setNote("");
       setPaidNow("");
       setPayKind("CASH");
+      setExtraExpense("");
+      setExtraNote("");
+      setExtraPaidBy("SELF");
       await load();
       onChanged();
     } catch (err) {
@@ -217,6 +341,8 @@ function BuyView({
                 {suppliers.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name}
+                    {s.supplyOf ? ` · ${s.supplyOf}` : ""}
+                    {s.brand ? ` · ${s.brand}` : ""}
                     {s.outstanding > 0 ? ` · ${t("store.outstanding")} ${money(s.outstanding)}` : ""}
                   </option>
                 ))}
@@ -228,39 +354,89 @@ function BuyView({
             </div>
           </div>
 
-          {!addingSupplier ? (
-            <button type="button" className="btn ghost sm" onClick={() => setAddingSupplier(true)}>
-              + {t("store.newSupplier")}
-            </button>
-          ) : (
-            <div className="grid-2" style={{ marginTop: "0.6rem" }}>
-              <div className="field">
-                <label>{t("store.supplierName")}</label>
-                <input
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void createSupplier(e);
-                    }
-                  }}
-                />
+          {selectedSupplier && (
+            <div className="panel" style={{ marginTop: "0.65rem", padding: "0.7rem 0.85rem" }}>
+              <strong>{selectedSupplier.name}</strong>
+              <SupplierMeta
+                phone={selectedSupplier.phone}
+                supplyOf={selectedSupplier.supplyOf}
+                brand={selectedSupplier.brand}
+                address={selectedSupplier.address}
+              />
+            </div>
+          )}
+
+          <button
+            type="button"
+            className="btn ghost sm"
+            style={{ marginTop: "0.55rem" }}
+            onClick={() => {
+              setNewName("");
+              setNewPhone("");
+              setNewSupplyOf("");
+              setNewBrand("");
+              setNewAddress("");
+              setAddingSupplier(true);
+            }}
+          >
+            + {t("store.newSupplier")}
+          </button>
+
+          <Modal
+            open={addingSupplier}
+            title={t("store.newSupplier")}
+            onClose={() => {
+              if (!busy) setAddingSupplier(false);
+            }}
+            size="md"
+          >
+            <form onSubmit={(e) => void createSupplier(e)}>
+              <div className="modal-scroll">
+                <div className="field">
+                  <label>{t("store.supplierName")}</label>
+                  <input value={newName} onChange={(e) => setNewName(e.target.value)} required autoFocus />
+                </div>
+                <div className="field">
+                  <label>{t("store.supplierSupplyOf")}</label>
+                  <input
+                    value={newSupplyOf}
+                    onChange={(e) => setNewSupplyOf(e.target.value)}
+                    placeholder={t("store.supplierSupplyOfPh")}
+                  />
+                </div>
+                <div className="grid-2">
+                  <div className="field">
+                    <label>{t("store.supplierBrand")}</label>
+                    <input
+                      value={newBrand}
+                      onChange={(e) => setNewBrand(e.target.value)}
+                      placeholder={t("store.supplierBrandPh")}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>{t("store.phone")}</label>
+                    <input value={newPhone} onChange={(e) => setNewPhone(e.target.value)} />
+                  </div>
+                </div>
+                <div className="field">
+                  <label>{t("store.supplierAddress")}</label>
+                  <input
+                    value={newAddress}
+                    onChange={(e) => setNewAddress(e.target.value)}
+                    placeholder={t("store.supplierAddressPh")}
+                  />
+                </div>
               </div>
-              <div className="field">
-                <label>{t("store.phone")}</label>
-                <input value={newPhone} onChange={(e) => setNewPhone(e.target.value)} />
-              </div>
-              <div className="row">
-                <button type="button" className="btn sm" disabled={busy} onClick={(e) => void createSupplier(e)}>
-                  {t("common.save")}
+              <div className="form-actions">
+                <button className="btn" type="submit" disabled={busy || !newName.trim()}>
+                  {busy ? t("common.saving") : t("common.save")}
                 </button>
-                <button type="button" className="btn ghost sm" onClick={() => setAddingSupplier(false)}>
+                <button type="button" className="btn ghost" disabled={busy} onClick={() => setAddingSupplier(false)}>
                   {t("common.cancel")}
                 </button>
               </div>
-            </div>
-          )}
+            </form>
+          </Modal>
 
           <div className="chips" style={{ marginTop: "0.8rem" }}>
             <button type="button" className={`chip ${payKind === "CASH" ? "active" : ""}`} onClick={() => setPayKind("CASH")}>
@@ -277,16 +453,103 @@ function BuyView({
             </div>
           )}
 
-          <div className="row" style={{ marginTop: "0.9rem", gap: "0.5rem" }}>
-            <select value={pick} onChange={(e) => addLine(e.target.value)} style={{ flex: 1 }}>
-              <option value="">{t("store.addLine")}</option>
-              {items.map((i) => (
-                <option key={i.id} value={i.id}>
-                  {i.category} · {i.name} · {money(i.ratePerUnit)}/{unitLabel(i.unit)}
-                </option>
-              ))}
-            </select>
+          <div className="chips" style={{ marginTop: "0.9rem" }}>
+            <button
+              type="button"
+              className={`chip ${lineMode === "existing" ? "active" : ""}`}
+              onClick={() => setLineMode("existing")}
+            >
+              {t("store.lineExisting")}
+            </button>
+            <button
+              type="button"
+              className={`chip ${lineMode === "new" ? "active" : ""}`}
+              onClick={() => setLineMode("new")}
+            >
+              {t("store.lineNew")}
+            </button>
           </div>
+
+          {lineMode === "existing" ? (
+            <div className="grid-2" style={{ marginTop: "0.6rem" }}>
+              <div className="field">
+                <label>{t("common.category")}</label>
+                <select
+                  value={filterCat}
+                  onChange={(e) => {
+                    setFilterCat(e.target.value);
+                    setPick("");
+                  }}
+                >
+                  <option value="">{t("store.allCategories")}</option>
+                  {categoryNames.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="field">
+                <label>{t("common.item")}</label>
+                <select value={pick} onChange={(e) => addLine(e.target.value)}>
+                  <option value="">{t("store.addLine")}</option>
+                  {filteredItems.map((i) => (
+                    <option key={i.id} value={i.id}>
+                      {i.name} · {money(i.ratePerUnit)}/{unitLabel(i.unit)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          ) : (
+            <div style={{ marginTop: "0.6rem" }}>
+              <p className="muted tiny" style={{ marginTop: 0 }}>
+                {t("store.newItemHint")}
+              </p>
+              <div className="grid-2">
+                <div className="field">
+                  <label>{t("common.category")}</label>
+                  <select value={newItemCat} onChange={(e) => setNewItemCat(e.target.value)} required>
+                    <option value="">{t("store.pickCategory")}</option>
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>{t("common.unit")}</label>
+                  <select value={newItemUnit} onChange={(e) => setNewItemUnit(e.target.value)}>
+                    {UNITS.map((u) => (
+                      <option key={u} value={u}>
+                        {unitLabel(u)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="row" style={{ gap: "0.5rem", alignItems: "flex-end" }}>
+                <div className="field" style={{ flex: 1, margin: 0 }}>
+                  <label>{t("common.name")}</label>
+                  <input
+                    value={newItemName}
+                    onChange={(e) => setNewItemName(e.target.value)}
+                    placeholder={t("store.newItemNamePh")}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void addNewItemLine();
+                      }
+                    }}
+                  />
+                </div>
+                <button type="button" className="btn sm" disabled={busy} onClick={() => void addNewItemLine()}>
+                  {t("store.addNewItemLine")}
+                </button>
+              </div>
+            </div>
+          )}
 
           {lines.length > 0 && (
             <table style={{ marginTop: "0.75rem" }}>
@@ -301,7 +564,7 @@ function BuyView({
               </thead>
               <tbody>
                 {lines.map((l) => {
-                  const item = items.find((i) => i.id === l.itemId);
+                  const item = allItems.find((i) => i.id === l.itemId);
                   const amount = (Number(l.qty) || 0) * (Number(l.rate) || 0);
                   return (
                     <tr key={l.itemId}>
@@ -352,6 +615,52 @@ function BuyView({
             </table>
           )}
 
+          <div className="panel" style={{ marginTop: "0.85rem", padding: "0.75rem" }}>
+            <h3 style={{ margin: "0 0 0.5rem", fontSize: "1rem" }}>{t("store.extraExpense")}</h3>
+            <p className="muted tiny" style={{ marginTop: 0 }}>
+              {t("store.extraExpenseHint")}
+            </p>
+            <div className="grid-2">
+              <div className="field">
+                <label>{t("store.extraExpenseAmount")}</label>
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={extraExpense}
+                  onChange={(e) => setExtraExpense(e.target.value)}
+                  placeholder="0"
+                />
+              </div>
+              <div className="field">
+                <label>{t("store.extraExpenseFor")}</label>
+                <input
+                  value={extraNote}
+                  onChange={(e) => setExtraNote(e.target.value)}
+                  placeholder={t("store.extraExpenseForPh")}
+                />
+              </div>
+            </div>
+            {extraAmt > 0 && (
+              <div className="chips" style={{ marginTop: "0.35rem" }}>
+                <button
+                  type="button"
+                  className={`chip ${extraPaidBy === "SELF" ? "active" : ""}`}
+                  onClick={() => setExtraPaidBy("SELF")}
+                >
+                  {t("store.extraPaidSelf")}
+                </button>
+                <button
+                  type="button"
+                  className={`chip ${extraPaidBy === "SUPPLIER" ? "active" : ""}`}
+                  onClick={() => setExtraPaidBy("SUPPLIER")}
+                >
+                  {t("store.extraPaidSupplier")}
+                </button>
+              </div>
+            )}
+          </div>
+
           <div className="field" style={{ marginTop: "0.75rem" }}>
             <label>{t("store.note")}</label>
             <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={t("store.notePh")} />
@@ -359,16 +668,28 @@ function BuyView({
 
           <div className="stats" style={{ marginTop: "0.5rem" }}>
             <div className="panel stat">
-              <span>{t("store.billTotal")}</span>
-              <strong>{money(total)}</strong>
+              <span>{t("store.inventoryValue")}</span>
+              <strong>{money(inventoryTotal)}</strong>
             </div>
             <div className="panel stat">
-              <span>{t("store.paid")}</span>
+              <span>{t("store.extraExpense")}</span>
+              <strong>
+                {money(extraAmt)}
+                {extraAmt > 0 ? (
+                  <div className="tiny muted">
+                    {extraPaidBy === "SELF" ? t("store.extraPaidSelf") : t("store.extraPaidSupplier")}
+                    {extraNote.trim() ? ` · ${extraNote.trim()}` : ""}
+                  </div>
+                ) : null}
+              </strong>
+            </div>
+            <div className="panel stat">
+              <span>{t("store.paidToSupplier")}</span>
               <strong>{money(paid)}</strong>
             </div>
             <div className="panel stat">
-              <span>{t("store.stillDue")}</span>
-              <strong>{money(due)}</strong>
+              <span>{t("store.creditDue")}</span>
+              <strong>{money(credit)}</strong>
             </div>
           </div>
 
@@ -390,9 +711,10 @@ function BuyView({
                 <th>{t("common.date")}</th>
                 <th>{t("store.supplier")}</th>
                 <th>{t("common.items")}</th>
-                <th>{t("store.billTotal")}</th>
-                <th>{t("store.paid")}</th>
-                <th>{t("store.stillDue")}</th>
+                <th>{t("store.inventoryValue")}</th>
+                <th>{t("store.extraExpense")}</th>
+                <th>{t("store.paidToSupplier")}</th>
+                <th>{t("store.creditDue")}</th>
               </tr>
             </thead>
             <tbody>
@@ -402,6 +724,19 @@ function BuyView({
                   <td>{b.supplier}</td>
                   <td>{b.lineCount}</td>
                   <td>{money(b.total)}</td>
+                  <td>
+                    {b.extraExpense > 0 ? (
+                      <>
+                        {money(b.extraExpense)}
+                        <div className="tiny muted">
+                          {b.extraExpensePaidBy === "SELF" ? t("store.extraPaidSelf") : t("store.extraPaidSupplier")}
+                          {b.extraExpenseNote ? ` · ${b.extraExpenseNote}` : ""}
+                        </div>
+                      </>
+                    ) : (
+                      money(0)
+                    )}
+                  </td>
                   <td>{money(b.paidAmount)}</td>
                   <td>{b.outstanding > 0 ? <span className="badge unpaid">{money(b.outstanding)}</span> : money(0)}</td>
                 </tr>
@@ -414,18 +749,79 @@ function BuyView({
   );
 }
 
+function billStatus(paidAmount: number, balance: number): "paid" | "partial" | "unpaid" {
+  if (balance <= 0.009) return "paid";
+  if (paidAmount > 0.009) return "partial";
+  return "unpaid";
+}
+
+function supplierBillTotal(p: {
+  total: number;
+  extraExpense: number;
+  extraExpensePaidBy: "SUPPLIER" | "SELF" | null;
+}) {
+  return p.total + (p.extraExpensePaidBy === "SUPPLIER" ? p.extraExpense : 0);
+}
+
+function SupplierMeta({
+  phone,
+  supplyOf,
+  brand,
+  address,
+}: {
+  phone?: string | null;
+  supplyOf?: string | null;
+  brand?: string | null;
+  address?: string | null;
+}) {
+  const t = useT();
+  return (
+    <div className="supplier-meta">
+      <div className="supplier-meta-item">
+        <span>{t("store.supplierSupplyOf")}</span>
+        <strong>{supplyOf?.trim() || "—"}</strong>
+      </div>
+      <div className="supplier-meta-item">
+        <span>{t("store.supplierBrand")}</span>
+        <strong>{brand?.trim() || "—"}</strong>
+      </div>
+      <div className="supplier-meta-item">
+        <span>{t("store.phone")}</span>
+        <strong>{phone?.trim() || "—"}</strong>
+      </div>
+      <div className="supplier-meta-item">
+        <span>{t("store.supplierAddress")}</span>
+        <strong>{address?.trim() || "—"}</strong>
+      </div>
+    </div>
+  );
+}
+
 function SuppliersView({ canManage }: { canManage: boolean }) {
   const t = useT();
   const toast = useToast();
   const [rows, setRows] = useState<SupplierRow[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [supplyOf, setSupplyOf] = useState("");
+  const [brand, setBrand] = useState("");
+  const [address, setAddress] = useState("");
   const [ledger, setLedger] = useState<Ledger | null>(null);
+  const [openBillId, setOpenBillId] = useState<string | null>(null);
   const [payFor, setPayFor] = useState<SupplierRow | null>(null);
   const [amount, setAmount] = useState("");
   const [paidOn, setPaidOn] = useState(todayIso);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+
+  function resetAddForm() {
+    setName("");
+    setPhone("");
+    setSupplyOf("");
+    setBrand("");
+    setAddress("");
+  }
 
   async function load() {
     setRows(await api<SupplierRow[]>("/store/suppliers"));
@@ -442,10 +838,16 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
     try {
       await api("/store/suppliers", {
         method: "POST",
-        body: JSON.stringify({ name: name.trim(), phone: phone.trim() || undefined }),
+        body: JSON.stringify({
+          name: name.trim(),
+          phone: phone.trim() || undefined,
+          supplyOf: supplyOf.trim() || undefined,
+          brand: brand.trim() || undefined,
+          address: address.trim() || undefined,
+        }),
       });
-      setName("");
-      setPhone("");
+      resetAddForm();
+      setAddOpen(false);
       toast.push(t("store.supplierAdded"), "ok");
       await load();
     } catch (err) {
@@ -457,7 +859,10 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
 
   async function openLedger(id: string) {
     try {
-      setLedger(await api<Ledger>(`/store/suppliers/${id}/ledger`));
+      const next = await api<Ledger>(`/store/suppliers/${id}/ledger`);
+      setLedger(next);
+      const firstOpen = next.purchases.find((p) => p.balance > 0.009);
+      setOpenBillId(firstOpen?.id || next.purchases[0]?.id || null);
     } catch (err) {
       toast.push(err instanceof Error ? err.message : t("common.failed"), "err");
     }
@@ -496,133 +901,357 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
           <strong>{rows.length}</strong>
         </div>
         <div className="panel stat">
-          <span>{t("store.purchased")}</span>
+          <span>{t("store.supplierDueTotal")}</span>
           <strong>{money(purchased)}</strong>
         </div>
         <div className="panel stat">
-          <span>{t("store.outstanding")}</span>
+          <span>{t("store.supplierStillDue")}</span>
           <strong>{money(outstanding)}</strong>
         </div>
       </div>
 
       {canManage && (
-        <form className="panel panel-pad row" onSubmit={add} style={{ gap: "0.6rem", alignItems: "end", marginBottom: "0.8rem" }}>
-          <div className="field" style={{ flex: 1, margin: 0 }}>
-            <label>{t("store.supplierName")}</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} required />
-          </div>
-          <div className="field" style={{ flex: 1, margin: 0 }}>
-            <label>{t("store.phone")}</label>
-            <input value={phone} onChange={(e) => setPhone(e.target.value)} />
-          </div>
-          <button className="btn" type="submit" disabled={busy}>
+        <div className="row" style={{ marginBottom: "0.8rem", justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              resetAddForm();
+              setAddOpen(true);
+            }}
+          >
             + {t("store.newSupplier")}
           </button>
-        </form>
+        </div>
       )}
 
-      <div className="panel panel-pad">
-        {!rows.length && <div className="empty">{t("store.noSuppliers")}</div>}
-        {rows.length > 0 && (
-          <table>
-            <thead>
-              <tr>
-                <th>{t("common.name")}</th>
-                <th>{t("store.phone")}</th>
-                <th>{t("store.purchased")}</th>
-                <th>{t("store.paid")}</th>
-                <th>{t("store.outstanding")}</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((s) => (
-                <tr key={s.id}>
-                  <td>{s.name}</td>
-                  <td>{s.phone || "—"}</td>
-                  <td>{money(s.purchased)}</td>
-                  <td>{money(s.paid)}</td>
-                  <td>{s.outstanding > 0 ? <span className="badge unpaid">{money(s.outstanding)}</span> : money(0)}</td>
-                  <td>
-                    <div className="row">
-                      <button type="button" className="btn ghost sm" onClick={() => void openLedger(s.id)}>
-                        {t("store.ledger")}
-                      </button>
-                      {canManage && s.outstanding > 0 && (
-                        <button
-                          type="button"
-                          className="btn sm"
-                          onClick={() => {
-                            setPayFor(s);
-                            setAmount(String(s.outstanding));
-                            setPaidOn(todayIso());
-                            setNote("");
-                          }}
-                        >
-                          {t("store.recordPayment")}
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      <Modal
+        open={addOpen}
+        title={t("store.newSupplier")}
+        onClose={() => {
+          if (!busy) {
+            setAddOpen(false);
+            resetAddForm();
+          }
+        }}
+        size="md"
+      >
+        <form onSubmit={add}>
+          <div className="modal-scroll">
+            <div className="field">
+              <label>{t("store.supplierName")}</label>
+              <input value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
+            </div>
+            <div className="field">
+              <label>{t("store.supplierSupplyOf")}</label>
+              <input
+                value={supplyOf}
+                onChange={(e) => setSupplyOf(e.target.value)}
+                placeholder={t("store.supplierSupplyOfPh")}
+              />
+            </div>
+            <div className="grid-2">
+              <div className="field">
+                <label>{t("store.supplierBrand")}</label>
+                <input value={brand} onChange={(e) => setBrand(e.target.value)} placeholder={t("store.supplierBrandPh")} />
+              </div>
+              <div className="field">
+                <label>{t("store.phone")}</label>
+                <input value={phone} onChange={(e) => setPhone(e.target.value)} />
+              </div>
+            </div>
+            <div className="field">
+              <label>{t("store.supplierAddress")}</label>
+              <input
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                placeholder={t("store.supplierAddressPh")}
+              />
+            </div>
+          </div>
+          <div className="form-actions">
+            <button className="btn" type="submit" disabled={busy || !name.trim()}>
+              {busy ? t("common.saving") : t("common.save")}
+            </button>
+            <button
+              type="button"
+              className="btn ghost"
+              disabled={busy}
+              onClick={() => {
+                setAddOpen(false);
+                resetAddForm();
+              }}
+            >
+              {t("common.cancel")}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {!rows.length && (
+        <div className="panel panel-pad">
+          <div className="empty">{t("store.noSuppliers")}</div>
+        </div>
+      )}
+      {rows.length > 0 && (
+        <div className="supplier-list">
+          {rows.map((s) => (
+            <div
+              key={s.id}
+              className={`panel panel-pad supplier-card${ledger?.id === s.id ? " is-selected" : ""}`}
+            >
+              <div className="supplier-card-top">
+                <div className="supplier-profile" style={{ flex: 1, minWidth: 220 }}>
+                  <div className="row" style={{ gap: "0.5rem", alignItems: "center" }}>
+                    <h3>{s.name}</h3>
+                    {s.outstanding > 0.009 ? (
+                      <span className="badge unpaid">{t("store.accountHasDue")}</span>
+                    ) : (
+                      <span className="badge paid">{t("store.accountClear")}</span>
+                    )}
+                  </div>
+                  <SupplierMeta phone={s.phone} supplyOf={s.supplyOf} brand={s.brand} address={s.address} />
+                </div>
+                <div className="supplier-card-actions">
+                  <button type="button" className="btn ghost sm" onClick={() => void openLedger(s.id)}>
+                    {t("store.ledger")}
+                  </button>
+                  {canManage && s.outstanding > 0 && (
+                    <button
+                      type="button"
+                      className="btn sm"
+                      onClick={() => {
+                        setPayFor(s);
+                        setAmount(String(s.outstanding));
+                        setPaidOn(todayIso());
+                        setNote("");
+                      }}
+                    >
+                      {t("store.recordPayment")}
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="supplier-money">
+                <div className="panel stat">
+                  <span>{t("store.supplierDueTotal")}</span>
+                  <strong>{money(s.purchased)}</strong>
+                </div>
+                <div className="panel stat">
+                  <span>{t("store.supplierPaidTotal")}</span>
+                  <strong>{money(s.paid)}</strong>
+                </div>
+                <div className="panel stat">
+                  <span>{t("store.supplierStillDue")}</span>
+                  <strong>
+                    {s.outstanding > 0.009 ? (
+                      <span className="badge unpaid">{money(s.outstanding)}</span>
+                    ) : (
+                      <span className="badge paid">{money(0)}</span>
+                    )}
+                  </strong>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {ledger && (
         <div className="panel panel-pad" style={{ marginTop: "0.8rem" }}>
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <h3 style={{ margin: 0 }}>
-              {t("store.ledgerTitle")} · {ledger.name}
-            </h3>
-            <button type="button" className="btn ghost sm" onClick={() => setLedger(null)}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div className="supplier-profile" style={{ flex: 1, minWidth: 240 }}>
+              <div className="tiny muted">{t("store.ledgerTitle")}</div>
+              <h3>{ledger.name}</h3>
+              <SupplierMeta
+                phone={ledger.phone}
+                supplyOf={ledger.supplyOf}
+                brand={ledger.brand}
+                address={ledger.address}
+              />
+              <p className="muted tiny" style={{ margin: "0.35rem 0 0" }}>
+                {t("store.ledgerHint")}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={() => {
+                setLedger(null);
+                setOpenBillId(null);
+              }}
+            >
               {t("common.close")}
             </button>
           </div>
-          <p className="muted">
-            {t("store.purchased")} {money(ledger.purchased)} · {t("store.paid")} {money(ledger.paid)} · {t("store.outstanding")}{" "}
-            {money(ledger.outstanding)}
+
+          <div className="stats" style={{ marginTop: "0.75rem" }}>
+            <div className="panel stat">
+              <span>{t("store.supplierDueTotal")}</span>
+              <strong>{money(ledger.purchased)}</strong>
+            </div>
+            <div className="panel stat">
+              <span>{t("store.supplierPaidTotal")}</span>
+              <strong>{money(ledger.paid)}</strong>
+            </div>
+            <div className="panel stat">
+              <span>{t("store.supplierStillDue")}</span>
+              <strong>{money(ledger.outstanding)}</strong>
+            </div>
+          </div>
+
+          <h4 style={{ marginBottom: "0.4rem" }}>{t("store.bills")}</h4>
+          {!ledger.purchases.length && <div className="empty">{t("store.noBillsYet")}</div>}
+          {ledger.purchases.length > 0 && (
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("common.date")}</th>
+                  <th>{t("common.status")}</th>
+                  <th>{t("store.inventoryValue")}</th>
+                  <th>{t("store.extraExpense")}</th>
+                  <th>{t("store.billSupplierTotal")}</th>
+                  <th>{t("store.paidToSupplier")}</th>
+                  <th>{t("store.billRemaining")}</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {ledger.purchases.map((p) => {
+                  const due = supplierBillTotal(p);
+                  const status = billStatus(p.paidAmount, p.balance);
+                  const open = openBillId === p.id;
+                  return (
+                    <Fragment key={p.id}>
+                      <tr>
+                        <td>
+                          <strong>{p.purchasedOn}</strong>
+                          <div className="tiny muted">
+                            {p.payKind === "CASH" ? t("store.payCash") : t("store.payCredit")}
+                          </div>
+                        </td>
+                        <td>
+                          {status === "paid" && <span className="badge paid">{t("store.billStatusPaid")}</span>}
+                          {status === "partial" && <span className="badge pending">{t("store.billStatusPartial")}</span>}
+                          {status === "unpaid" && <span className="badge unpaid">{t("store.billStatusUnpaid")}</span>}
+                        </td>
+                        <td>{money(p.total)}</td>
+                        <td>
+                          {p.extraExpense > 0 ? (
+                            <>
+                              {money(p.extraExpense)}
+                              <div className="tiny muted">
+                                {p.extraExpensePaidBy === "SELF" ? t("store.extraPaidSelf") : t("store.extraPaidSupplier")}
+                                {p.extraExpenseNote ? ` · ${p.extraExpenseNote}` : ""}
+                              </div>
+                            </>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td>{money(due)}</td>
+                        <td>{money(p.paidAmount)}</td>
+                        <td>
+                          {p.balance > 0.009 ? (
+                            <span className="badge unpaid">{money(p.balance)}</span>
+                          ) : (
+                            <span className="badge paid">{money(0)}</span>
+                          )}
+                        </td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn ghost sm"
+                            onClick={() => setOpenBillId(open ? null : p.id)}
+                          >
+                            {open ? t("common.close") : t("store.billItems")}
+                          </button>
+                        </td>
+                      </tr>
+                      {open && (
+                        <tr>
+                          <td colSpan={8} style={{ background: "rgba(0,0,0,0.03)" }}>
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th>{t("common.item")}</th>
+                                  <th>{t("common.category")}</th>
+                                  <th>{t("store.quantity")}</th>
+                                  <th>{t("common.rate")}</th>
+                                  <th>{t("common.amount")}</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {p.lines.map((l) => (
+                                  <tr key={l.id}>
+                                    <td>{l.item}</td>
+                                    <td>
+                                      <span className="badge">{l.category}</span>
+                                    </td>
+                                    <td>
+                                      {l.quantity} {unitLabel(l.unit)}
+                                    </td>
+                                    <td>
+                                      {money(l.ratePerUnit)}/{unitLabel(l.unit)}
+                                    </td>
+                                    <td>{money(l.amount)}</td>
+                                  </tr>
+                                ))}
+                                {p.extraExpense > 0 && (
+                                  <tr>
+                                    <td colSpan={4}>
+                                      <strong>{t("store.ledgerExtraRow")}</strong>
+                                      {p.extraExpenseNote ? ` · ${p.extraExpenseNote}` : ""}
+                                      <div className="tiny muted">
+                                        {p.extraExpensePaidBy === "SELF"
+                                          ? t("store.extraPaidSelfDetail")
+                                          : t("store.extraPaidSupplierDetail")}
+                                      </div>
+                                    </td>
+                                    <td>
+                                      <strong>{money(p.extraExpense)}</strong>
+                                    </td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+
+          <h4 style={{ marginTop: "1rem", marginBottom: "0.35rem" }}>{t("store.payments")}</h4>
+          <p className="tiny muted" style={{ marginTop: 0 }}>
+            {t("store.paymentsHint")}
           </p>
-          <h4>{t("store.bills")}</h4>
-          {ledger.purchases.map((p) => (
-            <div key={p.id} style={{ marginBottom: "0.8rem" }}>
-              <strong>
-                {p.purchasedOn} · {money(p.total)} · {p.payKind === "CASH" ? t("store.payCash") : t("store.payCredit")}
-              </strong>
-              <table>
-                <tbody>
-                  {p.lines.map((l) => (
-                    <tr key={l.id}>
-                      <td>{l.item}</td>
-                      <td>
-                        <span className="badge">{l.category}</span>
-                      </td>
-                      <td>
-                        {l.quantity} {unitLabel(l.unit)}
-                      </td>
-                      <td>
-                        {money(l.ratePerUnit)}/{unitLabel(l.unit)}
-                      </td>
-                      <td>{money(l.amount)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ))}
-          <h4>{t("store.payments")}</h4>
           {!ledger.payments.length && <div className="tiny muted">—</div>}
-          {ledger.payments.map((p) => (
-            <div key={p.id} className="row" style={{ justifyContent: "space-between" }}>
-              <span>
-                {p.paidOn}
-                {p.note ? <span className="tiny muted"> · {p.note}</span> : null}
-              </span>
-              <strong>{money(p.amount)}</strong>
-            </div>
-          ))}
+          {ledger.payments.length > 0 && (
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("common.date")}</th>
+                  <th>{t("store.note")}</th>
+                  <th>{t("store.amount")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ledger.payments.map((p) => (
+                  <tr key={p.id}>
+                    <td>{p.paidOn}</td>
+                    <td>{p.note || "—"}</td>
+                    <td>
+                      <strong>{money(p.amount)}</strong>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
 
@@ -632,7 +1261,10 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
             {t("store.recordPayment")} · {payFor.name}
           </h3>
           <p className="muted">
-            {t("store.outstanding")} {money(payFor.outstanding)}
+            {t("store.supplierStillDue")} {money(payFor.outstanding)}
+          </p>
+          <p className="tiny muted" style={{ marginTop: 0 }}>
+            {t("store.paymentsHint")}
           </p>
           <div className="grid-2">
             <div className="field">
@@ -662,21 +1294,35 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
   );
 }
 
+type DailyExtra = {
+  purchaseId: string;
+  supplier: string;
+  amount: number;
+  note: string | null;
+  paidBy: "SUPPLIER" | "SELF" | null;
+};
+
 function DailyView() {
   const t = useT();
   const toast = useToast();
   const [date, setDate] = useState(todayIso);
   const [dates, setDates] = useState<string[]>([]);
   const [lines, setLines] = useState<DailyLine[]>([]);
+  const [extras, setExtras] = useState<DailyExtra[]>([]);
   const [total, setTotal] = useState(0);
+  const [extraTotal, setExtraTotal] = useState(0);
 
   async function load(d: string) {
     const [report, days] = await Promise.all([
-      api<{ total: number; lines: DailyLine[] }>(`/store/purchases?date=${d}`),
+      api<{ total: number; extraExpenseTotal?: number; lines: DailyLine[]; extras?: DailyExtra[] }>(
+        `/store/purchases?date=${d}`
+      ),
       api<string[]>("/store/purchases/dates"),
     ]);
     setLines(report.lines);
+    setExtras(report.extras || []);
     setTotal(report.total);
+    setExtraTotal(report.extraExpenseTotal || 0);
     setDates(days);
   }
 
@@ -689,7 +1335,8 @@ function DailyView() {
       <div className="row" style={{ marginBottom: "0.7rem", gap: "0.6rem", alignItems: "center" }}>
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         <strong>
-          {t("store.billTotal")} {money(total)}
+          {t("store.inventoryValue")} {money(total)}
+          {extraTotal > 0 ? ` · ${t("store.extraExpense")} ${money(extraTotal)}` : ""}
         </strong>
       </div>
       <div className="chips" style={{ marginBottom: "0.7rem" }}>
@@ -732,6 +1379,31 @@ function DailyView() {
               ))}
             </tbody>
           </table>
+        )}
+        {extras.length > 0 && (
+          <>
+            <h4 style={{ marginTop: "1rem" }}>{t("store.extraExpense")}</h4>
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("store.supplier")}</th>
+                  <th>{t("store.extraExpenseFor")}</th>
+                  <th>{t("store.paid")}</th>
+                  <th>{t("common.amount")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {extras.map((e) => (
+                  <tr key={e.purchaseId}>
+                    <td>{e.supplier}</td>
+                    <td>{e.note || "—"}</td>
+                    <td>{e.paidBy === "SELF" ? t("store.extraPaidSelf") : t("store.extraPaidSupplier")}</td>
+                    <td>{money(e.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
         )}
       </div>
     </div>

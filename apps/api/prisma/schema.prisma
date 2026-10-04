@@ -42,6 +42,24 @@ enum PurchasePayKind {
   CREDIT
 }
 
+/// Who covered travel / loading / other costs on a purchase.
+enum ExtraExpensePaidBy {
+  SUPPLIER
+  SELF
+}
+
+/// Hotel / ops expense sheet (salary, utilities, etc.) — separate from store purchases.
+enum HotelExpensePeriod {
+  DAILY
+  MONTHLY
+}
+
+/// Cash drawer counters on the daily restaurant close report.
+enum CashCounterKind {
+  COUNTER_1
+  COUNTER_2
+}
+
 enum PrinterKind {
   WINDOWS
   NETWORK
@@ -186,6 +204,8 @@ model User {
   cashReceived      Payment[]   @relation("PaymentHandedTo")
   tipShares         TipShare[]
   dayCloses         DayStockClose[]
+  dayCashCloses     DayCashClose[]
+  hotelExpenses     HotelExpense[]
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 }
@@ -222,6 +242,10 @@ model Supplier {
   id        String            @id @default(cuid())
   name      String
   phone     String?
+  /// What they supply (e.g. dairy, vegetables, packaging).
+  supplyOf  String?
+  brand     String?
+  address   String?
   notes     String?
   active    Boolean           @default(true)
   purchases Purchase[]
@@ -239,9 +263,15 @@ model Purchase {
   /// Noon-local timestamp of the business day the goods arrived.
   purchasedAt DateTime
   payKind     PurchasePayKind
-  /// Cash paid on this invoice (cash purchases = full total).
+  /// Amount paid to the supplier on this invoice (inventory + supplier-side extra expense).
   paidAmount  Decimal         @default(0) @db.Decimal(14, 2)
+  /// Inventory lines only (does not include extra expense).
   total       Decimal         @db.Decimal(14, 2)
+  /// Travel / loading / other cost on this purchase (not stock value).
+  extraExpense        Decimal              @default(0) @db.Decimal(14, 2)
+  extraExpenseNote    String?
+  /// null when extraExpense is 0. SELF does not affect supplier balance.
+  extraExpensePaidBy  ExtraExpensePaidBy?
   note        String?
   lines       PurchaseLine[]
   movements   StockMovement[]
@@ -272,6 +302,8 @@ model SupplierPayment {
   amount     Decimal  @db.Decimal(14, 2)
   paidAt     DateTime
   note       String?
+  /// True once this payment has been applied onto purchase.paidAmount (oldest bills first).
+  allocated  Boolean  @default(false)
   createdAt  DateTime @default(now())
 
   @@index([supplierId, paidAt])
@@ -303,6 +335,10 @@ model DayStockClose {
   profit         Decimal             @default(0) @db.Decimal(14, 2)
   closedById     String?
   closedBy       User?               @relation(fields: [closedById], references: [id], onDelete: SetNull)
+  editedAt       DateTime?
+  editedById     String?
+  editedByName   String?
+  editReason     String?
   lines          DayStockCloseLine[]
   movements      StockMovement[]
   createdAt      DateTime            @default(now())
@@ -473,4 +509,85 @@ model OrderItem {
   createdAt       DateTime      @default(now())
 
   @@index([orderId, lineKind])
+}
+
+/// Admin / System Manager daily cash close — counters, paid bills, pending, miss cash.
+model DayCashClose {
+  id             String                @id @default(cuid())
+  businessDate   String                @unique
+  note           String?
+  expectedCash   Decimal               @db.Decimal(14, 2)
+  collectedCash  Decimal               @db.Decimal(14, 2)
+  missCash       Decimal               @db.Decimal(14, 2)
+  pendingAmount  Decimal               @default(0) @db.Decimal(14, 2)
+  pendingCount   Int                   @default(0)
+  paidBillsCount Int                   @default(0)
+  paidSalesTotal Decimal               @default(0) @db.Decimal(14, 2)
+  /// Paid food sales for the business day (not inventory profit).
+  totalSale      Decimal               @default(0) @db.Decimal(14, 2)
+  closedById     String?
+  closedBy       User?                 @relation(fields: [closedById], references: [id], onDelete: SetNull)
+  closedByName   String?
+  counters       DayCashCloseCounter[]
+  soldItems      DayCashCloseSoldItem[]
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+}
+
+model DayCashCloseCounter {
+  id            String          @id @default(cuid())
+  closeId       String
+  close         DayCashClose    @relation(fields: [closeId], references: [id], onDelete: Cascade)
+  kind          CashCounterKind
+  label         String
+  expectedCash  Decimal         @db.Decimal(14, 2)
+  collectedCash Decimal         @db.Decimal(14, 2)
+  missCash      Decimal         @db.Decimal(14, 2)
+  missReason    String?
+  billCount     Int             @default(0)
+  paymentCount  Int             @default(0)
+  tipTotal      Decimal         @default(0) @db.Decimal(14, 2)
+  /// Snapshot of payment rows for this counter at close time.
+  paymentsJson  Json?
+
+  @@unique([closeId, kind])
+}
+
+model DayCashCloseSoldItem {
+  id      String       @id @default(cuid())
+  closeId String
+  close   DayCashClose @relation(fields: [closeId], references: [id], onDelete: Cascade)
+  name    String
+  qty     Decimal      @db.Decimal(14, 3)
+  amount  Decimal      @db.Decimal(14, 2)
+
+  @@index([closeId])
+}
+
+/// Optional labels for the hotel expense sheet (user-created).
+model HotelExpenseCategory {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+}
+
+/// Admin hotel expense sheet — salary, utilities, maintenance, etc.
+model HotelExpense {
+  id          String             @id @default(cuid())
+  /// Business day the expense belongs to (noon local).
+  spentAt     DateTime
+  /// Optional kind (Salary, Electricity, …) — free text, not required.
+  category    String?
+  /// Person or detail (employee name, bill ref, …).
+  title       String
+  amount      Decimal            @db.Decimal(14, 2)
+  period      HotelExpensePeriod @default(DAILY)
+  note        String?
+  createdById String?
+  createdBy   User?              @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([spentAt])
+  @@index([category])
 }

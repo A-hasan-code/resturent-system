@@ -36,14 +36,23 @@ export class StoreController {
     private readonly dayUse: DayUseService
   ) {}
 
+  @Get("day-use/history")
+  @RequirePerms("store.view", "store.manage", "reports.view")
+  dayUseHistory(@Query("limit") limit?: string) {
+    return this.dayUse.history(limit ? Number(limit) : 90);
+  }
+
   @Get("day-use")
-  @RequirePerms("store.view", "store.manage")
-  dayUseSheet() {
-    return this.dayUse.sheet();
+  @RequirePerms("store.view", "store.manage", "reports.view")
+  dayUseSheet(
+    @Query("date") date: string | undefined,
+    @CurrentUser() user: AuthUser
+  ) {
+    return this.dayUse.sheet(date, user);
   }
 
   @Post("day-use")
-  @RequirePerms("store.manage")
+  @RequirePerms("store.manage", "users.manage")
   saveDayUse(@CurrentUser() user: AuthUser, @Body() dto: SaveDayUseDto) {
     return this.dayUse.save(user, dto);
   }

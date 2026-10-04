@@ -13,6 +13,8 @@ import { SettingsPage } from "./pages/Settings";
 import { UsersPage } from "./pages/Users";
 import { PaymentsPage } from "./pages/Payments";
 import { AuditPage } from "./pages/Audit";
+import { HotelExpensesPage } from "./pages/HotelExpenses";
+import { CloseReportPage } from "./pages/CloseReport";
 
 function Private({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
@@ -50,6 +52,8 @@ export function App() {
         <Route path="users" element={<UsersPage />} />
         <Route path="payments" element={<PaymentsPage />} />
         <Route path="audit" element={<AuditPage />} />
+        <Route path="expenses" element={<HotelExpensesPage />} />
+        <Route path="close" element={<CloseReportPage />} />
       </Route>
     </Routes>
   );

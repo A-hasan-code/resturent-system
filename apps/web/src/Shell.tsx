@@ -35,7 +35,10 @@ const GROUPS: { titleKey: MessageKey; tabs: Tab[] }[] = [
     tabs: [
       { to: "/payments", labelKey: "nav.payments", perms: ["payments.view"] },
       { to: "/audit", labelKey: "nav.audit", perms: ["payments.view"] },
+      { to: "/expenses", labelKey: "nav.expenses", perms: ["expense.view", "expense.manage"] },
+      { to: "/close", labelKey: "nav.close", perms: ["close.view", "close.manage"] },
       { to: "/users", labelKey: "nav.users", perms: ["users.manage"] },
+
       { to: "/settings", labelKey: "nav.settings", perms: ["printers.manage", "system.manage", "tables.manage"] },
     ],
   },
@@ -43,6 +46,7 @@ const GROUPS: { titleKey: MessageKey; tabs: Tab[] }[] = [
 
 const ROLE_KEY: Record<string, MessageKey> = {
   ADMIN: "role.ADMIN",
+  SYSTEM_MANAGER: "role.SYSTEM_MANAGER",
   SUPERVISOR: "role.SUPERVISOR",
   MAIN_CASHIER: "role.MAIN_CASHIER",
   MANAGER: "role.MANAGER",

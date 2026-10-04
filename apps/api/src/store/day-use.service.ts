@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable } from "@nestjs/common";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
 import { toNumber } from "../common/units";
@@ -8,6 +13,7 @@ import { SaveDayUseDto } from "./dto";
 
 const money2 = (n: number) => Math.round(n * 100) / 100;
 const qty3 = (n: number) => Math.round(n * 1000) / 1000;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 @Injectable()
 export class DayUseService {
@@ -16,16 +22,54 @@ export class DayUseService {
     private readonly settings: SettingsService
   ) {}
 
-  private async clock() {
+  private async clock(dateStr?: string) {
     const start = await this.settings.dayStart();
     const now = new Date();
-    const businessDate = businessDateOf(now, start.h, start.m);
+    const today = businessDateOf(now, start.h, start.m);
+    const businessDate = dateStr?.trim() || today;
+    if (!DATE_RE.test(businessDate)) {
+      throw new BadRequestException("Invalid business date");
+    }
     const window = businessWindow(businessDate, start.h, start.m);
-    return { ...start, businessDate, ...window };
+    return {
+      ...start,
+      businessDate,
+      today,
+      isToday: businessDate === today,
+      ...window,
+    };
   }
 
-  async sheet() {
-    const clock = await this.clock();
+  /** Date-wise list of saved day closings (newest first). */
+  async history(limit = 90) {
+    const take = Math.min(365, Math.max(1, limit || 90));
+    const rows = await this.prisma.dayStockClose.findMany({
+      take,
+      orderBy: { businessDate: "desc" },
+      include: {
+        closedBy: { select: { name: true } },
+        _count: { select: { lines: true } },
+      },
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      businessDate: r.businessDate,
+      stockUsedValue: money2(toNumber(r.stockUsedValue)),
+      sales: money2(toNumber(r.sales)),
+      profit: money2(toNumber(r.profit)),
+      closedByName: r.closedBy?.name ?? null,
+      closedAt: r.createdAt,
+      editedAt: r.editedAt,
+      editedByName: r.editedByName,
+      editReason: r.editReason,
+      lineCount: r._count.lines,
+    }));
+  }
+
+  async sheet(dateStr?: string, user?: AuthUser) {
+    const clock = await this.clock(dateStr);
+    const isAdmin = user?.roleCode === "ADMIN";
+
     const [items, salesMoves, close, paid] = await Promise.all([
       this.prisma.storeItem.findMany({
         where: { active: true },
@@ -38,7 +82,10 @@ export class DayUseService {
       }),
       this.prisma.dayStockClose.findUnique({
         where: { businessDate: clock.businessDate },
-        include: { lines: true },
+        include: {
+          lines: true,
+          closedBy: { select: { name: true } },
+        },
       }),
       this.prisma.order.aggregate({
         where: {
@@ -49,6 +96,10 @@ export class DayUseService {
         _sum: { total: true },
       }),
     ]);
+
+    if (dateStr && !clock.isToday && !close) {
+      throw new NotFoundException(`No closing saved for ${clock.businessDate}`);
+    }
 
     const auto = new Map<string, number>();
     for (const m of salesMoves) {
@@ -75,14 +126,34 @@ export class DayUseService {
       };
     });
 
-    const stockUsedValue = money2(rows.reduce((s, r) => s + r.value, 0));
-    const sales = money2(toNumber(paid._sum.total));
+    const stockUsedValue = close
+      ? money2(toNumber(close.stockUsedValue))
+      : money2(rows.reduce((s, r) => s + r.value, 0));
+    const sales = close
+      ? money2(toNumber(close.sales))
+      : money2(toNumber(paid._sum.total));
+
+    // Only today’s business day can be entered or updated — past days are view-only.
+    const canEdit =
+      clock.isToday &&
+      !!user &&
+      (user.permissions.includes("store.manage") || isAdmin);
+
     return {
       businessDate: clock.businessDate,
+      today: clock.today,
+      isToday: clock.isToday,
       dayStart: clock.label,
       from: clock.from.toISOString(),
       to: clock.to.toISOString(),
       saved: !!close,
+      canEdit,
+      isAdmin: !!isAdmin,
+      closedByName: close?.closedBy?.name ?? null,
+      closedAt: close?.createdAt ?? null,
+      editedAt: close?.editedAt ?? null,
+      editedByName: close?.editedByName ?? null,
+      editReason: close?.editReason ?? null,
       sales,
       stockUsedValue,
       profit: money2(sales - stockUsedValue),
@@ -91,7 +162,18 @@ export class DayUseService {
   }
 
   async save(user: AuthUser, dto: SaveDayUseDto) {
-    const clock = await this.clock();
+    const clock = await this.clock(dto.businessDate);
+    const isAdmin = user.roleCode === "ADMIN";
+
+    if (!clock.isToday) {
+      throw new ForbiddenException(
+        "Past day closings are view-only. Only today’s closing can be saved or edited."
+      );
+    }
+    if (!user.permissions.includes("store.manage") && !isAdmin) {
+      throw new ForbiddenException("Not allowed to save day closing");
+    }
+
     const wanted = new Map<string, { extraQty: number; reason: string }>();
     for (const line of dto.lines ?? []) {
       const extraQty = qty3(Math.max(0, line.extraQty || 0));
@@ -125,7 +207,9 @@ export class DayUseService {
         where: { businessDate: clock.businessDate },
         include: { lines: true },
       });
-      const previous = new Map(existing?.lines.map((l) => [l.storeItemId, toNumber(l.extraQty)]) ?? []);
+      const previous = new Map(
+        existing?.lines.map((l) => [l.storeItemId, toNumber(l.extraQty)]) ?? []
+      );
 
       for (const item of items) {
         const next = wanted.get(item.id)?.extraQty ?? 0;
@@ -206,17 +290,25 @@ export class DayUseService {
       });
       const sales = money2(toNumber(paid._sum.total));
       stockUsed = money2(stockUsed);
+
       await tx.dayStockClose.update({
         where: { id: close.id },
         data: {
           stockUsedValue: stockUsed,
           sales,
           profit: money2(sales - stockUsed),
-          closedById: user.id,
+          closedById: existing ? existing.closedById ?? user.id : user.id,
+          ...(existing
+            ? {
+                editedAt: new Date(),
+                editedById: user.id,
+                editedByName: user.name,
+              }
+            : {}),
         },
       });
     });
 
-    return this.sheet();
+    return this.sheet(clock.businessDate, user);
   }
 }

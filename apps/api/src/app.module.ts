@@ -14,6 +14,8 @@ import { DashboardModule } from "./dashboard/dashboard.module";
 import { UsersModule } from "./users/users.controller";
 import { PaymentsModule } from "./payments/payments.controller";
 import { AuditModule } from "./audit/audit.controller";
+import { ExpensesModule } from "./expenses/expenses.controller";
+import { CloseModule } from "./close/close.controller";
 
 @Module({
   imports: [
@@ -32,6 +34,8 @@ import { AuditModule } from "./audit/audit.controller";
     UsersModule,
     PaymentsModule,
     AuditModule,
+    ExpensesModule,
+    CloseModule,
   ],
 })
 export class AppModule {}

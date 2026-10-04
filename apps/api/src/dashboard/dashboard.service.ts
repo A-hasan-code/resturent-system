@@ -4,6 +4,7 @@ import { CostingService } from "../common/costing.service";
 import { toNumber } from "../common/units";
 import { AuthUser } from "../common/decorators";
 import { TipService } from "../system/tip.service";
+import { ExpensesService } from "../expenses/expenses.service";
 
 const STALE_MINUTES = 10;
 
@@ -20,13 +21,62 @@ type DashOrder = {
   items: { name: string; quantity: number; sellUnit: string }[];
 };
 
+function isoDay(d: Date) {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 @Injectable()
 export class DashboardService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly costing: CostingService,
-    private readonly tips: TipService
+    private readonly tips: TipService,
+    private readonly expenses: ExpensesService
   ) {}
+
+  private async netProfitWindows() {
+    const now = new Date();
+    const today = isoDay(now);
+    const monthFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+    const monthTo = isoDay(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+    const yearFrom = `${now.getFullYear()}-01-01`;
+    const yearTo = `${now.getFullYear()}-12-31`;
+    const [daily, monthly, yearly] = await Promise.all([
+      this.expenses.periodTotals(today, today),
+      this.expenses.periodTotals(monthFrom, monthTo),
+      this.expenses.periodTotals(yearFrom, yearTo),
+    ]);
+    return {
+      daily: {
+        from: daily.from,
+        to: daily.to,
+        sales: daily.sales,
+        totalExpense: daily.totalExpense,
+        manualExpenses: daily.manualExpenses,
+        supplierPaid: daily.supplierPaid,
+        netProfit: daily.netProfit,
+      },
+      monthly: {
+        from: monthly.from,
+        to: monthly.to,
+        sales: monthly.sales,
+        totalExpense: monthly.totalExpense,
+        manualExpenses: monthly.manualExpenses,
+        supplierPaid: monthly.supplierPaid,
+        netProfit: monthly.netProfit,
+      },
+      yearly: {
+        from: yearly.from,
+        to: yearly.to,
+        sales: yearly.sales,
+        totalExpense: yearly.totalExpense,
+        manualExpenses: yearly.manualExpenses,
+        supplierPaid: yearly.supplierPaid,
+        netProfit: yearly.netProfit,
+      },
+    };
+  }
 
   async stats(user: AuthUser) {
     const role = (user.roleCode || "UNKNOWN").toUpperCase();
@@ -229,6 +279,14 @@ export class DashboardService {
     const costPaidAll = toNumber(revenueAllAgg._sum.costTotal ?? 0);
     const unpaidAmount = toNumber(unpaidAgg._sum.total ?? 0);
 
+    const showNet =
+      role === "ADMIN" ||
+      role === "SYSTEM_MANAGER" ||
+      role === "MAIN_CASHIER" ||
+      user.permissions?.includes("expense.view") ||
+      user.permissions?.includes("expense.manage");
+    const netProfit = showNet ? await this.netProfitWindows() : null;
+
     const waiterIds = waiterOrderCounts.map((r) => r.waiterId!).filter(Boolean);
     const waiterUsers = waiterIds.length
       ? await this.prisma.user.findMany({
@@ -298,6 +356,7 @@ export class DashboardService {
       unpaidOrders,
       pending: pendingKitchen + preparing,
       unpaid: unpaidCount,
+      netProfit,
       ...tipStats,
     };
 
