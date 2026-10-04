@@ -152,11 +152,12 @@ export class OrdersService {
       }
     }
 
+    const { lines, subtotal, costTotal } = await this.buildLines(user, dto.items);
+    await this.ensureStock(lines);
     const assignedCashierId = await this.resolveAssignedCashier(user, dto.assignedCashierId);
     const creditCustomerId = dto.creditCustomerId
       ? await this.resolveCreditCustomer(user, dto.creditCustomerId, !table)
       : null;
-    const { lines, subtotal, costTotal } = await this.buildLines(user, dto.items);
     const servedByName = cleanName(dto.servedByName);
     const hasKitchen = lines.some((l) => l.lineKind === "MENU");
     const order = await this.prisma.order.create({
@@ -228,6 +229,7 @@ export class OrdersService {
     const { lines } = await this.buildLines(user, dto.items);
     const menuLines = lines.filter((l) => l.lineKind === "MENU");
     const perHeadLines = lines.filter((l) => l.lineKind === "PER_HEAD");
+    await this.ensureStock(menuLines);
     const servedByName = dto.servedByName !== undefined ? cleanName(dto.servedByName) : undefined;
     // First kitchen send on an order that only had per-head: kotRounds was 0 → become 1
     const nextRound = menuLines.length ? (order.kotRounds < 1 ? 1 : order.kotRounds + 1) : order.kotRounds;
@@ -324,6 +326,26 @@ export class OrdersService {
 
     let subDelta = 0;
     let costDelta = 0;
+    const increases: { menuItemId: string; quantity: number; name: string }[] = [];
+    for (const change of dto.items) {
+      const line = order.items.find((i) => i.id === change.id);
+      if (!line?.menuItemId) continue;
+      const qtyDiff = Math.max(0, change.quantity) - toNumber(line.quantity);
+      if (qtyDiff > 0) increases.push({ menuItemId: line.menuItemId, quantity: qtyDiff, name: line.name });
+    }
+    if (increases.length) {
+      const menus = await this.prisma.menuItem.findMany({
+        where: { id: { in: increases.map((i) => i.menuItemId) } },
+        select: { id: true, recipeId: true },
+      });
+      const recipeOf = new Map(menus.map((m) => [m.id, m.recipeId]));
+      await this.ensureStock(
+        increases.flatMap((i) => {
+          const recipeId = recipeOf.get(i.menuItemId);
+          return recipeId ? [{ recipeId, quantity: i.quantity, name: i.name }] : [];
+        })
+      );
+    }
     for (const change of dto.items) {
       const line = order.items.find((i) => i.id === change.id);
       if (!line) throw new BadRequestException(`Item not found: ${change.id}`);
@@ -706,6 +728,12 @@ export class OrdersService {
       });
     }
     return { lines, subtotal, costTotal };
+  }
+
+  private ensureStock(lines: { recipeId: string | null; quantity: number; name: string }[]) {
+    return this.costing.assertCanSell(
+      lines.flatMap((l) => (l.recipeId ? [{ recipeId: l.recipeId, quantity: l.quantity, name: l.name }] : []))
+    );
   }
 
   private async deductStock(lines: Line[], orderNo: number, tableNo: string | null, orderId: string) {
