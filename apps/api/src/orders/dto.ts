@@ -90,6 +90,24 @@ export class EditOrderDto {
   @ValidateNested({ each: true })
   @Type(() => EditLineDto)
   items!: EditLineDto[];
+
+  /** Move the open bill onto this table. The previous table is released. */
+  @IsOptional()
+  @IsString()
+  tableId?: string;
+
+  @IsOptional()
+  @IsString()
+  assignedCashierId?: string;
+
+  /** Order taker. Must be a supervisor when changed. */
+  @IsOptional()
+  @IsString()
+  waiterId?: string;
+
+  @IsOptional()
+  @IsString()
+  servedByName?: string;
 }
 
 export class AddItemsDto {

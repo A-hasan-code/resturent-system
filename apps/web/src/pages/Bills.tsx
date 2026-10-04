@@ -13,6 +13,7 @@ import { PayModal } from "../components/PayModal";
 import { CashHandovers } from "../components/CashHandovers";
 import { CashRecord } from "../components/CashRecord";
 import { useI18n, useT } from "../i18n";
+import { EditBillForm, serverNames, withCurrent, type EditBillMeta, type EditBillPerson, type EditBillTable } from "../components/EditBillForm";
 
 type OrderPayment = {
   id: string;
@@ -25,6 +26,7 @@ type OrderPayment = {
 
 type Order = BillOrder & {
   id: string;
+  tableId?: string | null;
   status: string;
   paidAmount: number;
   tipAmount?: number;
@@ -70,6 +72,10 @@ export function BillsPage() {
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
   const [editQty, setEditQty] = useState<Record<string, number>>({});
+  const [editMeta, setEditMeta] = useState<EditBillMeta | null>(null);
+  const [editTables, setEditTables] = useState<EditBillTable[]>([]);
+  const [editPartitions, setEditPartitions] = useState<{ id: string; name: string }[]>([]);
+  const [editStaff, setEditStaff] = useState<EditBillPerson[]>([]);
   const [editing, setEditing] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
 
@@ -119,6 +125,38 @@ export function BillsPage() {
     setEditQty(qty);
   }
 
+  async function startBillEdit(o: Order) {
+    const qty: Record<string, number> = {};
+    for (const i of o.items) {
+      if (i.id) qty[i.id] = i.quantity;
+    }
+    setEditQty(qty);
+    try {
+      const [board, cashiers, servers] = await Promise.all([
+        api<{ partitions: { id: string; name: string; tables: { id: string; name: string; label: string; partitionId: string; order: { id: string } | null }[] }[] }>("/tables"),
+        api<EditBillPerson[]>("/payments/cashiers"),
+        api<EditBillPerson[]>("/payments/servers"),
+      ]);
+      const tables = board.partitions.flatMap((p) =>
+        p.tables.map((tbl) => ({ id: tbl.id, name: tbl.name, partitionId: tbl.partitionId, orderId: tbl.order?.id ?? null, label: tbl.label }))
+      );
+      setEditPartitions(board.partitions.map((p) => ({ id: p.id, name: p.name })));
+      setEditTables(tables);
+      setEditStaff([...cashiers, ...servers]);
+      const table = tables.find((tbl) => tbl.id === o.tableId) ?? tables.find((tbl) => tbl.label === o.tableNo);
+      setEditMeta({
+        partitionId: table?.partitionId ?? "",
+        tableId: table?.id ?? "",
+        cashierId: o.assignedCashier?.id ?? "",
+        supervisorId: o.orderedBy?.id ?? "",
+        servedBy: o.servedByName || o.servedBy || "",
+      });
+      setEditing(true);
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("bills.editFailed"), "err");
+    }
+  }
+
   async function saveEdit() {
     if (!selected || !can("order.edit")) return;
     const items = Object.entries(editQty).map(([id, quantity]) => ({ id, quantity }));
@@ -127,7 +165,13 @@ export function BillsPage() {
     try {
       const updated = await api<Order>(`/orders/${selected.id}/edit`, {
         method: "POST",
-        body: JSON.stringify({ items }),
+        body: JSON.stringify({
+          items,
+          ...(editMeta?.tableId ? { tableId: editMeta.tableId } : {}),
+          ...(editMeta?.cashierId ? { assignedCashierId: editMeta.cashierId } : {}),
+          ...(editMeta?.supervisorId ? { waiterId: editMeta.supervisorId } : {}),
+          servedByName: editMeta?.servedBy ?? "",
+        }),
       });
       toast.push(t("bills.editSaved"), "ok");
       setSelected(updated);
@@ -406,15 +450,41 @@ export function BillsPage() {
         {selected && (
           <>
             <div className="modal-scroll">
-              {selected.assignedCashier && (
+              {selected.assignedCashier && !editing && (
                 <div className="pay-summary no-print" style={{ marginBottom: "0.75rem" }}>
                   <span>{t("bills.assignedCashier")}</span>
                   <strong>{selected.assignedCashier.name}</strong>
                 </div>
               )}
-              {can("order.edit") && selected.paymentStatus !== "PAID" && editing ? (
+              {can("order.edit") && selected.paymentStatus !== "PAID" && editing && editMeta ? (
                 <div className="no-print" style={{ marginBottom: "1rem" }}>
-                  <h3 style={{ marginTop: 0, fontSize: "1rem" }}>{t("bills.editOrder")}</h3>
+                  <EditBillForm
+                    meta={editMeta}
+                    onChange={setEditMeta}
+                    currentOrderId={selected.id}
+                    partitions={editPartitions}
+                    tables={editTables}
+                    cashiers={withCurrent(
+                      editStaff.filter((s) => s.roleCode === "MAIN_CASHIER" || s.roleCode === "CASHIER"),
+                      selected.assignedCashier
+                    )}
+                    supervisors={withCurrent(
+                      editStaff.filter((s) => s.roleCode === "SUPERVISOR"),
+                      selected.orderedBy
+                    )}
+                    servers={serverNames(editStaff, editMeta.servedBy)}
+                    labels={{
+                      where: t("bills.editWhere"),
+                      who: t("bills.editWho"),
+                      partition: t("bills.partition"),
+                      table: t("bills.table"),
+                      cashier: t("bills.cashier"),
+                      supervisor: t("bills.supervisor"),
+                      servedBy: t("bills.servedBy"),
+                      busy: t("bills.tableBusy"),
+                    }}
+                  />
+                  <div className="edit-bill-items">{t("common.items")}</div>
                   {selected.items.map((i) =>
                     i.id ? (
                       <div key={i.id} className="row" style={{ justifyContent: "space-between", marginBottom: "0.5rem" }}>
@@ -490,7 +560,7 @@ export function BillsPage() {
                     </button>
                   </>
                 ) : (
-                  <button type="button" className="btn ghost" onClick={() => setEditing(true)}>
+                  <button type="button" className="btn ghost" onClick={() => void startBillEdit(selected)}>
                     {t("bills.editOrder")}
                   </button>
                 )

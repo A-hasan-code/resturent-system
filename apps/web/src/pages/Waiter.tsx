@@ -9,6 +9,7 @@ import { KotPreviewModal, type KotTarget } from "../components/KotPreviewModal";
 import { PayModal } from "../components/PayModal";
 import { PickServerModal } from "../components/PickServerModal";
 import { PickCashierModal } from "../components/PickCashierModal";
+import { EditBillForm, serverNames, withCurrent, type EditBillMeta, type EditBillPerson } from "../components/EditBillForm";
 import { MessageKey, useI18n, useT } from "../i18n";
 
 type OrderSummary = {
@@ -74,6 +75,7 @@ type Order = {
   id: string;
   orderNo: number;
   tableNo: string | null;
+  tableId?: string | null;
   status: string;
   paymentStatus: string;
   total: number;
@@ -160,6 +162,8 @@ export function WaiterPage() {
   const [pendingServer, setPendingServer] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [editQty, setEditQty] = useState<Record<string, number>>({});
+  const [editMeta, setEditMeta] = useState<EditBillMeta | null>(null);
+  const [editStaff, setEditStaff] = useState<EditBillPerson[]>([]);
   const [savingEdit, setSavingEdit] = useState(false);
   const [perHead, setPerHead] = useState<PerHeadCfg | null>(null);
   const [creditOn, setCreditOn] = useState(false);
@@ -529,6 +533,31 @@ export function WaiterPage() {
     }
   }
 
+  async function startBillEdit() {
+    if (!order) return;
+    const qmap: Record<string, number> = {};
+    for (const i of order.items) qmap[i.id] = i.quantity;
+    setEditQty(qmap);
+    const table = tables.find((tbl) => tbl.id === order.tableId) ?? tables.find((tbl) => tbl.label === order.tableNo);
+    setEditMeta({
+      partitionId: table?.partitionId ?? "",
+      tableId: table?.id ?? "",
+      cashierId: order.assignedCashier?.id ?? "",
+      supervisorId: order.orderedBy?.id ?? order.waiterId ?? "",
+      servedBy: order.servedByName || order.servedBy || "",
+    });
+    setEditing(true);
+    try {
+      const [cashiers, servers] = await Promise.all([
+        api<EditBillPerson[]>("/payments/cashiers"),
+        api<EditBillPerson[]>("/payments/servers"),
+      ]);
+      setEditStaff([...cashiers, ...servers]);
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("bills.editFailed"), "err");
+    }
+  }
+
   async function saveEdit() {
     if (!order || !can("order.edit")) return;
     const items = Object.entries(editQty).map(([id, quantity]) => ({ id, quantity }));
@@ -537,10 +566,17 @@ export function WaiterPage() {
     try {
       const updated = await api<Order>(`/orders/${order.id}/edit`, {
         method: "POST",
-        body: JSON.stringify({ items }),
+        body: JSON.stringify({
+          items,
+          ...(editMeta?.tableId ? { tableId: editMeta.tableId } : {}),
+          ...(editMeta?.cashierId ? { assignedCashierId: editMeta.cashierId } : {}),
+          ...(editMeta?.supervisorId ? { waiterId: editMeta.supervisorId } : {}),
+          servedByName: editMeta?.servedBy ?? "",
+        }),
       });
       setOrder(updated);
       setEditing(false);
+      if (updated.tableId) setSelected(updated.tableId);
       toast.push(t("bills.editSaved"), "ok");
       void loadTables();
     } catch (e) {
@@ -845,20 +881,47 @@ export function WaiterPage() {
                     <button
                       type="button"
                       className="btn ghost sm"
-                      onClick={() => {
-                        const qmap: Record<string, number> = {};
-                        for (const i of order.items) qmap[i.id] = i.quantity;
-                        setEditQty(qmap);
-                        setEditing(true);
-                      }}
+                      onClick={() => void startBillEdit()}
                     >
                       {t("bills.editOrder")}
                     </button>
                   )
                 )}
               </div>
-              {editing && order ? (
+              {editing && order && editMeta ? (
                 <div style={{ marginTop: "0.75rem" }}>
+                  <EditBillForm
+                    meta={editMeta}
+                    onChange={setEditMeta}
+                    currentOrderId={order.id}
+                    partitions={partitions.map((p) => ({ id: p.id, name: p.name }))}
+                    tables={tables.map((tbl) => ({
+                      id: tbl.id,
+                      name: tbl.name,
+                      partitionId: tbl.partitionId,
+                      orderId: tbl.order?.id ?? null,
+                    }))}
+                    cashiers={withCurrent(
+                      editStaff.filter((s) => s.roleCode === "MAIN_CASHIER" || s.roleCode === "CASHIER"),
+                      order.assignedCashier
+                    )}
+                    supervisors={withCurrent(
+                      editStaff.filter((s) => s.roleCode === "SUPERVISOR"),
+                      order.orderedBy
+                    )}
+                    servers={serverNames(editStaff, editMeta.servedBy)}
+                    labels={{
+                      where: t("bills.editWhere"),
+                      who: t("bills.editWho"),
+                      partition: t("bills.partition"),
+                      table: t("bills.table"),
+                      cashier: t("bills.cashier"),
+                      supervisor: t("bills.supervisor"),
+                      servedBy: t("bills.servedBy"),
+                      busy: t("bills.tableBusy"),
+                    }}
+                  />
+                  <div className="edit-bill-items">{t("common.items")}</div>
                   {order.items.map((i) => (
                     <div key={i.id} className="row" style={{ justifyContent: "space-between", marginBottom: "0.5rem" }}>
                       <span>
