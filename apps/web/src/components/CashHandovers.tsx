@@ -3,6 +3,9 @@ import { api, money } from "../api";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
 import { useSocketEvent } from "../socket";
+import { Pagination, paginate } from "./Pagination";
+
+const PAGE_SIZE = 15;
 
 export type PaymentRow = {
   id: string;
@@ -30,6 +33,7 @@ export function CashHandovers() {
   const toast = useToast();
   const t = useT();
   const [rows, setRows] = useState<PaymentRow[]>([]);
+  const [page, setPage] = useState(1);
   const [busy, setBusy] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -57,6 +61,7 @@ export function CashHandovers() {
 
   if (!rows.length) return null;
   const total = rows.reduce((s, p) => s + p.amount, 0);
+  const pageRows = paginate(rows, page, PAGE_SIZE);
 
   return (
     <div className="panel panel-pad handover-panel">
@@ -75,7 +80,7 @@ export function CashHandovers() {
           </tr>
         </thead>
         <tbody>
-          {rows.map((p) => (
+          {pageRows.map((p) => (
             <tr key={p.id}>
               <td>{time(p.createdAt)}</td>
               <td>#{p.orderNo}</td>
@@ -96,6 +101,7 @@ export function CashHandovers() {
           ))}
         </tbody>
       </table>
+      <Pagination page={page} pageSize={PAGE_SIZE} total={rows.length} onChange={setPage} />
     </div>
   );
 }

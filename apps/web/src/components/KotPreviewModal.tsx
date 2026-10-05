@@ -17,6 +17,21 @@ export type KotTarget = {
 type KotPreview = {
   orderNo: number;
   round: number | null;
+  reprint?: boolean;
+  station?: string | null;
+  takenBy: string | null;
+  servedBy?: string | null;
+  time?: string;
+  notes?: string | null;
+  showOrderBy?: boolean;
+  paperWidth?: number;
+  items?: Array<{
+    name: string;
+    quantity: number;
+    sellUnit: string;
+    notes?: string | null;
+    round?: number;
+  }> | null;
   text: string;
   paperWidth?: number;
   logoUrl?: string | null;
@@ -58,6 +73,38 @@ export function KotPreviewModal({ target, onClose }: { target: KotTarget | null;
   const title = preview
     ? `${t("kot.title")} · #${preview.orderNo}${preview.round ? ` · ${t("kot.round", { n: preview.round })}` : ""}`
     : t("kot.title");
+
+  const order: BillOrder | null = preview
+    ? {
+        orderNo: preview.orderNo,
+        billNo: preview.billNo ?? preview.orderNo,
+        tableNo: preview.tableNo,
+        tableName: preview.tableName,
+        partitionName: preview.partitionName,
+        paymentStatus: "UNPAID",
+        total: 0,
+        tipAmount: 0,
+        paidAmount: 0,
+        createdAt: preview.time,
+        waiter: preview.takenBy,
+        orderedBy: preview.takenBy
+          ? { name: preview.takenBy.replace(/\s*\(.*\)$/, ""), roleName: preview.takenBy.match(/\(([^)]+)\)/)?.[1] || "" }
+          : null,
+        servedByName: preview.servedBy,
+        items: (preview.items ?? []).map((i) => ({
+          name: i.name,
+          quantity: i.quantity,
+          sellUnit: i.sellUnit,
+          ratePerUnit: 0,
+          amount: 0,
+          notes: i.notes,
+        })),
+      }
+    : null;
+
+  const paperWidth = (preview?.paperWidth === 58 || preview?.paperWidth === 72 || preview?.paperWidth === 112
+    ? preview.paperWidth
+    : 80) as 58 | 72 | 80 | 112;
 
   return (
     <Modal open={!!target} title={title} onClose={onClose}>

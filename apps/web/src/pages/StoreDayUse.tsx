@@ -4,6 +4,9 @@ import { useAuth } from "../auth";
 import { useI18n, useT, type MessageKey } from "../i18n";
 import { useToast } from "../toast";
 import { SearchField, matchesSearch } from "../components/SearchField";
+import { Pagination, paginate } from "../components/Pagination";
+
+const PAGE_SIZE = 15;
 
 type Row = {
   id: string;
@@ -69,6 +72,8 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [itemsPage, setItemsPage] = useState(1);
 
   function applySheet(data: Sheet) {
     setSheet(data);
@@ -115,6 +120,17 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
     if (!sheet) return [];
     return sheet.items.filter((i) => matchesSearch(q, i.name, i.category, i.unit));
   }, [sheet, q]);
+
+  useEffect(() => {
+    setHistoryPage(1);
+  }, [viewDate, sheet?.businessDate]);
+
+  useEffect(() => {
+    setItemsPage(1);
+  }, [q, viewDate, sheet?.businessDate]);
+
+  const pageHistory = paginate(history, historyPage, PAGE_SIZE);
+  const pageShown = paginate(shown, itemsPage, PAGE_SIZE);
 
   const preview = useMemo(() => {
     if (!sheet) return { used: 0, profit: 0 };
@@ -241,6 +257,7 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
           </div>
         </div>
         {history.length ? (
+          <>
           <table style={{ marginTop: "0.6rem" }}>
             <thead>
               <tr>
@@ -253,7 +270,7 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
               </tr>
             </thead>
             <tbody>
-              {history.map((h) => {
+              {pageHistory.map((h) => {
                 const active = (viewDate || sheet?.businessDate) === h.businessDate;
                 const todayRow = h.businessDate === sheet?.today;
                 return (
@@ -289,6 +306,13 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
               })}
             </tbody>
           </table>
+          <Pagination
+            page={historyPage}
+            pageSize={PAGE_SIZE}
+            total={history.length}
+            onChange={setHistoryPage}
+          />
+          </>
         ) : (
           <p className="muted" style={{ margin: "0.75rem 0 0" }}>
             {t("store.dayHistoryEmpty")}
@@ -373,7 +397,7 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
               </tr>
             </thead>
             <tbody>
-              {shown.map((i) => {
+              {pageShown.map((i) => {
                 const extraQty = Math.max(0, Number(extra[i.id]) || 0);
                 return (
                   <tr key={i.id}>
@@ -420,6 +444,7 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
             </tbody>
           </table>
         </div>
+        <Pagination page={itemsPage} pageSize={PAGE_SIZE} total={shown.length} onChange={setItemsPage} />
         {!shown.length && <div className="empty">{t("store.noItems")}</div>}
 
         {editable && (

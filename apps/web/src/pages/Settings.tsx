@@ -5,11 +5,38 @@ import { useAuth } from "../auth";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
 import { useConfirm } from "../components/ConfirmModal";
-import { ThermalPreview } from "../components/ThermalPreview";
+import { BillPreview, type BillOrder } from "../components/BillPreview";
+import { Pagination, paginate } from "../components/Pagination";
 import { useSocketEvent } from "../socket";
 import { serverOrigin } from "../server";
 import { applyAccent, THEME_PRESETS, useBrand } from "../brand";
 import { useT, type MessageKey } from "../i18n";
+
+const PAGE_SIZE = 15;
+
+const SAMPLE_BILL: BillOrder = {
+  orderNo: 206,
+  billNo: 206,
+  tableNo: "Roof Top · Table 4",
+  tableName: "Table 4",
+  partitionName: "Roof Top",
+  paymentStatus: "PAID",
+  total: 2785,
+  tipAmount: 0,
+  paidAmount: 2785,
+  createdAt: new Date().toISOString(),
+  cashier: "Cashier",
+  waiter: "Ali",
+  orderedBy: { name: "Ali", roleName: "Waiter" },
+  servedByName: "Hassan",
+  items: [
+    { name: "Beef Karahi Black Pepper (Full)", quantity: 0.75, sellUnit: "KG", ratePerUnit: 2500, amount: 1875 },
+    { name: "Quetta Sangat Special Kheer", quantity: 1, sellUnit: "PCS", ratePerUnit: 150, amount: 150 },
+    { name: "Per Head", quantity: 3, sellUnit: "PCS", ratePerUnit: 120, amount: 360 },
+    { name: "Gur Chaye", quantity: 3, sellUnit: "PCS", ratePerUnit: 100, amount: 300 },
+    { name: "Raita Glass Extra", quantity: 1, sellUnit: "PCS", ratePerUnit: 100, amount: 100 },
+  ],
+};
 
 type ServerInfo = {
   serverId: string;
@@ -778,6 +805,7 @@ function PrintersSection() {
   const t = useT();
   const ask = useConfirm();
   const [printers, setPrinters] = useState<Printer[]>([]);
+  const [page, setPage] = useState(1);
   const [system, setSystem] = useState<SystemPrinter[]>([]);
   const [edit, setEdit] = useState<(Omit<Printer, "id"> & { id?: string }) | null>(null);
 
@@ -859,6 +887,8 @@ function PrintersSection() {
     return t("settings.previewFile");
   }
 
+  const pageRows = paginate(printers, page, PAGE_SIZE);
+
   return (
     <div className="panel panel-pad settings-block">
       <div className="row" style={{ justifyContent: "space-between" }}>
@@ -890,7 +920,7 @@ function PrintersSection() {
           </tr>
         </thead>
         <tbody>
-          {printers.map((p) => (
+          {pageRows.map((p) => (
             <tr key={p.id}>
               <td>
                 {p.name}
@@ -940,6 +970,7 @@ function PrintersSection() {
         </tbody>
       </table>
       </div>
+      <Pagination page={page} pageSize={PAGE_SIZE} total={printers.length} onChange={setPage} />
 
       <Modal open={!!edit} title={edit?.id ? t("settings.editPrinter") : t("settings.addPrinterTitle")} onClose={() => setEdit(null)}>
         {edit && (
@@ -1063,6 +1094,7 @@ function JobsSection() {
   const toast = useToast();
   const t = useT();
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [page, setPage] = useState(1);
   const [preview, setPreview] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -1107,6 +1139,8 @@ function JobsSection() {
     return t("settings.testPrint");
   }
 
+  const pageRows = paginate(jobs, page, PAGE_SIZE);
+
   return (
     <div className="panel panel-pad settings-block">
       <div className="row" style={{ justifyContent: "space-between" }}>
@@ -1128,7 +1162,7 @@ function JobsSection() {
           </tr>
         </thead>
         <tbody>
-          {jobs.map((j) => (
+          {pageRows.map((j) => (
             <tr key={j.id}>
               <td className="tiny">{new Date(j.createdAt).toLocaleTimeString("en-PK")}</td>
               <td>{jobTypeLabel(j.type)}</td>
@@ -1164,6 +1198,7 @@ function JobsSection() {
         </tbody>
       </table>
       </div>
+      <Pagination page={page} pageSize={PAGE_SIZE} total={jobs.length} onChange={setPage} />
       <Modal open={preview != null} title={t("settings.printPreview")} onClose={() => setPreview(null)}>
         <div className="modal-scroll">
           <pre className="print-preview">{preview}</pre>
@@ -1330,6 +1365,7 @@ function BackupSection() {
   const ask = useConfirm();
   const [dir, setDir] = useState("");
   const [files, setFiles] = useState<Backup[]>([]);
+  const [page, setPage] = useState(1);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -1397,7 +1433,7 @@ function BackupSection() {
           </tr>
         </thead>
         <tbody>
-          {files.map((b) => (
+          {paginate(files, page, PAGE_SIZE).map((b) => (
             <tr key={b.file}>
               <td className="tiny">
                 {b.file}{" "}
@@ -1424,6 +1460,7 @@ function BackupSection() {
         </tbody>
       </table>
       </div>
+      <Pagination page={page} pageSize={PAGE_SIZE} total={files.length} onChange={setPage} />
     </div>
   );
 }

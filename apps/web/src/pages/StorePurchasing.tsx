@@ -4,6 +4,9 @@ import { Modal } from "../components/Modal";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
 import { DateField } from "../components/DateField";
+import { Pagination, paginate } from "../components/Pagination";
+
+const PAGE_SIZE = 15;
 
 export type PurchaseItem = {
   id: string;
@@ -139,6 +142,13 @@ function BuyView({
   const [billPreview, setBillPreview] = useState<string | null>(null);
   const [viewBillId, setViewBillId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [recentPage, setRecentPage] = useState(1);
+
+  useEffect(() => {
+    setRecentPage(1);
+  }, [recent]);
+
+  const pageRecent = paginate(recent, recentPage, PAGE_SIZE);
 
   useEffect(() => {
     if (!billFile) {
@@ -776,7 +786,7 @@ function BuyView({
                 </tr>
               </thead>
               <tbody>
-                {recent.map((b) => (
+                {pageRecent.map((b) => (
                   <tr key={b.id}>
                     <td>{b.purchasedOn}</td>
                     <td>{b.supplier}</td>
@@ -821,6 +831,7 @@ function BuyView({
                 ))}
               </tbody>
             </table>
+            <Pagination page={recentPage} pageSize={PAGE_SIZE} total={recent.length} onChange={setRecentPage} />
           </div>
         )}
       </div>
@@ -897,6 +908,16 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [ledgerPurchasesPage, setLedgerPurchasesPage] = useState(1);
+  const [ledgerPaymentsPage, setLedgerPaymentsPage] = useState(1);
+
+  useEffect(() => {
+    setLedgerPurchasesPage(1);
+    setLedgerPaymentsPage(1);
+  }, [ledger?.id]);
+
+  const pageLedgerPurchases = ledger ? paginate(ledger.purchases, ledgerPurchasesPage, PAGE_SIZE) : [];
+  const pageLedgerPayments = ledger ? paginate(ledger.payments, ledgerPaymentsPage, PAGE_SIZE) : [];
 
   function resetAddForm() {
     setName("");
@@ -1205,6 +1226,7 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
           <h4 style={{ marginBottom: "0.4rem" }}>{t("store.bills")}</h4>
           {!ledger.purchases.length && <div className="empty">{t("store.noBillsYet")}</div>}
           {ledger.purchases.length > 0 && (
+            <>
             <table>
               <thead>
                 <tr>
@@ -1219,7 +1241,7 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                 </tr>
               </thead>
               <tbody>
-                {ledger.purchases.map((p) => {
+                {pageLedgerPurchases.map((p) => {
                   const due = supplierBillTotal(p);
                   const status = billStatus(p.paidAmount, p.balance);
                   const open = openBillId === p.id;
@@ -1332,6 +1354,13 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                 })}
               </tbody>
             </table>
+            <Pagination
+              page={ledgerPurchasesPage}
+              pageSize={PAGE_SIZE}
+              total={ledger.purchases.length}
+              onChange={setLedgerPurchasesPage}
+            />
+            </>
           )}
 
           <h4 style={{ marginTop: "1rem", marginBottom: "0.35rem" }}>{t("store.payments")}</h4>
@@ -1340,6 +1369,7 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
           </p>
           {!ledger.payments.length && <div className="tiny muted">—</div>}
           {ledger.payments.length > 0 && (
+            <>
             <table>
               <thead>
                 <tr>
@@ -1349,7 +1379,7 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                 </tr>
               </thead>
               <tbody>
-                {ledger.payments.map((p) => (
+                {pageLedgerPayments.map((p) => (
                   <tr key={p.id}>
                     <td>{p.paidOn}</td>
                     <td>{p.note || "—"}</td>
@@ -1360,6 +1390,13 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                 ))}
               </tbody>
             </table>
+            <Pagination
+              page={ledgerPaymentsPage}
+              pageSize={PAGE_SIZE}
+              total={ledger.payments.length}
+              onChange={setLedgerPaymentsPage}
+            />
+            </>
           )}
         </div>
       )}
@@ -1467,6 +1504,16 @@ function DailyView() {
   const [extras, setExtras] = useState<DailyExtra[]>([]);
   const [total, setTotal] = useState(0);
   const [extraTotal, setExtraTotal] = useState(0);
+  const [linesPage, setLinesPage] = useState(1);
+  const [extrasPage, setExtrasPage] = useState(1);
+
+  useEffect(() => {
+    setLinesPage(1);
+    setExtrasPage(1);
+  }, [date]);
+
+  const pageLines = paginate(lines, linesPage, PAGE_SIZE);
+  const pageExtras = paginate(extras, extrasPage, PAGE_SIZE);
 
   async function load(d: string) {
     const [report, days] = await Promise.all([
@@ -1505,6 +1552,7 @@ function DailyView() {
       <div className="panel panel-pad">
         {!lines.length && <div className="empty">{t("store.noPurchases")}</div>}
         {lines.length > 0 && (
+          <>
           <table>
             <thead>
               <tr>
@@ -1517,7 +1565,7 @@ function DailyView() {
               </tr>
             </thead>
             <tbody>
-              {lines.map((l) => (
+              {pageLines.map((l) => (
                 <tr key={l.id}>
                   <td>{l.supplier}</td>
                   <td>{l.item}</td>
@@ -1535,6 +1583,8 @@ function DailyView() {
               ))}
             </tbody>
           </table>
+          <Pagination page={linesPage} pageSize={PAGE_SIZE} total={lines.length} onChange={setLinesPage} />
+          </>
         )}
         {extras.length > 0 && (
           <>
@@ -1549,7 +1599,7 @@ function DailyView() {
                 </tr>
               </thead>
               <tbody>
-                {extras.map((e) => (
+                {pageExtras.map((e) => (
                   <tr key={e.purchaseId}>
                     <td>{e.supplier}</td>
                     <td>{e.note || "—"}</td>
@@ -1559,6 +1609,7 @@ function DailyView() {
                 ))}
               </tbody>
             </table>
+            <Pagination page={extrasPage} pageSize={PAGE_SIZE} total={extras.length} onChange={setExtrasPage} />
           </>
         )}
       </div>

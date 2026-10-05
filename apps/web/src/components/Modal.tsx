@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useT } from "../i18n";
 import { acquireScrollLock, releaseScrollLock } from "../scroll-lock";
 
@@ -41,7 +42,8 @@ export function Modal({
   }, [open]);
 
   if (!open) return null;
-  return (
+
+  return createPortal(
     <div
       className="modal-backdrop"
       onClick={() => {
@@ -73,6 +75,7 @@ export function Modal({
         </div>
         <div className="modal-body">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

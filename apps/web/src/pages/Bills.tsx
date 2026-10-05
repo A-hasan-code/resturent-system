@@ -414,8 +414,9 @@ export function BillsPage() {
             </thead>
             <tbody>
               {pageRows.map((o) => {
-                const preview = o.items.slice(0, ITEMS_PREVIEW);
-                const extra = o.items.length - preview.length;
+                const itemsText = o.items
+                  .map((i) => `${i.quantity} ${unitLabel(i.sellUnit)} ${i.name}`)
+                  .join(", ");
                 return (
                 <tr
                   key={o.id}
@@ -444,47 +445,8 @@ export function BillsPage() {
                     )}
                   </td>
                   <td className="tiny">{o.assignedCashier?.name || "—"}</td>
-                  <td className="bill-items-cell">
-                    {!o.items.length ? (
-                      "—"
-                    ) : (
-                      <div className="bill-items">
-                        {preview.map((i) => (
-                          <div key={i.id ?? `${i.name}-${i.quantity}`} className="bill-item-line">
-                            <span className="bill-item-qty">
-                              {i.sellUnit === "PCS"
-                                ? `${i.quantity}×`
-                                : `${i.quantity} ${unitLabel(i.sellUnit)}`}
-                            </span>
-                            <span className="bill-item-name">{i.name}</span>
-                          </div>
-                        ))}
-                        {extra > 0 && (
-                          <div className="bill-items-more">
-                            <span className="bill-items-more-trigger" tabIndex={0}>
-                              {t("bills.moreItems", { n: extra })}
-                            </span>
-                            <div className="bill-items-tip" role="tooltip">
-                              <div className="bill-items-tip-head">
-                                {t("common.items")} · {o.items.length}
-                              </div>
-                              <ul className="bill-items-tip-list">
-                                {o.items.map((i) => (
-                                  <li key={i.id ?? `${i.name}-${i.quantity}`}>
-                                    <span className="bill-item-qty">
-                                      {i.sellUnit === "PCS"
-                                        ? `${i.quantity}×`
-                                        : `${i.quantity} ${unitLabel(i.sellUnit)}`}
-                                    </span>
-                                    <span className="bill-item-name">{i.name}</span>
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
+                  <td className="cell-ellipsis" title={itemsText}>
+                    {itemsText}
                   </td>
                   <td>
                     <span

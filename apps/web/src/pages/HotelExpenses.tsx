@@ -327,6 +327,7 @@ export function HotelExpensesPage() {
   }
 
   const s = data?.summary;
+  const customCategories = savedCategories.filter((c) => !c.id.startsWith("sys-"));
 
   return (
     <div>
@@ -336,11 +337,11 @@ export function HotelExpensesPage() {
           <p>{t("expense.hint")}</p>
         </div>
         <div className="row page-head-actions">
-          <button type="button" className="btn ghost sm" onClick={exportSheet}>
+          <button type="button" className="btn ghost" onClick={exportSheet}>
             {t("common.excel")}
           </button>
           {canManage && (
-            <button type="button" className="btn ghost sm" onClick={() => setCatsOpen(true)}>
+            <button type="button" className="btn ghost" onClick={() => setCatsOpen(true)}>
               {t("expense.manageCategories")}
             </button>
           )}
@@ -657,64 +658,47 @@ export function HotelExpensesPage() {
             setNewCatName("");
           }
         }}
-        size="md"
+        size="sm"
       >
-        <p className="muted tiny" style={{ marginTop: 0 }}>
-          {t("expense.manageCategoriesHint")}
-        </p>
-        {canManage && (
-          <form className="filter-bar" onSubmit={addCategory}>
-            <div className="field">
-              <label>{t("expense.newCategory")}</label>
-              <input
-                value={newCatName}
-                onChange={(e) => setNewCatName(e.target.value)}
-                placeholder={t("expense.categoryPh")}
-              />
-            </div>
-            <button className="btn sm" type="submit" disabled={busy || !newCatName.trim()}>
-              {t("expense.saveCategory")}
-            </button>
-          </form>
-        )}
-        <div className="modal-scroll" style={{ marginTop: "0.85rem" }}>
-          {!savedCategories.filter((c) => !c.id.startsWith("sys-")).length && (
-            <div className="empty">{t("expense.noCategories")}</div>
+        <div className="expense-cats">
+          <p className="expense-cats-hint muted tiny">{t("expense.manageCategoriesHint")}</p>
+          {canManage && (
+            <form className="expense-cats-add" onSubmit={addCategory}>
+              <div className="field">
+                <label htmlFor="expense-new-cat">{t("expense.newCategory")}</label>
+                <input
+                  id="expense-new-cat"
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                  placeholder={t("expense.categoryPh")}
+                  autoComplete="off"
+                />
+              </div>
+              <button className="btn sm" type="submit" disabled={busy || !newCatName.trim()}>
+                {t("expense.saveCategory")}
+              </button>
+            </form>
           )}
-          {savedCategories.filter((c) => !c.id.startsWith("sys-")).length > 0 && (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>{t("expense.category")}</th>
-                    {canManage && <th />}
-                  </tr>
-                </thead>
-                <tbody>
-                  {savedCategories
-                    .filter((c) => !c.id.startsWith("sys-"))
-                    .map((c) => (
-                      <tr key={c.id}>
-                        <td>
-                          <strong>{c.name}</strong>
-                        </td>
-                        {canManage && (
-                          <td>
-                            <button
-                              type="button"
-                              className="btn ghost sm"
-                              disabled={busy}
-                              onClick={() => void removeCategory(c)}
-                            >
-                              {t("common.remove")}
-                            </button>
-                          </td>
-                        )}
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
-            </div>
+          {!customCategories.length ? (
+            <div className="expense-cats-empty">{t("expense.noCategories")}</div>
+          ) : (
+            <ul className="expense-cats-list">
+              {customCategories.map((c) => (
+                <li key={c.id} className="expense-cats-item">
+                  <strong>{c.name}</strong>
+                  {canManage && (
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      disabled={busy}
+                      onClick={() => void removeCategory(c)}
+                    >
+                      {t("common.remove")}
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       </Modal>

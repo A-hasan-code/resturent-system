@@ -488,25 +488,23 @@ function CustomerForm({
   const t = useT();
   return (
     <div className="credit-form">
-      <div className="grid-2">
-        <div className="field">
-          <label htmlFor="credit-name">{t("credit.name")}</label>
-          <input
-            id="credit-name"
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
-            required
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="credit-phone">{t("credit.phone")}</label>
-          <input
-            id="credit-phone"
-            value={form.phone}
-            onChange={(e) => setForm({ ...form, phone: e.target.value })}
-            required
-          />
-        </div>
+      <div className="field">
+        <label htmlFor="credit-name">{t("credit.name")}</label>
+        <input
+          id="credit-name"
+          value={form.name}
+          onChange={(e) => setForm({ ...form, name: e.target.value })}
+          required
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="credit-phone">{t("credit.phone")}</label>
+        <input
+          id="credit-phone"
+          value={form.phone}
+          onChange={(e) => setForm({ ...form, phone: e.target.value })}
+          required
+        />
       </div>
       <div className="field">
         <label htmlFor="credit-address">{t("credit.address")}</label>

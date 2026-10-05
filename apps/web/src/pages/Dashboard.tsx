@@ -1,4 +1,7 @@
 import { useEffect, useState } from "react";
+import { Pagination, paginate } from "../components/Pagination";
+
+const PAGE_SIZE = 15;
 import { Link } from "react-router-dom";
 import { api, money, unitLabel } from "../api";
 import { useToast } from "../toast";
@@ -581,6 +584,14 @@ function StoreDash({
 }) {
   const t = useT();
   const usage = data?.recentUsage ?? [];
+  const [usagePage, setUsagePage] = useState(1);
+
+  useEffect(() => {
+    setUsagePage(1);
+  }, [usage.length]);
+
+  const pageUsage = paginate(usage, usagePage, PAGE_SIZE);
+
   return (
     <>
       {(data?.lowStockCount ?? 0) > 0 ? (
@@ -620,6 +631,7 @@ function StoreDash({
         {!usage.length ? (
           <div className="empty">{t("dash.emptyUsage")}</div>
         ) : (
+          <>
           <table>
             <thead>
               <tr>
@@ -630,7 +642,7 @@ function StoreDash({
               </tr>
             </thead>
             <tbody>
-              {usage.map((u) => (
+              {pageUsage.map((u) => (
                 <tr key={u.id}>
                   <td className="tiny">
                     {new Date(u.createdAt).toLocaleString("en-PK")}
@@ -647,6 +659,8 @@ function StoreDash({
               ))}
             </tbody>
           </table>
+          <Pagination page={usagePage} pageSize={PAGE_SIZE} total={usage.length} onChange={setUsagePage} />
+          </>
         )}
       </div>
 
@@ -783,6 +797,20 @@ function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: 
   const t = useT();
   const tips = data?.tipBoard ?? [];
   const staff = data?.staffOrdersToday ?? [];
+  const [tipsPage, setTipsPage] = useState(1);
+  const [staffPage, setStaffPage] = useState(1);
+
+  useEffect(() => {
+    setTipsPage(1);
+  }, [tips.length]);
+
+  useEffect(() => {
+    setStaffPage(1);
+  }, [staff.length]);
+
+  const pageTips = paginate(tips, tipsPage, PAGE_SIZE);
+  const pageStaff = paginate(staff, staffPage, PAGE_SIZE);
+
   if (!tips.length && !staff.length) return null;
   return (
     <div className="dash-grid" style={{ marginBottom: "1rem" }}>
@@ -793,6 +821,7 @@ function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: 
         {!tips.length ? (
           <div className="empty">{t("dash.emptyTips")}</div>
         ) : (
+          <>
           <table>
             <thead>
               <tr>
@@ -802,7 +831,7 @@ function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: 
               </tr>
             </thead>
             <tbody>
-              {tips.map((r) => (
+              {pageTips.map((r) => (
                 <tr key={r.userId}>
                   <td>{r.name}</td>
                   <td>{r.roleName || r.roleCode}</td>
@@ -811,6 +840,8 @@ function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: 
               ))}
             </tbody>
           </table>
+          <Pagination page={tipsPage} pageSize={PAGE_SIZE} total={tips.length} onChange={setTipsPage} />
+          </>
         )}
       </div>
       {!personal && (
@@ -819,6 +850,7 @@ function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: 
           {!staff.length ? (
             <div className="empty">{t("dash.emptyStaffOrders")}</div>
           ) : (
+            <>
             <table>
               <thead>
                 <tr>
@@ -829,7 +861,7 @@ function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: 
                 </tr>
               </thead>
               <tbody>
-                {staff.map((r) => (
+                {pageStaff.map((r) => (
                   <tr key={r.userId}>
                     <td>{r.name}</td>
                     <td>{r.roleName || r.roleCode}</td>
@@ -839,6 +871,8 @@ function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: 
                 ))}
               </tbody>
             </table>
+            <Pagination page={staffPage} pageSize={PAGE_SIZE} total={staff.length} onChange={setStaffPage} />
+            </>
           )}
         </div>
       )}
