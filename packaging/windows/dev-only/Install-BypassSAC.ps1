@@ -70,7 +70,7 @@ if (Test-Path $info) {
   Write-Host "---- server-info ----"
   Get-Content $info
 }
-$desk = Join-Path $AppDir "desktop\Hotel System.exe"
+$desk = Join-Path $AppDir "desktop\PixalBotics Restaurant.exe"
 if (Test-Path $desk) {
   Write-Host "Launching desktop app..."
   Start-Process $desk

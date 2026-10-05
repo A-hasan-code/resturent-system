@@ -9,6 +9,7 @@ import { useSocketEvent } from "./socket";
 import { alertBeep } from "./printing";
 import { money } from "./api";
 import { useBrand } from "./brand";
+import { acquireScrollLock, releaseScrollLock } from "./scroll-lock";
 
 type Tab = { to: string; labelKey: MessageKey; perms: string[]; hideFor?: string[] };
 
@@ -109,6 +110,7 @@ export function Shell() {
   const { brand, logoSrc } = useBrand();
   const t = useT();
   const [account, setAccount] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
   const role = user?.roleCode ?? "";
   const groups = GROUPS.map((g) => ({
     ...g,
@@ -119,13 +121,74 @@ export function Shell() {
   const roleKey = ROLE_KEY[role];
 
   useEffect(() => {
-    document.querySelector(".side-link.active")?.scrollIntoView({ block: "nearest" });
+    setNavOpen(false);
   }, [pathname]);
 
+  useEffect(() => {
+    if (!navOpen) return;
+    document.querySelector(".side-link.active")?.scrollIntoView({ block: "nearest" });
+  }, [pathname, navOpen]);
+
+  useEffect(() => {
+    if (account) setNavOpen(false);
+  }, [account]);
+
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setNavOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navOpen]);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 981px)");
+    const onChange = () => {
+      if (mq.matches) setNavOpen(false);
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    if (!navOpen) return;
+    acquireScrollLock();
+    return () => releaseScrollLock();
+  }, [navOpen]);
+
   return (
-    <div className="shell">
+    <div className={`shell${navOpen ? " nav-open" : ""}`}>
       <LiveAlerts />
-      <aside className="sidebar">
+      <header className="mobile-topbar">
+        <button
+          type="button"
+          className="mobile-menu-btn"
+          aria-label={navOpen ? t("shell.closeMenu") : t("shell.openMenu")}
+          aria-expanded={navOpen}
+          aria-controls="app-sidebar"
+          onClick={() => setNavOpen((v) => !v)}
+        >
+          <span className="mobile-menu-icon" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+        </button>
+        <div className="mobile-topbar-brand">
+          {logoSrc ? <img className="brand-logo" src={logoSrc} alt="" /> : null}
+          <strong>{brand.name || t("brand.name")}</strong>
+        </div>
+        <LanguageSwitcher compact />
+      </header>
+      <button
+        type="button"
+        className="nav-backdrop"
+        aria-label={t("shell.closeMenu")}
+        tabIndex={navOpen ? 0 : -1}
+        onClick={() => setNavOpen(false)}
+      />
+      <aside id="app-sidebar" className="sidebar">
         <div className="brand-mark">
           <div className="brand-mark-row">
             {logoSrc ? <img className="brand-logo" src={logoSrc} alt="" /> : null}

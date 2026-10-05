@@ -36,20 +36,24 @@ export type AuditReport = {
     orders: number;
     cancelled: number;
     billsPaid: number;
-    /** Food sale on paid bills (tip excluded). */
+    /** Food sale on paid bills in the selected range (tip excluded). */
     salesTotal: number;
+    /** Paid food sales for the current business day (independent of filter range). */
+    salesToday: number;
+    /** Paid food sales for the current calendar month so far. */
+    salesMonth: number;
+    /** Paid food sales for the current calendar year so far. */
+    salesYear: number;
     tipsTotal: number;
     paymentsIn: number;
     paymentCount: number;
     purchasesOut: number;
     purchaseCount: number;
     foodCost: number;
-    /** Bill deductions plus the day's saved extra usage (flour, salad, wastage). */
-    stockUsed: number;
-    /** Food sales minus stock used. */
-    profit: number;
     unpaidAmount: number;
     unpaidCount: number;
+    stockUsed: number;
+    profit: number;
   };
   days: AuditDay[];
   byStaff: { name: string; role: string; amount: number; count: number }[];
@@ -151,19 +155,56 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
       ? { contains: staffFilter, mode: "insensitive" as const }
       : undefined;
 
-    const [orders, payments, purchases, saleMoves, closes, firstSaleDate] = await Promise.all([
-      this.prisma.order.findMany({
-        where: {
-          createdAt: { gte: start, lt: end },
-          ...(nameMatch
-            ? {
+    const now = new Date();
+    const bizToday = businessDateOf(now, day.h, day.m);
+    const [y, mo] = bizToday.split("-").map(Number);
+    const monthFrom = `${String(y).padStart(4, "0")}-${String(mo).padStart(2, "0")}-01`;
+    const yearFrom = `${y}-01-01`;
+    const todayWin = businessWindow(bizToday, day.h, day.m);
+    const monthWin = {
+      from: businessWindow(monthFrom, day.h, day.m).from,
+      to: todayWin.to,
+    };
+    const yearWin = {
+      from: businessWindow(yearFrom, day.h, day.m).from,
+      to: todayWin.to,
+    };
+
+    const staffOrderFilter = nameMatch
+      ? {
+          OR: [
+            { waiter: { name: nameMatch } },
+            { cashier: { name: nameMatch } },
+            { servedByName: nameMatch },
+          ],
+        }
+      : {};
+
+    const paidSalesWhere = (fromAt: Date, toAt: Date) => ({
+      createdAt: { gte: fromAt, lt: toAt },
+      status: { not: "CANCELLED" as const },
+      AND: [
+        { OR: [{ paymentStatus: "PAID" as const }, { creditCustomerId: { not: null } }] },
+        ...(nameMatch
+          ? [
+              {
                 OR: [
                   { waiter: { name: nameMatch } },
                   { cashier: { name: nameMatch } },
                   { servedByName: nameMatch },
                 ],
-              }
-            : {}),
+              },
+            ]
+          : []),
+      ],
+    });
+
+    const [orders, payments, purchases, firstSaleDate, salesTodayAgg, salesMonthAgg, salesYearAgg] =
+      await Promise.all([
+      this.prisma.order.findMany({
+        where: {
+          createdAt: { gte: start, lt: end },
+          ...staffOrderFilter,
         },
         select: {
           orderNo: true,
@@ -171,6 +212,7 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
           status: true,
           paymentStatus: true,
           total: true,
+          discountAmount: true,
           tipAmount: true,
           paidAmount: true,
           costTotal: true,
@@ -211,15 +253,19 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         orderBy: { createdAt: "asc" },
         take: 8000,
       }),
-      this.prisma.stockMovement.findMany({
-        where: { type: "SALE", createdAt: { gte: start, lt: end } },
-        select: { quantity: true, ratePerUnit: true, createdAt: true },
-      }),
-      this.prisma.dayStockClose.findMany({
-        where: { businessDate: { gte: from, lte: to } },
-        include: { lines: { select: { extraQty: true, ratePerUnit: true } } },
-      }),
       this.firstSaleDate(),
+      this.prisma.order.aggregate({
+        where: paidSalesWhere(todayWin.from, todayWin.to),
+        _sum: { total: true },
+      }),
+      this.prisma.order.aggregate({
+        where: paidSalesWhere(monthWin.from, monthWin.to),
+        _sum: { total: true },
+      }),
+      this.prisma.order.aggregate({
+        where: paidSalesWhere(yearWin.from, yearWin.to),
+        _sum: { total: true },
+      }),
     ]);
 
     const days = new Map<string, AuditDay>();
@@ -258,7 +304,9 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         continue;
       }
       if (day) day.orders += 1;
-      const total = toNumber(o.total);
+      const gross = toNumber(o.total);
+      const discount = toNumber(o.discountAmount);
+      const total = Math.max(0, gross - discount);
       const tip = toNumber(o.tipAmount);
       const takerName = o.waiter?.name ?? "—";
       const takerRole = o.waiter?.role.name ?? "";
@@ -267,7 +315,8 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
 
       if (o.paymentStatus === "PAID" || o.creditCustomerId) {
         billsPaid += 1;
-        foodCost += toNumber(o.costTotal);
+        const cost = toNumber(o.costTotal);
+        foodCost += cost;
         salesTotal += total;
         tipsTotal += tip;
         taker.sales += total;
@@ -276,6 +325,8 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
           day.billsPaid += 1;
           day.sales += total;
           day.tips += tip;
+          day.stockUsed += cost;
+          day.profit = Math.round((day.sales - day.stockUsed) * 100) / 100;
         }
       } else {
         unpaidCount += 1;
@@ -310,25 +361,6 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
       collectors.set(key, s);
     }
 
-    const autoByDay = new Map<string, number>();
-    for (const m of saleMoves) {
-      const key = businessDateOf(m.createdAt, day.h, day.m);
-      const value = Math.abs(toNumber(m.quantity)) * toNumber(m.ratePerUnit);
-      autoByDay.set(key, (autoByDay.get(key) ?? 0) + value);
-    }
-    const extraByDay = new Map<string, number>();
-    for (const c of closes) {
-      const extra = c.lines.reduce((s, l) => s + toNumber(l.extraQty) * toNumber(l.ratePerUnit), 0);
-      extraByDay.set(c.businessDate, extra);
-    }
-    let stockUsed = 0;
-    for (const row of days.values()) {
-      row.stockUsed = Math.round(((autoByDay.get(row.date) ?? 0) + (extraByDay.get(row.date) ?? 0)) * 100) / 100;
-      row.profit = Math.round((row.sales - row.stockUsed) * 100) / 100;
-      stockUsed += row.stockUsed;
-    }
-    stockUsed = Math.round(stockUsed * 100) / 100;
-
     let purchasesOut = 0;
     const purchaseRows = purchases.map((m) => {
       const amount = Math.abs(toNumber(m.quantity)) * toNumber(m.ratePerUnit);
@@ -355,14 +387,17 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         cancelled,
         billsPaid,
         salesTotal,
+        salesToday: Math.round(toNumber(salesTodayAgg._sum.total ?? 0) * 100) / 100,
+        salesMonth: Math.round(toNumber(salesMonthAgg._sum.total ?? 0) * 100) / 100,
+        salesYear: Math.round(toNumber(salesYearAgg._sum.total ?? 0) * 100) / 100,
         tipsTotal,
         paymentsIn,
         paymentCount: payments.length,
         purchasesOut,
         purchaseCount: purchases.length,
         foodCost,
-        stockUsed,
-        profit: Math.round((salesTotal - stockUsed) * 100) / 100,
+        stockUsed: foodCost,
+        profit: Math.round((salesTotal - foodCost) * 100) / 100,
         unpaidAmount,
         unpaidCount,
       },

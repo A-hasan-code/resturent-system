@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MinLength } from "class-validator";
+import { IsNumber, IsOptional, IsString, Min, MinLength } from "class-validator";
 
 export class CreditCustomerDto {
   @IsString()
@@ -16,4 +16,11 @@ export class CreditCustomerDto {
   @IsOptional()
   @IsString()
   cnic?: string;
+}
+
+/** Cash collected against a credit account. Applied oldest invoice first. */
+export class SettleCreditDto {
+  @IsNumber()
+  @Min(0.01)
+  amount!: number;
 }

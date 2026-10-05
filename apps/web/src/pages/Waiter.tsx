@@ -1101,16 +1101,19 @@ export function WaiterPage() {
                         </div>
                       )}
                       {creditHits.length > 0 && (
-                        <ul className="credit-suggest">
+                        <div className="suggest-list">
                           {creditHits.map((hit) => (
-                            <li key={hit.id}>
-                              <button type="button" onClick={() => setCreditPick(hit)}>
-                                <strong>{hit.name}</strong>
-                                <span className="tiny muted">{hit.phone}</span>
-                              </button>
-                            </li>
+                            <button
+                              key={hit.id}
+                              type="button"
+                              className="suggest-item"
+                              onClick={() => setCreditPick(hit)}
+                            >
+                              <strong>{hit.name}</strong>
+                              <span className="tiny muted">{hit.phone}</span>
+                            </button>
                           ))}
-                        </ul>
+                        </div>
                       )}
                     </>
                   )}
@@ -1171,9 +1174,12 @@ export function WaiterPage() {
               )}
             </div>
           )}
-          {order && order.paymentStatus !== "PAID" && (can("print.bill") || can("order.pay")) && (
+          {order &&
+            order.paymentStatus !== "PAID" &&
+            ((isCashierRole && can("print.bill")) || can("order.pay")) && (
             <div className="row" style={{ marginTop: "0.6rem" }}>
-              {can("print.bill") && showTakeawayCashierBillActions && (
+              {/* Bill thermal print = cashier counter only; supervisor uses Request bill. */}
+              {isCashierRole && can("print.bill") && showTakeawayCashierBillActions && (
                 <button type="button" className="btn ghost" style={{ flex: 1 }} onClick={() => void printBillNow()}>
                   {t("waiter.printBill")}
                 </button>

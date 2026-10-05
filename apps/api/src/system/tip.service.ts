@@ -8,10 +8,19 @@ import { toNumber } from "../common/units";
 export type TipSplit = "ORDER_TAKER" | "SERVER" | "SPLIT_50" | "POOL";
 
 export type PrintBillOpts = {
+  showLogo: boolean;
+  showName: boolean;
+  showTagline: boolean;
+  showAddress: boolean;
+  showPhone: boolean;
+  title: string;
   showOrderBy: boolean;
   showServedBy: boolean;
   showCashier: boolean;
   showTip: boolean;
+  showPaidStamp: boolean;
+  paidStampText: string;
+  paidStampBig: boolean;
   footer: string;
 };
 
@@ -39,11 +48,20 @@ export class TipService {
   async printBillOpts(): Promise<PrintBillOpts> {
     const s = await this.settings.getMany("print.bill.");
     return {
+      showLogo: s["print.bill.showLogo"] !== "0",
+      showName: s["print.bill.showName"] !== "0",
+      showTagline: s["print.bill.showTagline"] !== "0",
+      showAddress: s["print.bill.showAddress"] !== "0",
+      showPhone: s["print.bill.showPhone"] !== "0",
+      title: (s["print.bill.title"] || "Customer Bill").trim() || "Customer Bill",
       showOrderBy: s["print.bill.showOrderBy"] !== "0",
       showServedBy: s["print.bill.showServedBy"] !== "0",
       showCashier: s["print.bill.showCashier"] !== "0",
       showTip: s["print.bill.showTip"] !== "0",
-      footer: (s["print.bill.footer"] || "Thank you - Come again!").trim(),
+      showPaidStamp: s["print.bill.showPaidStamp"] !== "0",
+      paidStampText: (s["print.bill.paidStampText"] || "*** PAID ***").trim() || "*** PAID ***",
+      paidStampBig: s["print.bill.paidStampBig"] !== "0",
+      footer: (s["print.bill.footer"] || "Thanks for your Visit..").trim(),
     };
   }
 

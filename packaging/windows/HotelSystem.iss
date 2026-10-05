@@ -11,7 +11,7 @@
 #ifndef WithDesktop
   #define WithDesktop "1"
 #endif
-#define DesktopExe "Hotel System.exe"
+#define DesktopExe "PixalBotics Restaurant.exe"
 
 [Setup]
 AppId={{8B1E2B0C-5A3F-4C61-9E0B-6F2D7A4C9E11}
@@ -37,13 +37,16 @@ CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
 ; SignTool name "HotelSign" is defined at compile time by Build-Release.ps1:
-;   ISCC /SHotelSign="signtool.exe sign ... $f" ...
-; When signing is configured, both the outer Setup.exe and the extracted
-; uninstaller / inner stub are Authenticode-signed (required for Smart App Control).
+;   ISCC /DHotelDoSign=1 /SHotelSign=wrapper.cmd $f ...
+; Inno Setup 6.7+ rejects a no-op SignTool, so unsigned builds omit SignTool entirely.
+#ifdef HotelDoSign
 SignedUninstaller=yes
 SignTool=HotelSign $f
 SignToolRetryCount=3
 SignToolRetryDelay=2000
+#else
+SignedUninstaller=no
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

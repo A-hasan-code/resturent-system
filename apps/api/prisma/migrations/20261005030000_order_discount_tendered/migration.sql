@@ -1,0 +1,6 @@
+-- AlterTable
+ALTER TABLE "Order" ADD COLUMN "discountAmount" DECIMAL(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE "Order" ADD COLUMN "tenderedAmount" DECIMAL(14,2) NOT NULL DEFAULT 0;
+
+-- AlterTable
+ALTER TABLE "Payment" ADD COLUMN "tenderedAmount" DECIMAL(14,2) NOT NULL DEFAULT 0;

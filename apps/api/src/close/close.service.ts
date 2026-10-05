@@ -20,6 +20,8 @@ type PayRow = {
   orderNo: number;
   tableNo: string | null;
   orderTotal: number;
+  isCredit: boolean;
+  creditCustomerName: string | null;
   collectedBy: { id: string; name: string; roleCode: string };
   handedTo: { id: string; name: string; roleCode: string } | null;
   drawerUserId: string;
@@ -74,7 +76,16 @@ export class CloseService {
       this.prisma.payment.findMany({
         where: { createdAt: { gte: from, lt: to } },
         include: {
-          order: { select: { id: true, orderNo: true, tableNo: true, total: true } },
+          order: {
+            select: {
+              id: true,
+              orderNo: true,
+              tableNo: true,
+              total: true,
+              creditCustomerId: true,
+              creditCustomer: { select: { name: true } },
+            },
+          },
           collectedBy: { select: { id: true, name: true, role: { select: { code: true } } } },
           handedTo: { select: { id: true, name: true, role: { select: { code: true } } } },
         },
@@ -89,6 +100,7 @@ export class CloseService {
           },
           cashier: { select: { name: true } },
           assignedCashier: { select: { name: true } },
+          creditCustomer: { select: { name: true } },
         },
         orderBy: { createdAt: "asc" },
       }),
@@ -109,6 +121,7 @@ export class CloseService {
     const payRows: PayRow[] = payments.map((p) => {
       const drawer = p.handedTo ?? p.collectedBy;
       const drawerRole = drawer.role.code;
+      const isCredit = !!p.order.creditCustomerId;
       return {
         id: p.id,
         amount: toNumber(p.amount),
@@ -119,6 +132,8 @@ export class CloseService {
         orderNo: p.order.orderNo,
         tableNo: p.order.tableNo,
         orderTotal: toNumber(p.order.total),
+        isCredit,
+        creditCustomerName: p.order.creditCustomer?.name ?? null,
         collectedBy: {
           id: p.collectedBy.id,
           name: p.collectedBy.name,
@@ -156,6 +171,7 @@ export class CloseService {
     const pendingBills = pendingOrders.map((o) => {
       const total = toNumber(o.total);
       const paid = toNumber(o.paidAmount);
+      const isCredit = !!o.creditCustomerId;
       return {
         orderNo: o.orderNo,
         tableNo: o.tableNo,
@@ -163,10 +179,18 @@ export class CloseService {
         paidAmount: paid,
         balance: money2(total - paid),
         paymentStatus: o.paymentStatus,
+        isCredit,
+        creditCustomerName: o.creditCustomer?.name ?? null,
         cashier: o.cashier?.name || o.assignedCashier?.name || null,
       };
     });
 
+    const creditPendingBills = pendingBills.filter((b) => b.isCredit);
+    const creditUnpaidAmount = money2(creditPendingBills.reduce((s, b) => s + b.balance, 0));
+    const creditUnpaidCount = creditPendingBills.length;
+    const creditPayments = payRows.filter((p) => p.isCredit);
+    const creditPaidAmount = money2(creditPayments.reduce((s, p) => s + p.amount, 0));
+    const creditPaidCount = creditPayments.length;
     const pendingAmount = money2(pendingBills.reduce((s, b) => s + b.balance, 0));
     const paidSalesTotal = money2(paidOrders.reduce((s, o) => s + toNumber(o.total), 0));
 
@@ -208,6 +232,8 @@ export class CloseService {
             tableNo: sample.tableNo,
             orderTotal: sample.orderTotal,
             paidOnCounter,
+            isCredit: sample.isCredit,
+            creditCustomerName: sample.creditCustomerName,
           };
         }),
       };
@@ -240,6 +266,8 @@ export class CloseService {
         tableNo: o.tableNo,
         total: toNumber(o.total),
         tipAmount: toNumber(o.tipAmount),
+        isCredit: !!o.creditCustomerId,
+        creditCustomerName: o.creditCustomer?.name ?? null,
         cashier: o.cashier?.name || o.assignedCashier?.name || null,
         createdAt: o.createdAt.toISOString(),
       })),
@@ -253,6 +281,10 @@ export class CloseService {
         paidSalesTotal,
         totalSale: paidSalesTotal,
         cashPlusPending: money2(expectedCash + pendingAmount),
+        creditUnpaidAmount,
+        creditUnpaidCount,
+        creditPaidAmount,
+        creditPaidCount,
       },
     };
   }

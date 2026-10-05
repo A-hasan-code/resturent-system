@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, ipcMain, dialog } = require("electron");
 const fs = require("fs");
 const path = require("path");
 const { discover, probe } = require("./discovery");
+const { PrintAgent } = require("./print-agent");
 
 const HEALTH_EVERY_MS = 8000;
 const RETRY_MS = 3000;
@@ -11,6 +12,7 @@ let current = null;
 let searching = false;
 let healthTimer = null;
 let misses = 0;
+let printAgent = null;
 
 const configFile = () => path.join(app.getPath("userData"), "config.json");
 
@@ -40,6 +42,7 @@ async function connect() {
   if (searching) return;
   searching = true;
   stopHealth();
+  stopPrintAgent();
   await showSplash();
   const cfg = loadConfig();
   try {
@@ -54,6 +57,7 @@ async function connect() {
         status(`Connected: ${hit.health.name} (${hit.origin})`);
         await win.loadURL(hit.origin);
         startHealth();
+        startPrintAgent();
         return;
       }
       status("Server not found. Check that the server PC is on and on the same network. Retrying…");
@@ -85,6 +89,23 @@ function stopHealth() {
   healthTimer = null;
 }
 
+function startPrintAgent() {
+  if (!printAgent) {
+    printAgent = new PrintAgent({
+      getOrigin: () => current,
+      loadConfig,
+      saveConfig,
+      userDataDir: app.getPath("userData"),
+      onStatus: (text) => status(text),
+    });
+  }
+  printAgent.start();
+}
+
+function stopPrintAgent() {
+  if (printAgent) printAgent.stop();
+}
+
 async function forgetServer() {
   const { response } = await dialog.showMessageBox(win, {
     type: "question",
@@ -100,7 +121,7 @@ async function forgetServer() {
 function buildMenu() {
   return Menu.buildFromTemplate([
     {
-      label: "Hotel System",
+      label: "PixalBotics Restaurant",
       submenu: [
         { label: "Reload", accelerator: "F5", click: () => (current ? win.reload() : connect()) },
         { label: "Reconnect to server", click: () => connect() },
@@ -121,7 +142,7 @@ function createWindow() {
     height: 860,
     minWidth: 1000,
     minHeight: 640,
-    title: "Hotel System",
+    title: "PixalBotics Restaurant",
     icon: path.join(__dirname, "..", "assets", "icon.png"),
     backgroundColor: "#101820",
     autoHideMenuBar: true,
@@ -147,6 +168,7 @@ function createWindow() {
   win.on("closed", () => {
     win = null;
     stopHealth();
+    stopPrintAgent();
   });
 
   void connect();

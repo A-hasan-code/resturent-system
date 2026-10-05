@@ -30,7 +30,7 @@ public class HotelRawPrinter {
     IntPtr h;
     if (!OpenPrinter(printer, out h, IntPtr.Zero)) throw new Exception("Printer not found: " + printer);
     try {
-      var di = new DOCINFO { pDocName = "Hotel System", pDataType = "RAW" };
+      var di = new DOCINFO { pDocName = "PixalBotics Restaurant", pDataType = "RAW" };
       if (StartDocPrinter(h, 1, di) == 0) throw new Exception("StartDocPrinter failed: " + Marshal.GetLastWin32Error());
       StartPagePrinter(h);
       IntPtr p = Marshal.AllocCoTaskMem(data.Length);

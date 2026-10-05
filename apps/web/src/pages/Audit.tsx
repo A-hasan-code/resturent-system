@@ -15,8 +15,6 @@ type Day = {
   purchasesOut: number;
   sales: number;
   tips: number;
-  stockUsed?: number;
-  profit?: number;
 };
 
 type ChartBucket = {
@@ -68,14 +66,15 @@ type Report = {
     cancelled: number;
     billsPaid: number;
     salesTotal: number;
+    salesToday: number;
+    salesMonth: number;
+    salesYear: number;
     tipsTotal: number;
     paymentsIn: number;
     paymentCount: number;
     purchasesOut: number;
     purchaseCount: number;
     foodCost: number;
-    stockUsed?: number;
-    profit?: number;
     unpaidAmount: number;
     unpaidCount: number;
   };
@@ -426,10 +425,28 @@ export function AuditPage() {
 
       <div className="stats">
         <div className="panel stat">
-          <span>{t("audit.sales")}</span>
+          <span>{t("audit.salesToday")}</span>
+          <strong>{s ? money(s.salesToday) : "—"}</strong>
+          <span className="tiny">{t("audit.salesTodayHint")}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("audit.salesMonth")}</span>
+          <strong>{s ? money(s.salesMonth) : "—"}</strong>
+          <span className="tiny">{t("audit.salesMonthHint")}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("audit.salesYear")}</span>
+          <strong>{s ? money(s.salesYear) : "—"}</strong>
+          <span className="tiny">{t("audit.salesYearHint")}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("audit.salesRange")}</span>
           <strong>{s ? money(s.salesTotal) : "—"}</strong>
           <span className="tiny">{s ? t("audit.salesHint", { n: s.billsPaid }) : ""}</span>
         </div>
+      </div>
+
+      <div className="stats">
         <div className="panel stat">
           <span>{t("audit.tips")}</span>
           <strong>{s ? money(s.tipsTotal) : "—"}</strong>
@@ -446,9 +463,6 @@ export function AuditPage() {
             {s ? t("audit.ordersHint", { cancelled: s.cancelled, paid: s.billsPaid }) : ""}
           </span>
         </div>
-      </div>
-
-      <div className="stats">
         <div className="panel stat">
           <span>{t("audit.purchasesOut")}</span>
           <strong>{s ? money(s.purchasesOut) : "—"}</strong>
@@ -457,20 +471,6 @@ export function AuditPage() {
           <span>{t("audit.cashLeft")}</span>
           <strong>{s ? money(cashLeft) : "—"}</strong>
           <span className="tiny">{t("audit.cashLeftHint")}</span>
-        </div>
-        <div className="panel stat">
-          <span>{t("menu.cost")}</span>
-          <strong>{s ? money(s.foodCost) : "—"}</strong>
-        </div>
-        <div className="panel stat">
-          <span>{t("store.stockUsedToday")}</span>
-          <strong>{s ? money(s.stockUsed ?? 0) : "—"}</strong>
-        </div>
-        <div className="panel stat">
-          <span>{t("store.dayProfit")}</span>
-          <strong style={{ color: (s?.profit ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
-            {s ? money(s.profit ?? 0) : "—"}
-          </strong>
         </div>
         <div className="panel stat">
           <span>{t("dash.unpaid")}</span>
@@ -486,7 +486,7 @@ export function AuditPage() {
       <div className="grid-2 audit-split">
         <div className="panel panel-pad">
           <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: "0.4rem" }}>
-            <h3 style={{ margin: 0 }}>{t("audit.byDay")}</h3>
+            <h3 style={{ margin: 0 }}>{t("audit.dailySales")}</h3>
             <span className="tiny muted audit-legend">
               <span className="legend-in">{t("audit.paymentsIn")}</span>
               <span className="legend-out">{t("audit.purchasesOut")}</span>
@@ -498,33 +498,38 @@ export function AuditPage() {
             <div className="empty">{t("common.noMatch")}</div>
           )}
           {report && report.days.length > 0 && (
-            <table style={{ marginTop: "0.8rem" }}>
+            <div className="table-wrap" style={{ marginTop: "0.8rem" }}>
+            <table>
               <thead>
                 <tr>
                   <th>{t("common.date")}</th>
                   <th>{t("audit.sales")}</th>
-                  <th>{t("store.stockUsedToday")}</th>
-                  <th>{t("store.dayProfit")}</th>
+                  <th>{t("audit.tips")}</th>
+                  <th>{t("audit.billsPaid")}</th>
                 </tr>
               </thead>
               <tbody>
                 {report.days
-                  .filter((d) => d.sales || d.stockUsed || d.orders)
+                  .filter((d) => d.sales || d.orders)
                   .map((d) => (
                     <tr key={d.date}>
                       <td>{d.date}</td>
-                      <td>{money(d.sales)}</td>
-                      <td>{money(d.stockUsed ?? 0)}</td>
-                      <td>{money(d.profit ?? d.sales - (d.stockUsed ?? 0))}</td>
+                      <td>
+                        <strong>{money(d.sales)}</strong>
+                      </td>
+                      <td>{money(d.tips)}</td>
+                      <td>{d.billsPaid}</td>
                     </tr>
                   ))}
               </tbody>
             </table>
+            </div>
           )}
         </div>
         <div className="panel panel-pad">
           <h3 style={{ marginTop: 0 }}>{t("audit.byOrderTaker")}</h3>
           {report?.byOrderTaker.length ? (
+            <div className="table-wrap">
             <table>
               <thead>
                 <tr>
@@ -547,6 +552,7 @@ export function AuditPage() {
                 ))}
               </tbody>
             </table>
+            </div>
           ) : (
             <div className="empty">{t("common.noMatch")}</div>
           )}
@@ -560,6 +566,7 @@ export function AuditPage() {
         </div>
         {salesRows.length ? (
           <>
+            <div className="table-wrap wide">
             <table>
               <thead>
                 <tr>
@@ -594,6 +601,7 @@ export function AuditPage() {
                 ))}
               </tbody>
             </table>
+            </div>
             <Pagination page={page} pageSize={SALE_PAGE} total={salesRows.length} onChange={setPage} />
           </>
         ) : (
@@ -605,6 +613,7 @@ export function AuditPage() {
         <div className="panel panel-pad">
           <h3 style={{ marginTop: 0 }}>{t("payments.byStaff")}</h3>
           {report?.byStaff.length ? (
+            <div className="table-wrap">
             <table>
               <thead>
                 <tr>
@@ -625,6 +634,7 @@ export function AuditPage() {
                 ))}
               </tbody>
             </table>
+            </div>
           ) : (
             <div className="empty">{t("payments.empty")}</div>
           )}
@@ -632,6 +642,7 @@ export function AuditPage() {
         <div className="panel panel-pad">
           <h3 style={{ marginTop: 0 }}>{t("nav.payments")}</h3>
           {report?.payments.length ? (
+            <div className="table-wrap">
             <table>
               <thead>
                 <tr>
@@ -657,6 +668,7 @@ export function AuditPage() {
                 ))}
               </tbody>
             </table>
+            </div>
           ) : (
             <div className="empty">{t("payments.empty")}</div>
           )}
@@ -667,6 +679,7 @@ export function AuditPage() {
         <h3 style={{ marginTop: 0 }}>{t("audit.savedTitle")}</h3>
         <p className="tiny muted">{t("audit.savedHint")}</p>
         {stored.length ? (
+          <div className="table-wrap">
           <table>
             <thead>
               <tr>
@@ -696,6 +709,7 @@ export function AuditPage() {
               ))}
             </tbody>
           </table>
+          </div>
         ) : (
           <div className="empty">{t("audit.savedEmpty")}</div>
         )}

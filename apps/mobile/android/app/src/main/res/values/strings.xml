@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Hotel System</string>
-    <string name="title_activity_main">Hotel System</string>
+    <string name="app_name">PixalBotics Restaurant</string>
+    <string name="title_activity_main">PixalBotics Restaurant</string>
     <string name="package_name">com.pixalbotics.hotelsystem</string>
     <string name="custom_url_scheme">com.pixalbotics.hotelsystem</string>
 </resources>

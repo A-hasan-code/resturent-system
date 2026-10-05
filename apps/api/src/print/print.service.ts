@@ -15,10 +15,13 @@ import { toNumber } from "../common/units";
 import { TipService } from "../system/tip.service";
 import { BillPayload, KotPayload, renderBill, renderKot, renderTest, TestPayload } from "./receipts";
 import { sendToNetworkPrinter, sendToWindowsPrinter, writePreviewFile } from "./drivers";
+import { splitTableLabel } from "./table-label";
 
 const MAX_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 4000;
 const TICK_MS = 1000;
+/** Agent claimed a job but never finished — return to queue. */
+const AGENT_STALE_MS = 60_000;
 
 type KotOptions = { round?: number; reprint?: boolean; requestedById?: string | null };
 
@@ -28,6 +31,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   private timer?: NodeJS.Timeout;
   private busy = false;
   private notBefore = new Map<string, number>();
+  private agentClaimedAt = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -49,52 +53,127 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   // ---------- enqueue ----------
 
   /**
-   * KOT routing (hotel serving rule):
-   * - Round 1 (first place): every involved station printer gets the FULL slip (all items).
-   * - Later rounds (add-ons): only the new round's items → only matching printers (delta).
+   * KOT routing (per round / reprint set):
+   * - No station tags on printers → every KOT printer gets the full slip.
+   * - Single station in the order (e.g. only beverages) → only that station’s printer,
+   *   with its matching lines.
+   * - Mixed stations in one order (BBQ + cooking + beverage) → each *involved*
+   *   station printer gets the **full** slip (all lines) so pickers see the whole ticket.
+   * - Catch-all printers (empty station/categories) get lines no specialized printer claimed.
    */
   async enqueueKot(orderId: string, opts: KotOptions = {}) {
     const kot = await this.loadKot(orderId, opts);
     const printers = await this.prisma.printer.findMany({ where: { active: true, printsKot: true } });
     if (!printers.length) return [await this.noPrinterJob("KOT", orderId, opts.requestedById, kot.orderNo)];
 
-    const round = opts.round ?? kot.defaultRound;
-    const fullSlip = !round || round <= 1;
-    const routeItems = kot.roundItems;
-    const printItems = fullSlip ? kot.allItems : kot.roundItems;
+    // Reprint with no round → full order; otherwise only that round's lines.
+    const printItems = opts.round == null && opts.reprint ? kot.allItems : kot.roundItems;
+    if (!printItems.length) return [];
 
+    type KotLine = (typeof printItems)[number];
     const jobs: PrintJob[] = [];
-    for (const printer of printers) {
+
+    const specialized = printers.filter((p) => {
+      const cats = splitCats(p.categories);
+      return cats.length > 0 || !!(p.station || "").trim();
+    });
+    const catchAll = printers.filter((p) => !specialized.includes(p));
+
+    // Single kitchen / no station tags → every KOT printer gets the full round.
+    if (!specialized.length) {
+      for (const printer of printers) {
+        jobs.push(
+          await this.createJob("KOT", printer.id, kot.payload(printItems, null), orderId, opts.requestedById),
+        );
+      }
+      return jobs;
+    }
+
+    const matchersOf = (printer: (typeof printers)[number]) => {
       const cats = splitCats(printer.categories);
-      const involved = cats.length
-        ? routeItems.some((i) => cats.includes(i.category) || cats.includes(i.station))
-        : true;
-      if (!involved) continue;
-      if (!cats.length && !printItems.length) continue;
-      const mine = cats.length && !fullSlip
-        ? printItems.filter((i) => cats.includes(i.category) || cats.includes(i.station))
-        : printItems;
-      if (!mine.length) continue;
-      const payload = kot.payload(mine, cats.length ? printer.name : null);
+      const stationTag = (printer.station || "").trim().toLowerCase();
+      return cats.length ? cats : stationTag ? [stationTag] : [];
+    };
+
+    const involved = specialized
+      .map((printer) => {
+        const matchers = matchersOf(printer);
+        const mine = printItems.filter((i) => itemMatchesPrinter(i, matchers));
+        return { printer, matchers, mine };
+      })
+      .filter((x) => x.mine.length > 0);
+
+    const routed = new Set<KotLine>();
+    for (const { mine } of involved) mine.forEach((i) => routed.add(i));
+
+    // Mixed bill → full slip on every involved station printer.
+    // Single station → only that printer, with its own lines.
+    const mixed = involved.length >= 2;
+    for (const { printer, mine } of involved) {
+      const lines = mixed ? printItems : mine;
+      const payload = kot.payload(lines, printer.station || printer.name);
       jobs.push(await this.createJob("KOT", printer.id, payload, orderId, opts.requestedById));
     }
+
+    // Unmatched lines → catch-all kitchen printers.
+    const leftovers = printItems.filter((i) => !routed.has(i));
+    if (leftovers.length && catchAll.length) {
+      for (const printer of catchAll) {
+        jobs.push(
+          await this.createJob("KOT", printer.id, kot.payload(leftovers, null), orderId, opts.requestedById),
+        );
+      }
+    } else if (leftovers.length && !involved.length) {
+      // Specialized printers exist but nothing matched — still print somewhere.
+      for (const printer of specialized) {
+        jobs.push(
+          await this.createJob(
+            "KOT",
+            printer.id,
+            kot.payload(leftovers, printer.station || printer.name),
+            orderId,
+            opts.requestedById,
+          ),
+        );
+      }
+    }
+
     return jobs;
   }
 
-  /** The full kitchen slip for a round (all stations combined), rendered as plain text for on-screen preview. */
+  /** Structured kitchen slip for UI preview + plain text for thermal match. */
   async previewKot(orderId: string, round?: number) {
     const kot = await this.loadKot(orderId, { round });
     const printer = await this.prisma.printer.findFirst({
       where: { active: true, printsKot: true },
       orderBy: { createdAt: "asc" },
     });
-    const payload = kot.payload(kot.items, null);
+    const paperWidth = printer?.paperWidth ?? 80;
+    const payload = kot.payload(kot.roundItems.length ? kot.roundItems : kot.items, null);
+    const { partition, table } = splitTableLabel(payload.tableNo, payload.partitionName, payload.tableName);
     return {
       orderNo: kot.orderNo,
+      billNo: kot.orderNo,
       tableNo: payload.tableNo,
+      partitionName: partition,
+      tableName: table,
       round: payload.round,
+      reprint: payload.reprint,
+      station: payload.station,
       takenBy: payload.takenBy,
-      text: renderKot(payload, printer?.paperWidth ?? 80).plain(),
+      servedBy: payload.servedBy,
+      time: payload.time,
+      notes: payload.notes,
+      showOrderBy: payload.showOrderBy !== false,
+      items: payload.items.map((i) => ({
+        name: i.name,
+        quantity: i.quantity,
+        sellUnit: i.unit,
+        notes: i.notes,
+        round: i.round,
+      })),
+      text: renderKot(payload, paperWidth).plain(),
+      paperWidth,
     };
   }
 
@@ -110,6 +189,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
           orderBy: { createdAt: "asc" },
         },
         waiter: { select: { name: true, role: { select: { name: true } } } },
+        table: { include: { partition: { select: { name: true } } } },
       },
     });
     if (!order) throw new NotFoundException("Order not found");
@@ -149,6 +229,8 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
           restaurant,
           orderNo: order.orderNo,
           tableNo: order.tableNo,
+          partitionName: order.table?.partition?.name ?? null,
+          tableName: order.table?.name ?? null,
           waiter: order.waiter?.name ?? null,
           takenBy: takers.length ? takers.join(", ") : null,
           servedBy: order.servedByName || null,
@@ -160,6 +242,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
           items: mine.map((i) => i.line),
           showOrderBy: kotOpts.showOrderBy,
           footer: kotOpts.footer || undefined,
+          logoPath: this.settings.logoFilePath(),
         };
       },
     };
@@ -172,22 +255,38 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
         items: { orderBy: { createdAt: "asc" } },
         waiter: { select: { name: true, role: { select: { name: true } } } },
         cashier: { select: { name: true } },
+        assignedCashier: { select: { id: true, name: true, billPrinterId: true } },
         creditCustomer: { select: { name: true } },
         payments: { select: { collectedBy: { select: { name: true } } } },
+        table: { include: { partition: { select: { name: true } } } },
       },
     });
     const printers = await this.prisma.printer.findMany({ where: { active: true, printsBill: true } });
     if (!printers.length) return [await this.noPrinterJob("BILL", orderId, requestedById, order.orderNo)];
 
-    const printerId = await this.resolveBillPrinterId(printers, requestedById);
+    const printerId = await this.resolveBillPrinterId(
+      printers,
+      requestedById,
+      order.assignedCashier?.billPrinterId ?? null,
+    );
 
     const cashier = order.cashier?.name ?? null;
     const collectors = [...new Set(order.payments.map((p) => p.collectedBy.name))].filter((n) => n !== cashier);
     const billOpts = await this.tips.printBillOpts();
+    const restaurant = await this.settings.restaurant();
     const payload: BillPayload = {
-      restaurant: await this.settings.restaurant(),
+      restaurant: {
+        name: restaurant.name,
+        tagline: restaurant.tagline,
+        address: restaurant.address,
+        phone: restaurant.phone,
+      },
+      logoPath: this.settings.logoFilePath(),
       orderNo: order.orderNo,
+      billNo: order.orderNo,
       tableNo: order.tableNo,
+      partitionName: order.table?.partition?.name ?? null,
+      tableName: order.table?.name ?? null,
       creditName: order.creditCustomer?.name ?? null,
       cashier,
       waiter: order.waiter?.name ?? null,
@@ -203,32 +302,54 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
         amount: toNumber(i.amount),
       })),
       total: toNumber(order.total),
+      discountAmount: toNumber(order.discountAmount),
       tipAmount: toNumber(order.tipAmount),
       paidAmount: toNumber(order.paidAmount),
+      tenderedAmount: toNumber(order.tenderedAmount),
       paymentStatus: order.paymentStatus,
+      showLogo: billOpts.showLogo,
+      showName: billOpts.showName,
+      showTagline: billOpts.showTagline,
+      showAddress: billOpts.showAddress,
+      showPhone: billOpts.showPhone,
+      title: billOpts.title,
       showOrderBy: billOpts.showOrderBy,
       showServedBy: billOpts.showServedBy,
       showCashier: billOpts.showCashier,
       showTip: billOpts.showTip,
+      showPaidStamp: billOpts.showPaidStamp,
+      paidStampText: billOpts.paidStampText,
+      paidStampBig: billOpts.paidStampBig,
+      paidStampPath: this.settings.paidStampFilePath(),
       footer: billOpts.footer,
     };
     return [await this.createJob("BILL", printerId, payload, orderId, requestedById)];
   }
 
-  /** Cashier's assigned bill printer → else prefer NETWORK → else first bill printer. */
+  /**
+   * Bill printer pick order:
+   * 1) Who pressed print (cashier at their counter)
+   * 2) Order's assigned cashier printer (supervisor/floor print → that counter)
+   * 3) First NETWORK bill printer, else first bill printer
+   */
   private async resolveBillPrinterId(
     printers: { id: string; kind: Printer["kind"] }[],
-    requestedById?: string | null
+    requestedById?: string | null,
+    assignedCashierPrinterId?: string | null,
   ) {
+    const pick = (id: string | null | undefined) =>
+      id && printers.some((p) => p.id === id) ? id : null;
+
     if (requestedById) {
       const user = await this.prisma.user.findUnique({
         where: { id: requestedById },
         select: { billPrinterId: true },
       });
-      if (user?.billPrinterId && printers.some((p) => p.id === user.billPrinterId)) {
-        return user.billPrinterId;
-      }
+      const own = pick(user?.billPrinterId);
+      if (own) return own;
     }
+    const assigned = pick(assignedCashierPrinterId);
+    if (assigned) return assigned;
     return printers.find((p) => p.kind === "NETWORK")?.id ?? printers[0].id;
   }
 
@@ -289,6 +410,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     if (this.busy) return;
     this.busy = true;
     try {
+      await this.recoverStaleAgentJobs();
       const now = Date.now();
       const pending = await this.prisma.printJob.findMany({
         where: { status: "PENDING" },
@@ -297,6 +419,8 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
         take: 10,
       });
       for (const job of pending) {
+        // AGENT jobs are claimed + printed by the Additional PC desktop app.
+        if (job.printer?.kind === "AGENT") continue;
         if ((this.notBefore.get(job.id) ?? 0) > now) continue;
         await this.process(job);
       }
@@ -307,11 +431,136 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     }
   }
 
+  private async recoverStaleAgentJobs() {
+    const now = Date.now();
+    for (const [jobId, claimedAt] of this.agentClaimedAt) {
+      if (now - claimedAt < AGENT_STALE_MS) continue;
+      this.agentClaimedAt.delete(jobId);
+      const job = await this.prisma.printJob.findUnique({
+        where: { id: jobId },
+        select: { id: true, status: true, attempts: true, printer: { select: { kind: true } } },
+      });
+      if (!job || job.status !== "PRINTING" || job.printer?.kind !== "AGENT") continue;
+      const final = job.attempts >= MAX_ATTEMPTS;
+      await this.prisma.printJob.update({
+        where: { id: job.id },
+        data: {
+          status: final ? "FAILED" : "PENDING",
+          lastError: final ? "Additional PC did not finish printing" : "Additional PC timed out — retrying",
+        },
+      });
+    }
+  }
+
+  /**
+   * Additional PC desktop agent: take the next pending job for this PC's USB printers.
+   * Server renders ESC/POS; the agent only writes raw bytes to its local Windows printer.
+   */
+  async claimNextForAgent(agentId: string) {
+    const pending = await this.prisma.printJob.findFirst({
+      where: {
+        status: "PENDING",
+        printer: { agentId, kind: "AGENT", active: true },
+      },
+      include: { printer: true, order: { select: { orderNo: true } } },
+      orderBy: { createdAt: "asc" },
+    });
+    if (!pending?.printer) return null;
+    if ((this.notBefore.get(pending.id) ?? 0) > Date.now()) return null;
+
+    const attempts = pending.attempts + 1;
+    await this.prisma.printJob.update({
+      where: { id: pending.id },
+      data: { status: "PRINTING", attempts, lastError: null },
+    });
+    this.agentClaimedAt.set(pending.id, Date.now());
+
+    try {
+      const doc = this.render(pending, pending.printer.paperWidth);
+      return {
+        id: pending.id,
+        type: pending.type,
+        printerName: pending.printer.target,
+        orderNo: pending.order?.orderNo ?? null,
+        dataBase64: doc.buffer().toString("base64"),
+      };
+    } catch (e) {
+      this.agentClaimedAt.delete(pending.id);
+      const error = (e as Error).message;
+      const final = attempts >= MAX_ATTEMPTS;
+      await this.prisma.printJob.update({
+        where: { id: pending.id },
+        data: { status: final ? "FAILED" : "PENDING", lastError: error },
+      });
+      if (!final) this.notBefore.set(pending.id, Date.now() + RETRY_DELAY_MS * attempts);
+      throw e;
+    }
+  }
+
+  async completeAgentJob(agentId: string, jobId: string) {
+    const job = await this.prisma.printJob.findFirst({
+      where: { id: jobId, printer: { agentId } },
+      include: { printer: true, order: { select: { orderNo: true } } },
+    });
+    if (!job) throw new NotFoundException("Print job not found");
+    this.agentClaimedAt.delete(job.id);
+    await this.prisma.printJob.update({
+      where: { id: job.id },
+      data: { status: "DONE", printedAt: new Date(), lastError: null },
+    });
+    this.notBefore.delete(job.id);
+    this.realtime.printResult(
+      {
+        id: job.id,
+        type: job.type,
+        status: "DONE",
+        printer: job.printer?.name ?? null,
+        orderNo: job.order?.orderNo ?? null,
+      },
+      job.requestedById,
+    );
+    return { ok: true };
+  }
+
+  async failAgentJob(agentId: string, jobId: string, error: string) {
+    const job = await this.prisma.printJob.findFirst({
+      where: { id: jobId, printer: { agentId } },
+      include: { printer: true, order: { select: { orderNo: true } } },
+    });
+    if (!job) throw new NotFoundException("Print job not found");
+    this.agentClaimedAt.delete(job.id);
+    const attempts = job.attempts;
+    const final = attempts >= MAX_ATTEMPTS;
+    await this.prisma.printJob.update({
+      where: { id: job.id },
+      data: { status: final ? "FAILED" : "PENDING", lastError: error },
+    });
+    if (final) {
+      this.notBefore.delete(job.id);
+      this.log.warn(`Agent job ${job.id} failed: ${error}`);
+      this.realtime.printResult(
+        {
+          id: job.id,
+          type: job.type,
+          status: "FAILED",
+          error,
+          printer: job.printer?.name ?? null,
+          orderNo: job.order?.orderNo ?? null,
+        },
+        job.requestedById,
+      );
+    } else {
+      this.notBefore.set(job.id, Date.now() + RETRY_DELAY_MS * Math.max(1, attempts));
+    }
+    return { ok: true, status: final ? "FAILED" : "PENDING" };
+  }
+
   private async process(job: PrintJob & { printer: Printer | null; order: { orderNo: number } | null }) {
     const attempts = job.attempts + 1;
     await this.prisma.printJob.update({ where: { id: job.id }, data: { status: "PRINTING", attempts } });
     try {
       if (!job.printer || !job.printer.active) throw new Error("Printer removed or disabled");
+      if (job.printer.kind === "AGENT") throw new Error("Agent printer must be claimed by Additional PC");
       const doc = this.render(job, job.printer.paperWidth);
       await this.send(job.printer, doc.buffer(), doc.plain(), job);
       await this.prisma.printJob.update({
@@ -401,4 +650,19 @@ function splitCats(s: string) {
     .split(",")
     .map((c) => c.trim().toLowerCase())
     .filter(Boolean);
+}
+
+/** Match menu category or kitchen station (beverages / cooking / bbq) to printer tags. */
+function itemMatchesPrinter(
+  item: { category: string; station: string },
+  matchers: string[],
+) {
+  return matchers.some(
+    (m) =>
+      m === item.category ||
+      m === item.station ||
+      // allow "Beverages" printer station / shorthand tags
+      item.station.includes(m) ||
+      m.includes(item.station),
+  );
 }

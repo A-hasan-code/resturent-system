@@ -24,7 +24,9 @@ function localDate(d: Date) {
   return `${y}-${m}-${day}`;
 }
 
-export type LedgerSource = "MANUAL" | "PURCHASE" | "SUPPLIER_PAYMENT" | "PURCHASE_EXTRA";
+export type LedgerSource = "MANUAL" | "PURCHASE" | "SUPPLIER_PAYMENT" | "PURCHASE_EXTRA" | "UNPAID_SUPPLIER";
+
+export type PayStatus = "PAID" | "PARTIAL" | "UNPAID";
 
 export type LedgerRow = {
   id: string;
@@ -33,14 +35,39 @@ export type LedgerRow = {
   category: string | null;
   title: string;
   amount: number;
-  /** Counts toward cash expense / net profit. Purchase invoice rows are false. */
+  /** Counts toward cash expense / net profit. Unpaid supplier bills do not. */
   inTotal: boolean;
+  /** Set on supplier bills. Unpaid / partial stay out of the expense total. */
+  payStatus: PayStatus | null;
   period: HotelExpensePeriod | "DAILY";
   note: string | null;
   createdAt: string;
   createdBy: { id: string; name: string } | null;
   editable: boolean;
 };
+
+/** Inventory total + supplier-side extra (self-paid extra is not owed to the supplier). */
+function supplierDue(p: {
+  total: Prisma.Decimal;
+  extraExpense?: Prisma.Decimal | null;
+  extraExpensePaidBy?: ExtraExpensePaidBy | null;
+}) {
+  const extra = p.extraExpensePaidBy === ExtraExpensePaidBy.SUPPLIER ? toNumber(p.extraExpense ?? 0) : 0;
+  return money2(toNumber(p.total) + extra);
+}
+
+function billBalance(p: {
+  total: Prisma.Decimal;
+  paidAmount: Prisma.Decimal;
+  extraExpense?: Prisma.Decimal | null;
+  extraExpensePaidBy?: ExtraExpensePaidBy | null;
+}) {
+  const due = supplierDue(p);
+  const paid = toNumber(p.paidAmount);
+  const balance = money2(Math.max(0, due - paid));
+  const payStatus: PayStatus = balance <= 0.009 ? "PAID" : paid > 0.009 ? "PARTIAL" : "UNPAID";
+  return { due, paid, balance, payStatus };
+}
 
 @Injectable()
 export class ExpensesService {
@@ -65,6 +92,7 @@ export class ExpensesService {
       title: e.title,
       amount: toNumber(e.amount),
       inTotal: true,
+      payStatus: null,
       period: e.period,
       note: e.note,
       createdAt: e.createdAt.toISOString(),
@@ -198,17 +226,19 @@ export class ExpensesService {
         },
         _sum: { total: true },
       }),
-      this.prisma.purchase.aggregate({
+      this.prisma.purchase.findMany({
         where: { purchasedAt: { gte: start, lte: end } },
-        _sum: { total: true },
-        _count: true,
+        select: { total: true, paidAmount: true, extraExpense: true, extraExpensePaidBy: true },
       }),
     ]);
 
     const manualExpenses = money2(toNumber(manualAgg._sum.amount ?? 0));
     const supplierPaid = money2(toNumber(paymentsAgg._sum.amount ?? 0));
     const selfExtraTotal = money2(selfExtra.reduce((s, p) => s + toNumber(p.extraExpense), 0));
-    const inventoryPurchased = money2(toNumber(purchases._sum.total ?? 0));
+    const inventoryPurchased = money2(purchases.reduce((s, p) => s + toNumber(p.total), 0));
+    const unpaidSupplierBills = money2(
+      purchases.reduce((s, p) => s + billBalance(p).balance, 0)
+    );
     const totalExpense = money2(manualExpenses + supplierPaid + selfExtraTotal);
     const sales = money2(toNumber(salesAgg._sum.total ?? 0));
     const netProfit = money2(sales - totalExpense);
@@ -221,7 +251,8 @@ export class ExpensesService {
       supplierPaid,
       selfExtra: selfExtraTotal,
       inventoryPurchased,
-      inventoryPurchaseCount: purchases._count,
+      unpaidSupplierBills,
+      inventoryPurchaseCount: purchases.length,
       supplierPaymentCount: paymentsAgg._count,
       manualCount: manualAgg._count,
       totalExpense,
@@ -281,6 +312,7 @@ export class ExpensesService {
           : `Supplier payment · ${p.supplier.name}`,
         amount: toNumber(p.amount),
         inTotal: true,
+        payStatus: "PAID",
         period: "DAILY",
         note: p.note?.startsWith("purchase:") ? "Cash paid on inventory bill" : p.note,
         createdAt: p.createdAt.toISOString(),
@@ -296,22 +328,35 @@ export class ExpensesService {
         .map((l) => l.storeItem.name)
         .join(", ");
       const more = p.lines.length > 4 ? ` +${p.lines.length - 4}` : "";
-      const purchaseRow: LedgerRow = {
-        id: `pur:${p.id}`,
-        source: "PURCHASE",
-        spentOn: localDate(p.purchasedAt),
-        category: "Inventory purchase",
-        title: `Stock in · ${p.supplier.name}`,
-        amount: toNumber(p.total),
-        inTotal: false,
-        period: "DAILY",
-        note: [itemNames + more, p.note].filter(Boolean).join(" · ") || null,
-        createdAt: p.createdAt.toISOString(),
-        createdBy: null,
-        editable: false,
-      };
-      if (!cat || (purchaseRow.category ?? "").toLowerCase() === cat.toLowerCase()) {
-        rows.push(purchaseRow);
+      const { due, paid, balance, payStatus } = billBalance(p);
+      // Paid cash is already a supplier-payment row (hotel expense).
+      // Whatever is still owed stays a remaining unpaid supplier bill.
+      if (balance > 0.009) {
+        const unpaidRow: LedgerRow = {
+          id: `due:${p.id}`,
+          source: "UNPAID_SUPPLIER",
+          spentOn: localDate(p.purchasedAt),
+          category: "Unpaid supplier bill",
+          title: `Unpaid · ${p.supplier.name}`,
+          amount: balance,
+          inTotal: false,
+          payStatus,
+          period: "DAILY",
+          note:
+            [
+              payStatus === "PARTIAL" ? `Part paid ${paid} of ${due}` : `Bill ${due}`,
+              itemNames + more,
+              p.note,
+            ]
+              .filter(Boolean)
+              .join(" · ") || null,
+          createdAt: p.createdAt.toISOString(),
+          createdBy: null,
+          editable: false,
+        };
+        if (!cat || (unpaidRow.category ?? "").toLowerCase() === cat.toLowerCase()) {
+          rows.push(unpaidRow);
+        }
       }
 
       if (
@@ -326,6 +371,7 @@ export class ExpensesService {
           title: `Extra (self) · ${p.supplier.name}`,
           amount: toNumber(p.extraExpense),
           inTotal: true,
+          payStatus: "PAID",
           period: "DAILY",
           note: p.extraExpenseNote,
           createdAt: p.createdAt.toISOString(),
@@ -354,7 +400,7 @@ export class ExpensesService {
     const saved = await this.listCategories();
     const filterCats = [
       ...saved,
-      { id: "sys-inventory", name: "Inventory purchase" },
+      { id: "sys-unpaid", name: "Unpaid supplier bill" },
       { id: "sys-supplier", name: "Supplier payment" },
       { id: "sys-extra", name: "Purchase extra" },
     ];
@@ -372,6 +418,7 @@ export class ExpensesService {
         supplierPaid: totals.supplierPaid,
         selfExtra: totals.selfExtra,
         inventoryPurchased: totals.inventoryPurchased,
+        unpaidSupplierBills: totals.unpaidSupplierBills,
         sales: totals.sales,
         netProfit: totals.netProfit,
         byCategory: [...byCategory.entries()]

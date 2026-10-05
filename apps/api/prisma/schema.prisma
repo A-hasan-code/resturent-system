@@ -64,6 +64,8 @@ enum PrinterKind {
   WINDOWS
   NETWORK
   FILE
+  /// USB / Windows printer on an Additional PC (desktop print agent)
+  AGENT
 }
 
 enum PrintJobType {
@@ -124,24 +126,44 @@ model RestaurantTable {
   @@unique([partitionId, name])
 }
 
+/// Desktop app on an Additional PC that owns local USB printers.
+model PrintAgent {
+  id          String    @id @default(cuid())
+  /// Stable id generated once on that PC (stored in desktop config).
+  machineKey  String    @unique
+  hostname    String
+  displayName String    @default("")
+  /// Bearer token for claim / heartbeat (rotated on register if missing).
+  token       String    @unique
+  lastSeenAt  DateTime  @default(now())
+  printers    Printer[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
 model Printer {
-  id         String     @id @default(cuid())
+  id         String      @id @default(cuid())
   name       String
   kind       PrinterKind
-  /// Windows printer name, "ip:port" for NETWORK, or folder for FILE
+  /// Windows printer name, "ip:port" for NETWORK, folder for FILE, or Windows name on agent PC for AGENT
   target     String
-  paperWidth Int        @default(80)
-  printsKot  Boolean    @default(true)
-  printsBill Boolean    @default(false)
+  paperWidth Int         @default(80)
+  printsKot  Boolean     @default(true)
+  printsBill Boolean     @default(false)
   /// Counter / station label e.g. "Cashier 1" (industrial multi-counter)
-  station    String     @default("")
+  station    String      @default("")
   /// Comma separated menu categories for KOT routing; empty = all
-  categories String     @default("")
-  active     Boolean    @default(true)
+  categories String      @default("")
+  active     Boolean     @default(true)
+  /// Set when kind=AGENT — which Additional PC owns this USB printer
+  agentId    String?
+  agent      PrintAgent? @relation(fields: [agentId], references: [id], onDelete: Cascade)
   jobs       PrintJob[]
-  cashiers   User[]     @relation("UserBillPrinter")
-  createdAt  DateTime   @default(now())
-  updatedAt  DateTime   @updatedAt
+  cashiers   User[]      @relation("UserBillPrinter")
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@unique([agentId, target])
 }
 
 model PrintJob {
@@ -273,6 +295,8 @@ model Purchase {
   /// null when extraExpense is 0. SELF does not affect supplier balance.
   extraExpensePaidBy  ExtraExpensePaidBy?
   note        String?
+  /// Relative file name under data/purchase-bills (e.g. cuid.jpg). Optional supplier invoice photo.
+  billImagePath String?
   lines       PurchaseLine[]
   movements   StockMovement[]
   createdAt   DateTime        @default(now())
@@ -434,7 +458,11 @@ model Order {
   notes         String?
   subtotal      Decimal         @default(0) @db.Decimal(14, 2)
   total         Decimal         @default(0) @db.Decimal(14, 2)
+  /// Discount taken off the food total (gross − discount = net due).
+  discountAmount Decimal        @default(0) @db.Decimal(14, 2)
   paidAmount    Decimal         @default(0) @db.Decimal(14, 2)
+  /// Cash the guest handed over (may be more than paidAmount; change = tendered − paid − tip).
+  tenderedAmount Decimal        @default(0) @db.Decimal(14, 2)
   /// Guest tip — tracked separately from food sale (total).
   tipAmount     Decimal         @default(0) @db.Decimal(14, 2)
   costTotal     Decimal         @default(0) @db.Decimal(14, 2)
@@ -474,6 +502,8 @@ model Payment {
   orderId       String
   order         Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
   amount        Decimal   @db.Decimal(14, 2)
+  /// Cash the guest gave for this payment (may exceed amount; change returned).
+  tenderedAmount Decimal  @default(0) @db.Decimal(14, 2)
   /// Tip collected with this payment (not part of order.total / amount).
   tipAmount     Decimal   @default(0) @db.Decimal(14, 2)
   collectedById String

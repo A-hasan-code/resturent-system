@@ -99,21 +99,26 @@ export function BillsPage() {
 
   useSocketEvent("orders.changed", () => void load());
 
-  const shown = useMemo(
-    () =>
-      orders.filter((o) =>
-        matchesSearch(
-          q,
-          o.orderNo,
-          o.tableNo,
-          o.paymentStatus,
-          o.status,
-          o.assignedCashier?.name,
-          ...o.items.map((i) => i.name)
-        )
-      ),
-    [orders, q]
-  );
+  const shown = useMemo(() => {
+    const filtered = orders.filter((o) =>
+      matchesSearch(
+        q,
+        o.orderNo,
+        o.tableNo,
+        o.paymentStatus,
+        o.status,
+        o.assignedCashier?.name,
+        ...o.items.map((i) => i.name)
+      )
+    );
+    // Bill requests first so the assigned cashier sees them immediately.
+    return filtered.sort((a, b) => {
+      const ar = a.billRequestedAt && a.paymentStatus !== "PAID" ? 1 : 0;
+      const br = b.billRequestedAt && b.paymentStatus !== "PAID" ? 1 : 0;
+      if (ar !== br) return br - ar;
+      return new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime();
+    });
+  }, [orders, q]);
 
   function openBill(o: Order) {
     setSelected(o);
@@ -221,16 +226,18 @@ export function BillsPage() {
           <p>{t("bills.subtitle")}</p>
         </div>
         {keepsCash && (
-          <div className="seg">
-            <button type="button" className={view === "bills" ? "active" : ""} onClick={() => setView("bills")}>
-              {t("bills.tabBills")}
-            </button>
-            <button type="button" className={view === "cash" ? "active" : ""} onClick={() => setView("cash")}>
-              {t("bills.tabCash")}
-            </button>
+          <div className="page-head-actions">
+            <div className="seg">
+              <button type="button" className={view === "bills" ? "active" : ""} onClick={() => setView("bills")}>
+                {t("bills.tabBills")}
+              </button>
+              <button type="button" className={view === "cash" ? "active" : ""} onClick={() => setView("cash")}>
+                {t("bills.tabCash")}
+              </button>
+            </div>
           </div>
         )}
-        <div className="row" style={view === "cash" ? { display: "none" } : undefined}>
+        <div className="filter-bar" style={view === "cash" ? { display: "none" } : undefined}>
           <button
             type="button"
             className="btn ghost sm"
@@ -360,7 +367,12 @@ export function BillsPage() {
             </thead>
             <tbody>
               {pageRows.map((o) => (
-                <tr key={o.id}>
+                <tr
+                  key={o.id}
+                  className={
+                    o.billRequestedAt && o.paymentStatus !== "PAID" ? "bill-requested-row" : undefined
+                  }
+                >
                   <td>{o.orderNo}</td>
                   <td>
                     {o.tableNo || "—"}

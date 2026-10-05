@@ -1,10 +1,10 @@
 {
   "name": "@hotel/desktop",
-  "productName": "Hotel System",
+  "productName": "PixalBotics Restaurant",
   "version": "1.0.0",
   "private": true,
-  "description": "Hotel System desktop app — finds the restaurant server on the LAN automatically",
-  "author": "Pixalbotics",
+  "description": "PixalBotics Restaurant desktop app — finds the restaurant server on the LAN automatically",
+  "author": "PixalBotics",
   "main": "src/main.js",
   "scripts": {
     "dev": "electron .",
@@ -20,7 +20,7 @@
   },
   "build": {
     "appId": "com.pixalbotics.hotelsystem",
-    "productName": "Hotel System",
+    "productName": "PixalBotics Restaurant",
     "electronVersion": "35.7.5",
     "directories": {
       "output": "../../releases/desktop"
@@ -37,10 +37,10 @@
     "nsis": {
       "oneClick": true,
       "perMachine": false,
-      "artifactName": "HotelSystem-Desktop-Setup-${version}.${ext}",
+      "artifactName": "PixalBoticsRestaurant-Desktop-Setup-${version}.${ext}",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Hotel System"
+      "shortcutName": "PixalBotics Restaurant"
     }
   }
 }

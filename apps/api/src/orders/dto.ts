@@ -144,10 +144,17 @@ export class PrintKotDto {
 }
 
 export class PayOrderDto {
+  /** Cash the guest handed over (may be more than the amount due; change is returned). */
   @IsNumber()
-  @Min(0.01)
+  @Min(0)
   @IsOptional()
   amount?: number;
+
+  /** Discount to apply on the bill (gross − discount = net due). */
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  discount?: number;
 
   /** Guest tip collected with this payment (separate from food total). */
   @IsNumber()

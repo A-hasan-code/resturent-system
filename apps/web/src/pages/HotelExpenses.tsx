@@ -11,7 +11,8 @@ import { useT } from "../i18n";
 import { useToast } from "../toast";
 
 type Period = "DAILY" | "MONTHLY";
-type Source = "MANUAL" | "PURCHASE" | "SUPPLIER_PAYMENT" | "PURCHASE_EXTRA";
+type Source = "MANUAL" | "PURCHASE" | "SUPPLIER_PAYMENT" | "PURCHASE_EXTRA" | "UNPAID_SUPPLIER";
+type PayStatus = "PAID" | "PARTIAL" | "UNPAID";
 type RangeMode = "daily" | "monthly" | "yearly";
 
 type ExpenseRow = {
@@ -22,6 +23,7 @@ type ExpenseRow = {
   title: string;
   amount: number;
   inTotal: boolean;
+  payStatus: PayStatus | null;
   period: Period | "DAILY";
   note: string | null;
   createdAt: string;
@@ -42,6 +44,7 @@ type Result = {
     supplierPaid: number;
     selfExtra: number;
     inventoryPurchased: number;
+    unpaidSupplierBills: number;
     sales: number;
     netProfit: number;
     byCategory: { name: string; amount: number }[];
@@ -70,10 +73,40 @@ function yearRange(d = new Date()) {
 }
 
 function sourceLabel(source: Source, t: (k: any) => string) {
+  if (source === "UNPAID_SUPPLIER") return t("expense.srcUnpaid");
   if (source === "PURCHASE") return t("expense.srcPurchase");
   if (source === "SUPPLIER_PAYMENT") return t("expense.srcPayment");
   if (source === "PURCHASE_EXTRA") return t("expense.srcExtra");
   return t("expense.srcManual");
+}
+
+function badgeKind(r: ExpenseRow) {
+  if (r.source === "UNPAID_SUPPLIER" || r.payStatus === "UNPAID") return "unpaid";
+  if (r.payStatus === "PARTIAL") return "pending";
+  if (r.source === "SUPPLIER_PAYMENT" || r.source === "PURCHASE_EXTRA" || r.payStatus === "PAID") return "paid";
+  return "ready";
+}
+
+function categoryLabel(name: string | null | undefined, t: (k: any) => string) {
+  const key = (name ?? "").trim().toLowerCase();
+  if (key === "unpaid supplier bill") return t("expense.catUnpaid");
+  if (key === "supplier payment") return t("expense.catPayment");
+  if (key === "purchase extra") return t("expense.catExtra");
+  return name || "";
+}
+
+function displayTitle(r: ExpenseRow, t: (k: any) => string) {
+  const split = r.title.indexOf(" · ");
+  const name = split >= 0 ? r.title.slice(split + 3) : "";
+  if (r.source === "UNPAID_SUPPLIER") return name ? `${t("expense.srcUnpaid")} · ${name}` : t("expense.srcUnpaid");
+  if (r.source === "SUPPLIER_PAYMENT") {
+    const prefix = r.title.startsWith("Paid with purchase")
+      ? t("expense.titlePaidWithPurchase")
+      : t("expense.titleSupplierPayment");
+    return name ? `${prefix} · ${name}` : prefix;
+  }
+  if (r.source === "PURCHASE_EXTRA") return name ? `${t("expense.titleExtra")} · ${name}` : t("expense.titleExtra");
+  return r.title;
 }
 
 export function HotelExpensesPage() {
@@ -175,7 +208,7 @@ export function HotelExpensesPage() {
 
   async function save(e: FormEvent) {
     e.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim() || !spentOn) return;
     const amt = Number(amount);
     if (!(amt > 0)) {
       toast.push(t("expense.badAmount"), "err");
@@ -280,10 +313,11 @@ export function HotelExpensesPage() {
       `hotel-expenses-${from}-to-${to}.csv`,
       rows.map((r) => ({
         Date: r.spentOn,
-        Source: r.source,
+        Source: r.source === "UNPAID_SUPPLIER" ? "UNPAID" : r.source,
         Category: r.category || "",
         Title: r.title,
         Amount: r.amount,
+        PayStatus: r.payStatus || (r.inTotal ? "PAID" : "UNPAID"),
         InTotal: r.inTotal ? "yes" : "no",
         Note: r.note || "",
         AddedBy: r.createdBy?.name || "",
@@ -296,14 +330,12 @@ export function HotelExpensesPage() {
 
   return (
     <div>
-      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: "0.75rem" }}>
+      <div className="page-head">
         <div>
-          <h1 style={{ margin: 0 }}>{t("expense.title")}</h1>
-          <p className="muted" style={{ margin: "0.35rem 0 0" }}>
-            {t("expense.hint")}
-          </p>
+          <h1>{t("expense.title")}</h1>
+          <p>{t("expense.hint")}</p>
         </div>
-        <div className="row" style={{ gap: "0.45rem" }}>
+        <div className="row page-head-actions">
           <button type="button" className="btn ghost sm" onClick={exportSheet}>
             {t("common.excel")}
           </button>
@@ -320,69 +352,67 @@ export function HotelExpensesPage() {
         </div>
       </div>
 
-      <div className="panel panel-pad" style={{ marginTop: "0.85rem" }}>
-        <div className="row" style={{ flexWrap: "wrap", gap: "0.65rem", alignItems: "end" }}>
-          <div className="row" style={{ gap: "0.35rem" }}>
-            <button
-              type="button"
-              className={`btn sm ${rangeMode === "daily" ? "ok" : "ghost"}`}
-              onClick={() => applyRange("daily")}
-            >
+      <div className="panel panel-pad filter-panel">
+        <div className="filter-bar">
+          <div className="seg">
+            <button type="button" className={rangeMode === "daily" ? "active" : ""} onClick={() => applyRange("daily")}>
               {t("expense.rangeDaily")}
             </button>
             <button
               type="button"
-              className={`btn sm ${rangeMode === "monthly" ? "ok" : "ghost"}`}
+              className={rangeMode === "monthly" ? "active" : ""}
               onClick={() => applyRange("monthly")}
             >
               {t("expense.rangeMonthly")}
             </button>
             <button
               type="button"
-              className={`btn sm ${rangeMode === "yearly" ? "ok" : "ghost"}`}
+              className={rangeMode === "yearly" ? "active" : ""}
               onClick={() => applyRange("yearly")}
             >
               {t("expense.rangeYearly")}
             </button>
           </div>
-          <div className="field" style={{ margin: 0 }}>
-            <label>{t("expense.from")}</label>
+          <div className="field">
+            <label htmlFor="expense-from">{t("expense.from")}</label>
             <DateField
+              id="expense-from"
               value={from}
+              max={to || undefined}
               onChange={(v) => {
                 setRangeMode("daily");
                 setFrom(v);
               }}
             />
           </div>
-          <div className="field" style={{ margin: 0 }}>
-            <label>{t("expense.to")}</label>
+          <div className="field">
+            <label htmlFor="expense-to">{t("expense.to")}</label>
             <DateField
+              id="expense-to"
               value={to}
+              min={from || undefined}
               onChange={(v) => {
                 setRangeMode("daily");
                 setTo(v);
               }}
             />
           </div>
-          <div className="field" style={{ margin: 0, minWidth: 160 }}>
-            <label>{t("expense.category")}</label>
-            <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+          <div className="field">
+            <label htmlFor="expense-cat">{t("expense.category")}</label>
+            <select id="expense-cat" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
               <option value="">{t("expense.allCategories")}</option>
               {savedCategories.map((c) => (
                 <option key={c.id} value={c.name}>
-                  {c.name}
+                  {categoryLabel(c.name, t)}
                 </option>
               ))}
             </select>
           </div>
-          <div style={{ flex: 1, minWidth: 180 }}>
-            <SearchField value={q} onChange={setQ} placeholder={t("expense.searchPh")} />
-          </div>
+          <SearchField value={q} onChange={setQ} placeholder={t("expense.searchPh")} />
         </div>
       </div>
 
-      <div className="stats" style={{ marginTop: "0.75rem" }}>
+      <div className="stats">
         <div className="panel stat">
           <span>{t("expense.sales")}</span>
           <strong>{money(s?.sales ?? 0)}</strong>
@@ -423,6 +453,13 @@ export function HotelExpensesPage() {
           <strong>{money(s?.inventoryPurchased ?? 0)}</strong>
           <span className="tiny muted">{t("expense.inventoryPurchasedHint")}</span>
         </div>
+        <div className={`panel stat ${(s?.unpaidSupplierBills ?? 0) > 0 ? "alert-low" : ""}`}>
+          <span>{t("expense.unpaidSupplier")}</span>
+          <strong style={{ color: (s?.unpaidSupplierBills ?? 0) > 0 ? "var(--danger)" : undefined }}>
+            {money(s?.unpaidSupplierBills ?? 0)}
+          </strong>
+          <span className="tiny muted">{t("expense.unpaidSupplierHint")}</span>
+        </div>
       </div>
 
       {(s?.byCategory.length ?? 0) > 0 && (
@@ -434,69 +471,69 @@ export function HotelExpensesPage() {
               className={`chip ${categoryFilter === c.name ? "active" : ""}`}
               onClick={() => setCategoryFilter(categoryFilter === c.name ? "" : c.name)}
             >
-              {c.name} · {money(c.amount)}
+              {categoryLabel(c.name, t)} · {money(c.amount)}
             </button>
           ))}
         </div>
       )}
 
-      <div className="panel panel-pad" style={{ marginTop: "0.75rem" }}>
+      <div className="panel panel-pad">
         {!rows.length && <div className="empty">{t("expense.noRows")}</div>}
         {rows.length > 0 && (
-          <table>
-            <thead>
-              <tr>
-                <th>{t("common.date")}</th>
-                <th>{t("expense.source")}</th>
-                <th>{t("expense.category")}</th>
-                <th>{t("expense.detail")}</th>
-                <th>{t("store.amount")}</th>
-                <th>{t("expense.note")}</th>
-                <th>{t("expense.addedBy")}</th>
-                {canManage && <th />}
-              </tr>
-            </thead>
-            <tbody>
-              {pageRows.map((r) => (
-                <tr key={r.id}>
-                  <td>{r.spentOn}</td>
-                  <td>
-                    <span className={`badge ${r.inTotal ? "unpaid" : "pending"}`}>
-                      {sourceLabel(r.source, t)}
-                    </span>
-                  </td>
-                  <td>{r.category ? <span className="badge">{r.category}</span> : "—"}</td>
-                  <td>
-                    <strong>{r.title}</strong>
-                    {!r.inTotal && (
-                      <div className="tiny muted">{t("expense.invoiceOnly")}</div>
-                    )}
-                  </td>
-                  <td>
-                    <strong>{money(r.amount)}</strong>
-                  </td>
-                  <td className="tiny muted">{r.note || "—"}</td>
-                  <td className="tiny muted">{r.createdBy?.name || "—"}</td>
-                  {canManage && (
+          <div className="table-wrap wide">
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("common.date")}</th>
+                  <th>{t("expense.source")}</th>
+                  <th>{t("expense.category")}</th>
+                  <th>{t("expense.detail")}</th>
+                  <th>{t("store.amount")}</th>
+                  <th>{t("expense.note")}</th>
+                  <th>{t("expense.addedBy")}</th>
+                  {canManage && <th />}
+                </tr>
+              </thead>
+              <tbody>
+                {pageRows.map((r) => (
+                  <tr key={r.id}>
+                    <td>{r.spentOn}</td>
                     <td>
-                      {r.editable ? (
-                        <div className="row">
-                          <button type="button" className="btn ghost sm" onClick={() => openEdit(r)}>
-                            {t("common.edit")}
-                          </button>
-                          <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void remove(r)}>
-                            {t("common.remove")}
-                          </button>
-                        </div>
-                      ) : (
-                        <span className="tiny muted">{t("expense.readOnly")}</span>
+                      <span className={`badge ${badgeKind(r)}`}>{sourceLabel(r.source, t)}</span>
+                    </td>
+                    <td>{r.category ? <span className="badge">{categoryLabel(r.category, t)}</span> : "—"}</td>
+                    <td>
+                      <strong>{displayTitle(r, t)}</strong>
+                      {r.source === "UNPAID_SUPPLIER" && (
+                        <div className="tiny muted">{t("expense.invoiceOnly")}</div>
                       )}
                     </td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    <td>
+                      <strong style={r.inTotal ? undefined : { color: "var(--danger)" }}>{money(r.amount)}</strong>
+                    </td>
+                    <td className="tiny muted">{r.note || "—"}</td>
+                    <td className="tiny muted">{r.createdBy?.name || "—"}</td>
+                    {canManage && (
+                      <td>
+                        {r.editable ? (
+                          <div className="row">
+                            <button type="button" className="btn ghost sm" onClick={() => openEdit(r)}>
+                              {t("common.edit")}
+                            </button>
+                            <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void remove(r)}>
+                              {t("common.remove")}
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="tiny muted">{t("expense.readOnly")}</span>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
         <Pagination page={page} pageSize={PAGE_SIZE} total={rows.length} onChange={setPage} />
       </div>
@@ -516,12 +553,16 @@ export function HotelExpensesPage() {
           <div className="modal-scroll">
             <div className="grid-2">
               <div className="field">
-                <label>{t("common.date")}</label>
-                <input type="date" value={spentOn} onChange={(e) => setSpentOn(e.target.value)} required />
+                <label htmlFor="expense-spent-on">{t("common.date")}</label>
+                <DateField id="expense-spent-on" value={spentOn} onChange={setSpentOn} />
               </div>
               <div className="field">
-                <label>{t("expense.period")}</label>
-                <select value={period} onChange={(e) => setPeriod(e.target.value as Period)}>
+                <label htmlFor="expense-period">{t("expense.period")}</label>
+                <select
+                  id="expense-period"
+                  value={period}
+                  onChange={(e) => setPeriod(e.target.value as Period)}
+                >
                   <option value="DAILY">{t("expense.periodDaily")}</option>
                   <option value="MONTHLY">{t("expense.periodMonthly")}</option>
                 </select>
@@ -622,8 +663,8 @@ export function HotelExpensesPage() {
           {t("expense.manageCategoriesHint")}
         </p>
         {canManage && (
-          <form className="row" onSubmit={addCategory} style={{ gap: "0.5rem", alignItems: "end" }}>
-            <div className="field" style={{ flex: 1, margin: 0 }}>
+          <form className="filter-bar" onSubmit={addCategory}>
+            <div className="field">
               <label>{t("expense.newCategory")}</label>
               <input
                 value={newCatName}
@@ -636,42 +677,44 @@ export function HotelExpensesPage() {
             </button>
           </form>
         )}
-        <div style={{ marginTop: "0.85rem" }}>
+        <div className="modal-scroll" style={{ marginTop: "0.85rem" }}>
           {!savedCategories.filter((c) => !c.id.startsWith("sys-")).length && (
             <div className="empty">{t("expense.noCategories")}</div>
           )}
           {savedCategories.filter((c) => !c.id.startsWith("sys-")).length > 0 && (
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("expense.category")}</th>
-                  {canManage && <th />}
-                </tr>
-              </thead>
-              <tbody>
-                {savedCategories
-                  .filter((c) => !c.id.startsWith("sys-"))
-                  .map((c) => (
-                    <tr key={c.id}>
-                      <td>
-                        <strong>{c.name}</strong>
-                      </td>
-                      {canManage && (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("expense.category")}</th>
+                    {canManage && <th />}
+                  </tr>
+                </thead>
+                <tbody>
+                  {savedCategories
+                    .filter((c) => !c.id.startsWith("sys-"))
+                    .map((c) => (
+                      <tr key={c.id}>
                         <td>
-                          <button
-                            type="button"
-                            className="btn ghost sm"
-                            disabled={busy}
-                            onClick={() => void removeCategory(c)}
-                          >
-                            {t("common.remove")}
-                          </button>
+                          <strong>{c.name}</strong>
                         </td>
-                      )}
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
+                        {canManage && (
+                          <td>
+                            <button
+                              type="button"
+                              className="btn ghost sm"
+                              disabled={busy}
+                              onClick={() => void removeCategory(c)}
+                            >
+                              {t("common.remove")}
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </Modal>

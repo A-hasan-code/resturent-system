@@ -38,8 +38,8 @@ export default defineConfig({
       injectRegister: false,
       includeAssets: ["icons/icon-192.png", "icons/icon-512.png", "login-hero.jpg"],
       manifest: {
-        name: "Hotel System POS",
-        short_name: "Hotel POS",
+        name: "PixalBotics Restaurant",
+        short_name: "PixalBotics",
         description: "Offline restaurant POS — orders, kitchen, billing",
         start_url: "/",
         scope: "/",

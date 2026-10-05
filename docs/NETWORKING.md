@@ -33,7 +33,7 @@ flowchart LR
   - realtime updates (`/socket.io`)
   - the Android app download (`/downloads/hotel-system.apk`)
 - **The database is never exposed.** PostgreSQL listens on `127.0.0.1` only. Clients talk to the API, never to the database.
-- **All printing happens on the server.** A waiter tablet sends "print kitchen slip" to the API. The server renders ESC/POS and sends it to the printer, either a USB printer attached to the server PC or a network printer on port 9100. Tablets never need printer drivers.
+- **All print jobs are queued on the server.** A waiter tablet sends "print kitchen slip" to the API. The server renders ESC/POS and either sends it itself (USB on the server PC, or LAN printer on port 9100) or hands the bytes to an **Additional PC desktop print agent** for a local USB printer. Tablets never need printer drivers.
 
 ## 2. Ports
 

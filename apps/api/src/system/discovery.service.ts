@@ -77,7 +77,7 @@ export class DiscoveryService implements OnApplicationBootstrap, OnModuleDestroy
     try {
       this.bonjour = new Bonjour(undefined, (e: Error) => this.log.warn(`mDNS: ${e.message}`));
       this.mdns = this.bonjour.publish({
-        name: `Hotel System ${this.identity.serverId.slice(0, 8)}`,
+        name: `PixalBotics Restaurant ${this.identity.serverId.slice(0, 8)}`,
         type: "http",
         port: this.identity.port,
         host: MDNS_HOST,

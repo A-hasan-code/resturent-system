@@ -16,7 +16,7 @@ $DbName = "hotel_db"
 $DbUser = "hotel"
 $EnvFile = Join-Path $DataDir "hotel.env"
 $LogDir = Join-Path $DataDir "logs"
-$DesktopExe = Join-Path $AppDir "desktop\Hotel System.exe"
+$DesktopExe = Join-Path $AppDir "desktop\PixalBotics Restaurant.exe"
 $StartMenu = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Hotel System"
 
 New-Item -ItemType Directory -Force -Path $DataDir, $LogDir | Out-Null

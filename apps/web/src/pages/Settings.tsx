@@ -1,14 +1,39 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { api, uploadApi } from "../api";
 import { useAuth } from "../auth";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
 import { useConfirm } from "../components/ConfirmModal";
+import { BillPreview, type BillOrder } from "../components/BillPreview";
 import { useSocketEvent } from "../socket";
 import { serverOrigin } from "../server";
 import { applyAccent, THEME_PRESETS, useBrand } from "../brand";
 import { useT, type MessageKey } from "../i18n";
+
+const SAMPLE_BILL: BillOrder = {
+  orderNo: 206,
+  billNo: 206,
+  tableNo: "Roof Top · Table 4",
+  tableName: "Table 4",
+  partitionName: "Roof Top",
+  paymentStatus: "PAID",
+  total: 2785,
+  tipAmount: 0,
+  paidAmount: 2785,
+  createdAt: new Date().toISOString(),
+  cashier: "Cashier",
+  waiter: "Ali",
+  orderedBy: { name: "Ali", roleName: "Waiter" },
+  servedByName: "Hassan",
+  items: [
+    { name: "Beef Karahi Black Pepper (Full)", quantity: 0.75, sellUnit: "KG", ratePerUnit: 2500, amount: 1875 },
+    { name: "Quetta Sangat Special Kheer", quantity: 1, sellUnit: "PCS", ratePerUnit: 150, amount: 150 },
+    { name: "Per Head", quantity: 3, sellUnit: "PCS", ratePerUnit: 120, amount: 360 },
+    { name: "Gur Chaye", quantity: 3, sellUnit: "PCS", ratePerUnit: 100, amount: 300 },
+    { name: "Raita Glass Extra", quantity: 1, sellUnit: "PCS", ratePerUnit: 100, amount: 100 },
+  ],
+};
 
 type ServerInfo = {
   serverId: string;
@@ -35,7 +60,7 @@ type Restaurant = {
 type Printer = {
   id: string;
   name: string;
-  kind: "WINDOWS" | "NETWORK" | "FILE";
+  kind: "WINDOWS" | "NETWORK" | "FILE" | "AGENT";
   target: string;
   paperWidth: number;
   printsKot: boolean;
@@ -43,6 +68,14 @@ type Printer = {
   station: string;
   categories: string;
   active: boolean;
+  agentId?: string | null;
+  agent?: {
+    id: string;
+    hostname: string;
+    displayName: string;
+    lastSeenAt: string;
+    online: boolean;
+  } | null;
 };
 
 type SystemPrinter = { name: string; driver: string; port: string; status: string; isDefault: boolean };
@@ -107,6 +140,7 @@ export function SettingsPage() {
         </div>
       </div>
       <ServerSection canEdit={can("system.manage")} />
+      {can("system.manage") && <BillDesignSection />}
       {can("system.manage") && <TipPrintSection />}
       {can("printers.manage") && <PrintersSection />}
       {can("printers.manage") && <JobsSection />}
@@ -291,11 +325,11 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
 
       <div className="panel panel-pad">
         <h2 className="settings-h">{t("settings.connectTablets")}</h2>
-        <div className="row" style={{ alignItems: "flex-start", gap: "1.25rem" }}>
+        <div className="row settings-connect-row">
           <div className="qr-box">
             <QRCodeSVG value={mainUrl} size={150} level="M" />
           </div>
-          <div style={{ flex: 1, minWidth: 220 }}>
+          <div className="settings-connect-copy">
             <p className="muted" style={{ marginTop: 0 }}>
               {t("settings.joinWifi")}{" "}
               <strong>{t("settings.addHome")}</strong>
@@ -323,11 +357,11 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
         {info?.androidApk && (
           <>
             <h2 className="settings-h" style={{ marginTop: "1.25rem" }}>{t("settings.androidApp")}</h2>
-            <div className="row" style={{ alignItems: "flex-start", gap: "1.25rem" }}>
+            <div className="row settings-connect-row">
               <div className="qr-box">
                 <QRCodeSVG value={`${mainUrl}${info.androidApk.path}`} size={150} level="M" />
               </div>
-              <div style={{ flex: 1, minWidth: 220 }}>
+              <div className="settings-connect-copy">
                 <p className="muted" style={{ marginTop: 0 }}>
                   {t("settings.scanTablet")} {t("settings.unknownApps")}
                 </p>
@@ -343,15 +377,271 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
   );
 }
 
+type BillDesignState = {
+  showLogo: boolean;
+  showName: boolean;
+  showTagline: boolean;
+  showAddress: boolean;
+  showPhone: boolean;
+  title: string;
+  showOrderBy: boolean;
+  showServedBy: boolean;
+  showCashier: boolean;
+  showTip: boolean;
+  showPaidStamp: boolean;
+  paidStampText: string;
+  paidStampBig: boolean;
+  footer: string;
+};
+
+const DEFAULT_BILL_DESIGN: BillDesignState = {
+  showLogo: true,
+  showName: true,
+  showTagline: true,
+  showAddress: true,
+  showPhone: true,
+  title: "Customer Bill",
+  showOrderBy: true,
+  showServedBy: true,
+  showCashier: true,
+  showTip: true,
+  showPaidStamp: true,
+  paidStampText: "*** PAID ***",
+  paidStampBig: true,
+  footer: "Thanks for your Visit..",
+};
+
+function BillDesignSection() {
+  const toast = useToast();
+  const t = useT();
+  const { logoSrc } = useBrand();
+  const [d, setD] = useState<BillDesignState>(DEFAULT_BILL_DESIGN);
+  const [paperWidth, setPaperWidth] = useState<58 | 72 | 80 | 112>(80);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api<{
+      print: { bill: Partial<BillDesignState> };
+    }>("/system/settings")
+      .then((s) => {
+        const b = s.print?.bill || {};
+        setD({
+          showLogo: b.showLogo !== false,
+          showName: b.showName !== false,
+          showTagline: b.showTagline !== false,
+          showAddress: b.showAddress !== false,
+          showPhone: b.showPhone !== false,
+          title: b.title || "Customer Bill",
+          showOrderBy: b.showOrderBy !== false,
+          showServedBy: b.showServedBy !== false,
+          showCashier: b.showCashier !== false,
+          showTip: b.showTip !== false,
+          showPaidStamp: b.showPaidStamp !== false,
+          paidStampText: b.paidStampText || "*** PAID ***",
+          paidStampBig: b.paidStampBig !== false,
+          footer: b.footer || "Thanks for your Visit..",
+        });
+      })
+      .catch(() => undefined);
+  }, []);
+
+  function patch(p: Partial<BillDesignState>) {
+    setD((prev) => ({ ...prev, ...p }));
+  }
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api("/system/settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          billShowLogo: d.showLogo ? "1" : "0",
+          billShowName: d.showName ? "1" : "0",
+          billShowTagline: d.showTagline ? "1" : "0",
+          billShowAddress: d.showAddress ? "1" : "0",
+          billShowPhone: d.showPhone ? "1" : "0",
+          billTitle: d.title.trim() || "Customer Bill",
+          billShowOrderBy: d.showOrderBy ? "1" : "0",
+          billShowServedBy: d.showServedBy ? "1" : "0",
+          billShowCashier: d.showCashier ? "1" : "0",
+          billShowTip: d.showTip ? "1" : "0",
+          billShowPaidStamp: d.showPaidStamp ? "1" : "0",
+          billPaidStampText: d.paidStampText.trim() || "*** PAID ***",
+          billPaidStampBig: d.paidStampBig ? "1" : "0",
+          billFooter: d.footer,
+        }),
+      });
+      toast.push(t("settings.saved"), "ok");
+    } catch (err) {
+      toast.push(errMsg(err, t("settings.saveFailed")), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const designOverride = useMemo(
+    () => ({
+      showLogo: d.showLogo,
+      showName: d.showName,
+      showTagline: d.showTagline,
+      showAddress: d.showAddress,
+      showPhone: d.showPhone,
+      title: d.title,
+      showOrderBy: d.showOrderBy,
+      showServedBy: d.showServedBy,
+      showCashier: d.showCashier,
+      showTip: d.showTip,
+      showPaidStamp: d.showPaidStamp,
+      footer: d.footer,
+    }),
+    [d]
+  );
+
+  return (
+    <form className="panel panel-pad bill-design" onSubmit={save} style={{ marginBottom: "1rem" }}>
+      <h2 className="settings-h">{t("settings.billDesign")}</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        {t("settings.billDesignHint")}
+      </p>
+
+      <div className="bill-design-grid">
+        <div>
+          <h3 className="settings-h" style={{ fontSize: "1rem" }}>
+            {t("settings.billHeader")}
+          </h3>
+          <label className="switch-row">
+            <input type="checkbox" checked={d.showLogo} onChange={(e) => patch({ showLogo: e.target.checked })} />
+            <span>
+              {t("settings.showLogo")}
+              {!logoSrc ? <small className="muted"> — {t("settings.uploadLogoFirst")}</small> : null}
+            </span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={d.showName} onChange={(e) => patch({ showName: e.target.checked })} />
+            <span>{t("settings.showRestaurantName")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={d.showTagline} onChange={(e) => patch({ showTagline: e.target.checked })} />
+            <span>{t("settings.showTagline")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={d.showAddress} onChange={(e) => patch({ showAddress: e.target.checked })} />
+            <span>{t("settings.showAddress")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={d.showPhone} onChange={(e) => patch({ showPhone: e.target.checked })} />
+            <span>{t("settings.showPhone")}</span>
+          </label>
+
+          <div className="field">
+            <label>{t("settings.billTitle")}</label>
+            <input value={d.title} onChange={(e) => patch({ title: e.target.value })} maxLength={40} />
+          </div>
+
+          <h3 className="settings-h" style={{ fontSize: "1rem" }}>
+            {t("settings.billFields")}
+          </h3>
+          <label className="switch-row">
+            <input type="checkbox" checked={d.showOrderBy} onChange={(e) => patch({ showOrderBy: e.target.checked })} />
+            <span>{t("settings.showOrderBy")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={d.showServedBy} onChange={(e) => patch({ showServedBy: e.target.checked })} />
+            <span>{t("settings.showServedBy")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={d.showCashier} onChange={(e) => patch({ showCashier: e.target.checked })} />
+            <span>{t("settings.showCashier")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={d.showTip} onChange={(e) => patch({ showTip: e.target.checked })} />
+            <span>{t("settings.showTip")}</span>
+          </label>
+
+          <h3 className="settings-h" style={{ fontSize: "1rem" }}>
+            {t("settings.paidStamp")}
+          </h3>
+          <label className="switch-row">
+            <input
+              type="checkbox"
+              checked={d.showPaidStamp}
+              onChange={(e) => patch({ showPaidStamp: e.target.checked })}
+            />
+            <span>{t("settings.showPaidStamp")}</span>
+          </label>
+          {d.showPaidStamp ? (
+            <div className="paid-stamp-sample" aria-hidden>
+              <img src={brandingUrl("/branding/paid-stamp.png")} alt="" />
+              <span className="tiny muted">{t("settings.paidStampGraphicHint")}</span>
+            </div>
+          ) : null}
+
+          <div className="field">
+            <label>{t("settings.billFooter")}</label>
+            <input value={d.footer} onChange={(e) => patch({ footer: e.target.value })} maxLength={120} />
+          </div>
+
+          <p className="tiny muted">{t("settings.billLogoHint")}</p>
+
+          <div className="form-footer">
+            <button className="btn" type="submit" disabled={busy}>
+              {busy ? t("common.saving") : t("common.save")}
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem", gap: "0.5rem", flexWrap: "wrap" }}>
+            <h3 className="settings-h" style={{ fontSize: "1rem", margin: 0 }}>
+              {t("settings.billPreview")}
+            </h3>
+            <div className="paper-size-tabs" role="tablist" aria-label={t("settings.paperWidth")}>
+              {(
+                [
+                  [58, "settings.paper58Narrow"],
+                  [72, "settings.paper72"],
+                  [80, "settings.paper80Standard"],
+                  [112, "settings.paper112"],
+                ] as const
+              ).map(([mm, key]) => (
+                <button
+                  key={mm}
+                  type="button"
+                  className={paperWidth === mm ? "active" : undefined}
+                  onClick={() => setPaperWidth(mm)}
+                >
+                  {t(key)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="tiny muted" style={{ marginTop: 0 }}>
+            {t("settings.paperSizesHint")}
+          </p>
+          <div className="bill-design-preview-frame">
+            <BillPreview
+              order={SAMPLE_BILL}
+              mode="customer"
+              paperWidth={paperWidth}
+              designOverride={designOverride}
+            />
+          </div>
+        </div>
+      </div>
+    </form>
+  );
+}
+
+function brandingUrl(path: string) {
+  const origin = serverOrigin() || (typeof location !== "undefined" ? location.origin : "");
+  return `${origin}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 function TipPrintSection() {
   const toast = useToast();
   const t = useT();
   const [tipSplit, setTipSplit] = useState("SPLIT_50");
-  const [billShowOrderBy, setBillShowOrderBy] = useState(true);
-  const [billShowServedBy, setBillShowServedBy] = useState(true);
-  const [billShowCashier, setBillShowCashier] = useState(true);
-  const [billShowTip, setBillShowTip] = useState(true);
-  const [billFooter, setBillFooter] = useState("Thank you - Come again!");
   const [kotShowOrderBy, setKotShowOrderBy] = useState(true);
   const [kotFooter, setKotFooter] = useState("");
   const [perHeadEnabled, setPerHeadEnabled] = useState(true);
@@ -364,23 +654,11 @@ function TipPrintSection() {
       tip: { split: string };
       billing?: { perHead?: { enabled: boolean; amount: number; label: string } };
       print: {
-        bill: {
-          showOrderBy: boolean;
-          showServedBy: boolean;
-          showCashier: boolean;
-          showTip: boolean;
-          footer: string;
-        };
         kot: { showOrderBy: boolean; footer: string };
       };
     }>("/system/settings")
       .then((s) => {
         setTipSplit(s.tip?.split || "SPLIT_50");
-        setBillShowOrderBy(s.print?.bill?.showOrderBy !== false);
-        setBillShowServedBy(s.print?.bill?.showServedBy !== false);
-        setBillShowCashier(s.print?.bill?.showCashier !== false);
-        setBillShowTip(s.print?.bill?.showTip !== false);
-        setBillFooter(s.print?.bill?.footer || "Thank you - Come again!");
         setKotShowOrderBy(s.print?.kot?.showOrderBy !== false);
         setKotFooter(s.print?.kot?.footer || "");
         const ph = s.billing?.perHead;
@@ -402,11 +680,6 @@ function TipPrintSection() {
         method: "PATCH",
         body: JSON.stringify({
           tipSplit,
-          billShowOrderBy: billShowOrderBy ? "1" : "0",
-          billShowServedBy: billShowServedBy ? "1" : "0",
-          billShowCashier: billShowCashier ? "1" : "0",
-          billShowTip: billShowTip ? "1" : "0",
-          billFooter,
           kotShowOrderBy: kotShowOrderBy ? "1" : "0",
           kotFooter,
           perHeadEnabled: perHeadEnabled ? "1" : "0",
@@ -475,30 +748,6 @@ function TipPrintSection() {
       </div>
 
       <h3 className="settings-h" style={{ fontSize: "1rem" }}>
-        {t("settings.billFields")}
-      </h3>
-      <label className="switch-row">
-        <input type="checkbox" checked={billShowOrderBy} onChange={(e) => setBillShowOrderBy(e.target.checked)} />
-        <span>{t("settings.showOrderBy")}</span>
-      </label>
-      <label className="switch-row">
-        <input type="checkbox" checked={billShowServedBy} onChange={(e) => setBillShowServedBy(e.target.checked)} />
-        <span>{t("settings.showServedBy")}</span>
-      </label>
-      <label className="switch-row">
-        <input type="checkbox" checked={billShowCashier} onChange={(e) => setBillShowCashier(e.target.checked)} />
-        <span>{t("settings.showCashier")}</span>
-      </label>
-      <label className="switch-row">
-        <input type="checkbox" checked={billShowTip} onChange={(e) => setBillShowTip(e.target.checked)} />
-        <span>{t("settings.showTip")}</span>
-      </label>
-      <div className="field">
-        <label>{t("settings.billFooter")}</label>
-        <input value={billFooter} onChange={(e) => setBillFooter(e.target.value)} maxLength={120} />
-      </div>
-
-      <h3 className="settings-h" style={{ fontSize: "1rem" }}>
         {t("settings.kotFields")}
       </h3>
       <label className="switch-row">
@@ -537,10 +786,17 @@ function PrintersSection() {
 
   useEffect(() => {
     void load();
+    // Additional PC agents sync USB printers while the desktop app is open.
+    const id = window.setInterval(() => void load(), 15_000);
+    return () => window.clearInterval(id);
   }, [load]);
 
   async function openEditor(p?: Printer) {
     setEdit(p ? { ...p } : { ...EMPTY_PRINTER });
+    if (p?.kind === "AGENT") {
+      setSystem([]);
+      return;
+    }
     try {
       setSystem(await api<SystemPrinter[]>("/printers/system"));
     } catch {
@@ -594,6 +850,7 @@ function PrintersSection() {
   function kindLabel(kind: Printer["kind"]) {
     if (kind === "WINDOWS") return t("settings.usb");
     if (kind === "NETWORK") return t("settings.lan");
+    if (kind === "AGENT") return t("settings.usbAdditional");
     return t("settings.previewFile");
   }
 
@@ -613,7 +870,8 @@ function PrintersSection() {
           {t("settings.addPrinter")}
         </button>
       </div>
-      <table style={{ marginTop: "0.75rem" }}>
+      <div className="table-wrap wide" style={{ marginTop: "0.75rem" }}>
+      <table>
         <thead>
           <tr>
             <th>{t("common.name")}</th>
@@ -632,10 +890,19 @@ function PrintersSection() {
               <td>
                 {p.name}
                 {p.categories && <div className="tiny muted">{t("settings.only")} {p.categories}</div>}
+                {p.kind === "AGENT" && p.agent && (
+                  <div className="tiny muted">
+                    {p.agent.online ? t("settings.agentOnline") : t("settings.agentOffline")} · {p.agent.displayName}
+                  </div>
+                )}
               </td>
               <td className="tiny">{p.station || "—"}</td>
               <td>{kindLabel(p.kind)}</td>
-              <td className="tiny">{p.target || (p.kind === "FILE" ? "data/prints" : "—")}</td>
+              <td className="tiny">
+                {p.kind === "AGENT"
+                  ? p.target
+                  : p.target || (p.kind === "FILE" ? "data/prints" : "—")}
+              </td>
               <td>
                 <input type="checkbox" checked={p.printsKot} onChange={(e) => void toggle(p, { printsKot: e.target.checked })} />
               </td>
@@ -667,6 +934,7 @@ function PrintersSection() {
           )}
         </tbody>
       </table>
+      </div>
 
       <Modal open={!!edit} title={edit?.id ? t("settings.editPrinter") : t("settings.addPrinterTitle")} onClose={() => setEdit(null)}>
         {edit && (
@@ -687,11 +955,25 @@ function PrintersSection() {
             </div>
             <div className="field">
               <label>{t("settings.connOptions")}</label>
-              <select value={edit.kind} onChange={(e) => setEdit({ ...edit, kind: e.target.value as Printer["kind"], target: "" })}>
-                <option value="NETWORK">{t("settings.lan")}</option>
-                <option value="WINDOWS">{t("settings.usb")}</option>
-                <option value="FILE">{t("settings.previewFile")}</option>
-              </select>
+              {edit.kind === "AGENT" ? (
+                <>
+                  <input value={t("settings.usbAdditional")} disabled />
+                  <p className="tiny muted">{t("settings.agentPrinterHint")}</p>
+                  {edit.agent && (
+                    <p className="tiny muted">
+                      {edit.agent.online ? t("settings.agentOnline") : t("settings.agentOffline")} · {edit.agent.displayName}
+                      {" · "}
+                      {edit.target}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <select value={edit.kind} onChange={(e) => setEdit({ ...edit, kind: e.target.value as Printer["kind"], target: "" })}>
+                  <option value="NETWORK">{t("settings.lan")}</option>
+                  <option value="WINDOWS">{t("settings.usbServer")}</option>
+                  <option value="FILE">{t("settings.previewFile")}</option>
+                </select>
+              )}
             </div>
             {edit.kind === "WINDOWS" && (
               <div className="field">
@@ -707,6 +989,7 @@ function PrintersSection() {
                 {!system.length && (
                   <p className="tiny muted">{t("settings.noWinPrinters")}</p>
                 )}
+                <p className="tiny muted">{t("settings.usbServerHint")}</p>
               </div>
             )}
             {edit.kind === "NETWORK" && (
@@ -730,8 +1013,10 @@ function PrintersSection() {
             <div className="field">
               <label>{t("settings.paper")}</label>
               <select value={edit.paperWidth} onChange={(e) => setEdit({ ...edit, paperWidth: Number(e.target.value) })}>
-                <option value={80}>{t("settings.paper80")}</option>
                 <option value={58}>{t("settings.paper58")}</option>
+                <option value={72}>{t("settings.paper72")}</option>
+                <option value={80}>{t("settings.paper80")}</option>
+                <option value={112}>{t("settings.paper112")}</option>
               </select>
             </div>
             <div className="row">
@@ -747,7 +1032,11 @@ function PrintersSection() {
             </div>
             <div className="field">
               <label>{t("settings.categoriesHint")}</label>
-              <input value={edit.categories} onChange={(e) => setEdit({ ...edit, categories: e.target.value })} />
+              <input
+                value={edit.categories}
+                onChange={(e) => setEdit({ ...edit, categories: e.target.value })}
+                placeholder="beverages, cooking, bbq"
+              />
             </div>
             </div>
             <div className="form-actions">
@@ -821,7 +1110,8 @@ function JobsSection() {
           {t("common.refresh")}
         </button>
       </div>
-      <table style={{ marginTop: "0.75rem" }}>
+      <div className="table-wrap wide" style={{ marginTop: "0.75rem" }}>
+      <table>
         <thead>
           <tr>
             <th>{t("common.time")}</th>
@@ -868,6 +1158,7 @@ function JobsSection() {
           )}
         </tbody>
       </table>
+      </div>
       <Modal open={preview != null} title={t("settings.printPreview")} onClose={() => setPreview(null)}>
         <div className="modal-scroll">
           <pre className="print-preview">{preview}</pre>
@@ -1090,7 +1381,8 @@ function BackupSection() {
           {busy ? t("settings.working") : t("settings.backupNow")}
         </button>
       </div>
-      <table style={{ marginTop: "0.75rem" }}>
+      <div className="table-wrap" style={{ marginTop: "0.75rem" }}>
+      <table>
         <thead>
           <tr>
             <th>{t("settings.file")}</th>
@@ -1126,6 +1418,7 @@ function BackupSection() {
           )}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

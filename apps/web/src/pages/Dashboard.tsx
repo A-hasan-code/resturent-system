@@ -76,6 +76,10 @@ type Stats = {
   totalOrders: number;
   unpaidCount: number;
   unpaidAmount: number;
+  creditOutstanding?: number;
+  creditOutstandingCount?: number;
+  creditPaidToday?: number;
+  creditPaidTodayCount?: number;
   revenueToday: number;
   revenueAll: number;
   profitToday: number;
@@ -197,18 +201,18 @@ function NetProfitPanel({ data }: { data: Stats | null }) {
   if (!data?.netProfit) return null;
   const isLoss = (win?.netProfit ?? 0) < 0;
   return (
-    <div className="panel panel-pad" style={{ marginTop: "0.85rem" }}>
-      <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+    <div className="panel panel-pad dash-net">
+      <div className="row dash-net-head">
         <div>
-          <h2 style={{ margin: 0, fontSize: "1.1rem" }}>
+          <h2 className="dash-h2">
             {isLoss ? t("dash.netTitleLoss") : t("dash.netTitle")}
           </h2>
-          <p className="tiny muted" style={{ margin: "0.25rem 0 0" }}>
+          <p className="tiny muted dash-sub">
             {isLoss ? t("dash.netLossHint") : t("dash.netHint")}
             {win ? ` · ${win.from} → ${win.to}` : ""}
           </p>
         </div>
-        <div className="row" style={{ gap: 6 }}>
+        <div className="row dash-net-tabs">
           {(["daily", "monthly", "yearly"] as const).map((m) => (
             <button
               key={m}
@@ -221,12 +225,12 @@ function NetProfitPanel({ data }: { data: Stats | null }) {
           ))}
         </div>
       </div>
-      <div className="stats" style={{ marginTop: "0.75rem" }}>
-        <div className="panel stat">
+      <div className="stats dash-net-stats">
+        <div className="stat dash-metric">
           <span>{t("dash.netSales")}</span>
           <strong>{money(win?.sales ?? 0)}</strong>
         </div>
-        <div className="panel stat">
+        <div className="stat dash-metric">
           <span>{t("dash.netExpense")}</span>
           <strong>{money(win?.totalExpense ?? 0)}</strong>
           <span className="tiny muted">
@@ -234,7 +238,7 @@ function NetProfitPanel({ data }: { data: Stats | null }) {
             {money(win?.supplierPaid ?? 0)}
           </span>
         </div>
-        <div className={`panel stat ${isLoss ? "alert-low" : ""}`}>
+        <div className={`stat dash-metric ${isLoss ? "alert-low" : ""}`}>
           <span>{isLoss ? t("dash.netLoss") : t("dash.netProfit")}</span>
           <strong style={{ color: isLoss ? "var(--danger)" : "var(--ok)" }}>
             {isLoss ? (
@@ -264,6 +268,7 @@ function AdminDash({
   can: (...p: string[]) => boolean;
 }) {
   const t = useT();
+  const salesToday = data ? money(data.orderAmountToday ?? data.salesToday ?? 0) : "—";
   return (
     <>
       <StaleAlert
@@ -276,81 +281,67 @@ function AdminDash({
         <LowStockAlert items={data?.lowStock ?? []} count={data?.lowStockCount ?? 0} />
       )}
 
-      <NetProfitPanel data={data} />
-
-      <div className="stats">
+      <p className="dash-section-title">{t("dash.sectionToday")}</p>
+      <div className="stats dash-stats-today">
+        <div className="panel stat stat-sales">
+          <span>{t("dash.salesToday")}</span>
+          <strong>{salesToday}</strong>
+          <span className="tiny muted dash-stat-hint">{t("dash.hintBillTotal")}</span>
+        </div>
         <div className="panel stat">
           <span>{t("dash.ordersToday")}</span>
           <strong>{data?.ordersToday ?? "—"}</strong>
-          <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            {t("dash.hintPlacedToday")}
-          </span>
-        </div>
-        <div className="panel stat">
-          <span>{t("dash.orderAmountToday")}</span>
-          <strong>
-            {data ? money(data.orderAmountToday ?? data.salesToday) : "—"}
-          </strong>
-          <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            {t("dash.hintBillTotal")}
-          </span>
-        </div>
-        <div className="panel stat">
-          <span>{t("dash.stockUsedToday")}</span>
-          <strong>
-            {data ? money(data.stockUsedToday ?? data.costToday) : "—"}
-          </strong>
-          <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            {t("dash.hintRecipeCost")}
-          </span>
-        </div>
-        <div className="panel stat">
-          <span>{t("dash.profitToday")}</span>
-          <strong
-            style={{
-              color:
-                (data?.profitToday ?? 0) >= 0 ? "var(--ok)" : "var(--danger)",
-            }}
-          >
-            {data ? money(data.profitToday) : "—"}
-          </strong>
-          <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            {t("dash.hintProfit")}
-          </span>
-        </div>
-        <div className="panel stat">
-          <span>{t("dash.tipsToday")}</span>
-          <strong>{data ? money(data.tipsToday ?? 0) : "—"}</strong>
-          <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            {t("dash.hintTips")}
-          </span>
-        </div>
-      </div>
-
-      <TipAndStaffPanels data={data} />
-
-      <div className="stats">
-        <div className="panel stat">
-          <span>{t("dash.totalOrders")}</span>
-          <strong>{data?.totalOrders ?? "—"}</strong>
-          <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            {t("dash.hintAllTime")}
-          </span>
+          <span className="tiny muted dash-stat-hint">{t("dash.hintPlacedToday")}</span>
         </div>
         <div className="panel stat">
           <span>{t("dash.collectedToday")}</span>
           <strong>{data ? money(data.revenueToday) : "—"}</strong>
-          <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            {t("dash.hintPaidToday")}
+          <span className="tiny muted dash-stat-hint">{t("dash.hintPaidToday")}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.tipsToday")}</span>
+          <strong>{data ? money(data.tipsToday ?? 0) : "—"}</strong>
+          <span className="tiny muted dash-stat-hint">{t("dash.hintTips")}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.creditTotal")}</span>
+          <strong style={{ color: (data?.creditOutstanding ?? 0) ? "var(--danger)" : undefined }}>
+            {data ? money(data.creditOutstanding ?? 0) : "—"}
+          </strong>
+          <span className="tiny muted dash-stat-hint">
+            {t("dash.creditDueHint", { n: data?.creditOutstandingCount ?? 0 })}
           </span>
         </div>
         <div className="panel stat">
+          <span>{t("dash.creditPaidToday")}</span>
+          <strong>{data ? money(data.creditPaidToday ?? 0) : "—"}</strong>
+          <span className="tiny muted dash-stat-hint">
+            {t("dash.creditPaidHint", { n: data?.creditPaidTodayCount ?? 0 })}
+          </span>
+        </div>
+      </div>
+
+      <NetProfitPanel data={data} />
+
+      <p className="dash-section-title">{t("dash.sectionOverview")}</p>
+      <div className="stats">
+        <div className="panel stat">
           <span>{t("dash.unpaid")}</span>
-          <strong>
+          <strong style={{ color: (data?.unpaidCount ?? 0) ? "var(--danger)" : undefined }}>
             {data?.unpaidCount ?? "—"}
-            <span className="tiny muted" style={{ display: "block", fontWeight: 500 }}>
+            <span className="tiny muted dash-stat-sub">
               {data ? money(data.unpaidAmount) : ""}
             </span>
+          </strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.pendingKitchen")}</span>
+          <strong>{data?.pendingKitchen ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.ready")}</span>
+          <strong style={{ color: (data?.ready ?? 0) ? "var(--ok)" : undefined }}>
+            {data?.ready ?? "—"}
           </strong>
         </div>
         <div className="panel stat">
@@ -363,7 +354,14 @@ function AdminDash({
             {data?.lowStockCount ?? "—"}
           </strong>
         </div>
+        <div className="panel stat">
+          <span>{t("dash.totalOrders")}</span>
+          <strong>{data?.totalOrders ?? "—"}</strong>
+          <span className="tiny muted dash-stat-hint">{t("dash.hintAllTime")}</span>
+        </div>
       </div>
+
+      <TipAndStaffPanels data={data} />
 
       <div className="dash-grid">
         <OrderList
@@ -403,32 +401,50 @@ function CashierDash({
         message={t("dash.delayedWaiting")}
       />
 
-      <div className="stats">
-        <div className="panel stat">
-          <span>{t("dash.unpaidBills")}</span>
-          <strong style={{ color: (data?.unpaidCount ?? 0) ? "var(--danger)" : undefined }}>
-            {data?.unpaidCount ?? "—"}
-            <span className="tiny muted" style={{ display: "block", fontWeight: 500 }}>
-              {data ? money(data.unpaidAmount) : ""}
-            </span>
+      <div className="stats dash-stats-today">
+        <div className="panel stat stat-sales">
+          <span>{t("dash.salesToday")}</span>
+          <strong>
+            {data ? money(data.salesToday || data.orderAmountToday || data.revenueToday) : "—"}
           </strong>
-        </div>
-        <div className="panel stat">
-          <span>{t("dash.readyToServe")}</span>
-          <strong style={{ color: (data?.ready ?? 0) ? "var(--ok)" : undefined }}>
-            {data?.ready ?? "—"}
-          </strong>
+          <span className="tiny muted dash-stat-hint">
+            {t("dash.hintNOrders", { n: data?.ordersToday ?? 0 })} · {t("dash.hintBillTotal")}
+          </span>
         </div>
         <div className="panel stat">
           <span>{t("dash.ordersToday")}</span>
           <strong>{data?.ordersToday ?? "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>{t("dash.salesToday")}</span>
-          <strong>{data ? money(data.salesToday || data.orderAmountToday || data.revenueToday) : "—"}</strong>
-          <span className="tiny muted" style={{ display: "block", marginTop: "0.25rem" }}>
-            {t("dash.hintNOrders", { n: data?.ordersToday ?? 0 })} · {t("dash.hintOrderAmount")}
+          <span>{t("dash.unpaidBills")}</span>
+          <strong style={{ color: (data?.unpaidCount ?? 0) ? "var(--danger)" : undefined }}>
+            {data?.unpaidCount ?? "—"}
+            <span className="tiny muted dash-stat-sub">
+              {data ? money(data.unpaidAmount) : ""}
+            </span>
+          </strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.creditDue")}</span>
+          <strong style={{ color: (data?.creditOutstanding ?? 0) ? "var(--danger)" : undefined }}>
+            {data ? money(data.creditOutstanding ?? 0) : "—"}
+            <span className="tiny muted dash-stat-sub">
+              {t("dash.creditDueHint", { n: data?.creditOutstandingCount ?? 0 })}
+            </span>
+          </strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.creditPaidToday")}</span>
+          <strong>{data ? money(data.creditPaidToday ?? 0) : "—"}</strong>
+          <span className="tiny muted dash-stat-hint">
+            {t("dash.creditPaidHint", { n: data?.creditPaidTodayCount ?? 0 })}
           </span>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.readyToServe")}</span>
+          <strong style={{ color: (data?.ready ?? 0) ? "var(--ok)" : undefined }}>
+            {data?.ready ?? "—"}
+          </strong>
         </div>
         <div className="panel stat">
           <span>{t("dash.tipsToday")}</span>
@@ -712,14 +728,15 @@ function ManagerDash({
         linkLabel={t("dash.openKitchen")}
       />
 
-      <div className="stats">
+      <div className="stats dash-stats-today">
+        <div className="panel stat stat-sales">
+          <span>{t("dash.salesToday")}</span>
+          <strong>{data ? money(data.orderAmountToday ?? data.salesToday ?? 0) : "—"}</strong>
+          <span className="tiny muted dash-stat-hint">{t("dash.hintBillTotal")}</span>
+        </div>
         <div className="panel stat">
           <span>{t("dash.ordersToday")}</span>
           <strong>{data?.ordersToday ?? "—"}</strong>
-        </div>
-        <div className="panel stat">
-          <span>{t("dash.orderAmountToday")}</span>
-          <strong>{data ? money(data.orderAmountToday ?? data.salesToday ?? 0) : "—"}</strong>
         </div>
         <div className="panel stat">
           <span>{t("dash.tipsToday")}</span>
@@ -728,6 +745,15 @@ function ManagerDash({
         <div className="panel stat">
           <span>{t("dash.myTipToday")}</span>
           <strong>{data ? money(data.myTipToday ?? 0) : "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.creditDue")}</span>
+          <strong style={{ color: (data?.creditOutstanding ?? 0) ? "var(--danger)" : undefined }}>
+            {data ? money(data.creditOutstanding ?? 0) : "—"}
+            <span className="tiny muted dash-stat-sub">
+              {t("dash.creditDueHint", { n: data?.creditOutstandingCount ?? 0 })}
+            </span>
+          </strong>
         </div>
       </div>
 
@@ -761,7 +787,7 @@ function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: 
   return (
     <div className="dash-grid" style={{ marginBottom: "1rem" }}>
       <div className="panel panel-pad">
-        <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>
+        <h2 className="dash-h2" style={{ marginTop: 0 }}>
           {personal ? t("dash.myTipBreakdown") : t("dash.tipBoard")}
         </h2>
         {!tips.length ? (
@@ -789,7 +815,7 @@ function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: 
       </div>
       {!personal && (
         <div className="panel panel-pad">
-          <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>{t("dash.staffOrdersToday")}</h2>
+          <h2 className="dash-h2" style={{ marginTop: 0 }}>{t("dash.staffOrdersToday")}</h2>
           {!staff.length ? (
             <div className="empty">{t("dash.emptyStaffOrders")}</div>
           ) : (
@@ -918,7 +944,7 @@ function OrderList({
   const { ts } = useI18n();
   return (
     <div className="panel panel-pad">
-      <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>{title}</h2>
+      <h2 className="dash-h2" style={{ marginTop: 0 }}>{title}</h2>
       {!orders.length ? (
         <div className="empty">{empty}</div>
       ) : (
@@ -964,7 +990,7 @@ function Shortcuts({
 
   return (
     <div className="panel panel-pad">
-      <h2 style={{ marginTop: 0, fontSize: "1.1rem" }}>{t("dash.shortcuts")}</h2>
+      <h2 className="dash-h2" style={{ marginTop: 0 }}>{t("dash.shortcuts")}</h2>
       <div className="row">
         {show("orders") && can("order.create", "order.addItems", "order.viewOwn") && (
           <Link className="btn" to="/waiter">

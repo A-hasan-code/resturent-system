@@ -103,6 +103,20 @@ export async function downloadApi(path: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+/** Fetch a protected binary (e.g. purchase bill photo) as an object URL. Caller must revoke. */
+export async function authBlobUrl(path: string): Promise<string> {
+  const headers: Record<string, string> = {};
+  const t = token();
+  if (t) headers.Authorization = `Bearer ${t}`;
+  if (!hasServerAddress()) throw new ApiError(OFFLINE_MESSAGE, 0);
+  const res = await fetch(`${apiBase()}${path}`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(String(body.error || body.message || "Failed to open file"), res.status);
+  }
+  return URL.createObjectURL(await res.blob());
+}
+
 export function money(n: number) {
   return `Rs ${Number(n || 0).toLocaleString("en-PK", {
     maximumFractionDigits: 2,

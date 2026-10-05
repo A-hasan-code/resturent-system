@@ -63,7 +63,7 @@ async function bootstrap() {
 
   const port = httpPort();
   await app.listen(port, "0.0.0.0");
-  log.log(`Hotel System on http://0.0.0.0:${port} (LAN)`);
+  log.log(`PixalBotics Restaurant on http://0.0.0.0:${port} (LAN)`);
 }
 
 bootstrap();
