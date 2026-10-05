@@ -385,13 +385,62 @@ html[dir="rtl"] .login-points {
 }
 
 .content {
-  padding: 1.25rem 1.5rem 2rem;
+  padding: 1.25rem 1.5rem 0.75rem;
   padding-left: max(1.5rem, env(safe-area-inset-left));
   padding-right: max(1.5rem, env(safe-area-inset-right));
-  padding-bottom: max(2rem, env(safe-area-inset-bottom));
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
   min-width: 0;
   max-width: 100%;
   overflow-x: clip;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.content-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.powered-by {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem 0.45rem;
+  margin-top: 1.25rem;
+  padding: 0.55rem 0.25rem 0.15rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--muted);
+  text-align: center;
+}
+
+.powered-by a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.powered-by a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.powered-by-sep {
+  opacity: 0.45;
+}
+
+.powered-by--receipt {
+  display: grid;
+  gap: 2px;
+  margin-top: 8px;
+  padding: 0;
+  font-size: 10px;
+  font-weight: 600;
+  color: inherit;
+  letter-spacing: 0.02em;
 }
 
 .page-head {
@@ -1258,6 +1307,126 @@ td .row {
 
 tr.bill-requested-row td {
   background: color-mix(in srgb, #c47a12 10%, var(--panel));
+}
+
+.table-wrap td.bill-items-cell {
+  white-space: normal;
+  max-width: 14rem;
+  min-width: 9rem;
+  vertical-align: middle;
+}
+
+.bill-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  line-height: 1.25;
+}
+
+.bill-item-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  min-width: 0;
+  font-size: 0.82rem;
+}
+
+.bill-item-qty {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.bill-item-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bill-items-more {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.bill-items-more-trigger {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 0.15em;
+}
+
+.bill-items-tip {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 0.45rem);
+  z-index: 40;
+  min-width: 12rem;
+  max-width: 18rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 0.55rem;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.14);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(0.2rem);
+  transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+}
+
+.bill-items-more:hover .bill-items-tip,
+.bill-items-more:focus-within .bill-items-tip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.bill-items-tip-head {
+  margin-bottom: 0.35rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.bill-items-tip-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.bill-items-tip-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--text);
+  white-space: normal;
+}
+
+.bill-items-tip-list .bill-item-name {
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
+}
+
+.table-wrap td.bill-time-cell {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
 }
 
 .chips {
@@ -2191,21 +2360,21 @@ tr.bill-requested-row td {
 .receipt-kot .receipt-kot-item {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 0.5rem;
-  padding: 0.45rem 0;
-  border-bottom: 1px dotted #ccc;
-  align-items: start;
+  gap: 0.35rem;
+  padding: 0.15rem 0;
+  align-items: baseline;
 }
 
 .receipt-kot .receipt-kot-qty {
   font-weight: 800;
-  font-size: 14px;
+  font-size: 12px;
   white-space: nowrap;
-  min-width: 3.5rem;
+  min-width: 4.2rem;
 }
 
 .receipt-kot .receipt-item-name {
-  font-size: 13px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .receipt-total {
@@ -2312,11 +2481,68 @@ tr.bill-requested-row td {
   justify-content: center;
 }
 
-.bill-design-preview-frame .print-preview {
+.bill-design-preview-frame .print-preview,
+.bill-design-preview-frame .thermal-slip {
   width: var(--preview-mm, 80mm);
   max-width: 100%;
   margin: 0;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+}
+
+.thermal-slip {
+  width: var(--preview-mm, 80mm);
+  max-width: 100%;
+  background: #fff;
+  color: #111;
+  padding: 8px 6px 14px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+}
+
+.thermal-slip-text {
+  margin: 0;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.thermal-slip.receipt--mm58 .thermal-slip-text {
+  font-size: 10px;
+}
+
+.thermal-slip.receipt--mm112 .thermal-slip-text {
+  font-size: 12px;
+}
+
+.thermal-slip-img {
+  display: flex;
+  justify-content: center;
+  margin: 0.2rem 0;
+}
+
+.thermal-slip-logo img {
+  max-width: 110px;
+  max-height: 110px;
+  object-fit: contain;
+  border: 2px solid #111;
+  padding: 3px;
+  background: #fff;
+}
+
+.thermal-slip.receipt--mm58 .thermal-slip-logo img {
+  max-width: 84px;
+  max-height: 84px;
+}
+
+.thermal-slip-stamp img {
+  width: 110px;
+  height: auto;
+  object-fit: contain;
+}
+
+.thermal-slip.receipt--mm58 .thermal-slip-stamp img {
+  width: 84px;
 }
 
 .ing-table {
@@ -2540,10 +2766,10 @@ tr.bill-requested-row td {
   }
 
   .content {
-    padding: 1rem 0.85rem 1.5rem;
+    padding: 1rem 0.85rem 0.65rem;
     padding-left: max(0.85rem, env(safe-area-inset-left));
     padding-right: max(0.85rem, env(safe-area-inset-right));
-    padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+    padding-bottom: max(0.65rem, env(safe-area-inset-bottom));
   }
 
   .shell {
@@ -4631,10 +4857,10 @@ tr.bill-requested-row td {
   }
 
   .content {
-    padding: 0.75rem 0.7rem 1.25rem;
+    padding: 0.75rem 0.7rem 0.55rem;
     padding-left: max(0.7rem, env(safe-area-inset-left));
     padding-right: max(0.7rem, env(safe-area-inset-right));
-    padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
+    padding-bottom: max(0.55rem, env(safe-area-inset-bottom));
   }
 
   .panel-pad {

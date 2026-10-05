@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, unitLabel } from "../api";
 import { useBrand } from "../brand";
+import { PoweredBy } from "./PoweredBy";
 import { useI18n, useT } from "../i18n";
 import { serverOrigin } from "../server";
 
@@ -121,7 +122,7 @@ export function BillPreview({
   order: BillOrder;
   mode: "kitchen" | "customer";
   paperWidth?: 58 | 72 | 80 | 112;
-  /** Live Settings toggles — skips loading saved design when provided. */
+  /** Live Settings toggles. Overrides the saved design field by field. */
   designOverride?: Partial<BillDesign>;
   /** Extra kitchen-slip fields (round / reprint / station). */
   kotMeta?: {
@@ -129,6 +130,7 @@ export function BillPreview({
     reprint?: boolean;
     station?: string | null;
     notes?: string | null;
+    footer?: string | null;
   };
 }) {
   const t = useT();
@@ -152,7 +154,9 @@ export function BillPreview({
       : order.orderedBy.name
     : order.waiter || null;
   const servedLabel = (order.servedByName || order.servedBy || "").trim() || null;
-  const stampSrc = brandingUrl("/branding/paid-stamp.png");
+  const stampSrc = brandingUrl(
+    order.paymentStatus === "PAID" ? "/branding/paid-stamp.png?v=2" : "/branding/unpaid-stamp.png?v=2",
+  );
   const sizeClass =
     paperWidth <= 58
       ? "receipt--mm58"
@@ -176,7 +180,6 @@ export function BillPreview({
   const change = Math.max(0, cash - foodPaid - showTipAmt);
 
   useEffect(() => {
-    if (designOverride) return;
     api<{ print?: { bill?: Partial<BillDesign> } }>("/system/settings")
       .then((s) => {
         const b = s.print?.bill;
@@ -197,7 +200,7 @@ export function BillPreview({
         });
       })
       .catch(() => undefined);
-  }, [designOverride]);
+  }, []);
 
   if (mode === "kitchen") {
     return (
@@ -297,6 +300,7 @@ export function BillPreview({
           )}
 
           <div className="receipt-thanks receipt-thanks--kot">{t("bill.kitchenCopy")}</div>
+          {kotMeta?.footer ? <div className="receipt-thanks">{kotMeta.footer}</div> : null}
         </div>
       </div>
     );
@@ -437,13 +441,14 @@ export function BillPreview({
           </div>
         )}
 
-        {order.paymentStatus === "PAID" && design.showPaidStamp && (
+        {design.showPaidStamp && (
           <div className="receipt-paid-stamp">
-            <img src={stampSrc} alt={ts("PAID")} />
+            <img src={stampSrc} alt={order.paymentStatus === "PAID" ? ts("PAID") : ts("UNPAID")} />
           </div>
         )}
 
         <div className="receipt-thanks">{design.footer || t("bill.thanksVisit")}</div>
+        <PoweredBy variant="receipt" />
       </div>
     </div>
   );

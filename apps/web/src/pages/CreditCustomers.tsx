@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, money, unitLabel } from "../api";
 import { useBrand } from "../brand";
+import { PoweredBy } from "../components/PoweredBy";
 import { Modal } from "../components/Modal";
 import { SearchField } from "../components/SearchField";
 import { useI18n, useT, type MessageKey } from "../i18n";
@@ -455,6 +456,7 @@ function CreditPaidModal({ slip, onClose }: { slip: Slip | null; onClose: () => 
                 <div className="receipt-pay">
                   <strong>*** {cleared ? t("credit.paidStamp") : t("credit.partialStamp")} ***</strong>
                 </div>
+                <PoweredBy variant="receipt" />
               </div>
             </div>
           </div>

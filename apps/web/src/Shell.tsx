@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { AccountModal } from "./components/AccountModal";
 import { LanguageSwitcher } from "./components/LanguageSwitcher";
+import { PoweredBy } from "./components/PoweredBy";
 import { useAuth } from "./auth";
 import { MessageKey, useT } from "./i18n";
 import { useToast } from "./toast";
@@ -242,7 +243,10 @@ export function Shell() {
       </aside>
       <AccountModal open={account} onClose={() => setAccount(false)} />
       <div className="content">
-        <Outlet />
+        <div className="content-main">
+          <Outlet />
+        </div>
+        <PoweredBy className="no-print" />
       </div>
     </div>
   );

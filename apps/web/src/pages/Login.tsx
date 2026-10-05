@@ -7,6 +7,7 @@ import { useT } from "../i18n";
 import type { MessageKey } from "../i18n";
 import { useToast } from "../toast";
 import { onConnStatus } from "../server";
+import { VENDOR } from "../vendor";
 
 type Staff = { id: string; name: string; roleCode: string; roleName: string };
 
@@ -81,16 +82,16 @@ export function LoginPage() {
         </div>
         <aside className="login-vendor">
           <span>
-            <em>company:</em> Pixalbotics
+            <em>company:</em> {VENDOR.name}
           </span>
-          <a href="mailto:pixalbotics@gmail.com">
-            <em>email:</em> pixalbotics@gmail.com
+          <a href={`mailto:${VENDOR.email}`}>
+            <em>email:</em> {VENDOR.email}
           </a>
-          <a href="https://wa.me/923431743916" target="_blank" rel="noopener noreferrer">
-            <em>whatsapp:</em> +92 343 1743916
+          <a href={VENDOR.whatsappUrl} target="_blank" rel="noopener noreferrer">
+            <em>whatsapp:</em> {VENDOR.phoneDisplay}
           </a>
-          <a href="https://www.pixalbotic.com/" target="_blank" rel="noopener noreferrer">
-            <em>url:</em> www.pixalbotic.com
+          <a href={VENDOR.websiteUrl} target="_blank" rel="noopener noreferrer">
+            <em>url:</em> {VENDOR.websiteLabel}
           </a>
         </aside>
       </aside>
@@ -127,14 +128,12 @@ export function LoginPage() {
           <footer className="login-credit">
             <span>
               {t("login.poweredBy")}{" "}
-              <a
-                href="https://www.pixalbotics.com/"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Pixalbotics
+              <a href={VENDOR.websiteUrl} target="_blank" rel="noopener noreferrer">
+                {VENDOR.name}
               </a>
             </span>
+            <span className="login-credit-sep">·</span>
+            <a href={`tel:${VENDOR.phoneTel}`}>{VENDOR.phoneDisplay}</a>
             <span className="login-credit-sep">·</span>
             <span className="login-credit-copy">{t("login.copyright", { year: 2026 })}</span>
           </footer>

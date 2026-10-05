@@ -3,7 +3,8 @@ import { api, money, unitLabel } from "../api";
 import { useAuth } from "../auth";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
-import { BillPreview, printBill, type BillOrder } from "../components/BillPreview";
+import { printBill, type BillOrder } from "../components/BillPreview";
+import { ThermalPreview } from "../components/ThermalPreview";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 import { downloadExcelCsv } from "../csv";
@@ -42,6 +43,21 @@ type Order = BillOrder & {
 const stamp = (iso: string) =>
   new Date(iso).toLocaleString("en-PK", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 
+/** Same clock format as the printed/customer bill. */
+function billTime(iso?: string | null) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  let h = d.getHours();
+  const m = d.getMinutes();
+  const s = d.getSeconds();
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  const pad = (x: number) => String(x).padStart(2, "0");
+  return `${h}:${pad(m)}:${pad(s)}${ampm}`;
+}
+
+const ITEMS_PREVIEW = 2;
+
 type Stats = {
   pendingKitchen: number;
   preparing: number;
@@ -78,6 +94,13 @@ export function BillsPage() {
   const [editStaff, setEditStaff] = useState<EditBillPerson[]>([]);
   const [editing, setEditing] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [thermal, setThermal] = useState<{
+    text: string;
+    paperWidth?: number;
+    logoUrl?: string | null;
+    paidStampUrl?: string | null;
+    unpaidStampUrl?: string | null;
+  } | null>(null);
 
   async function load() {
     try {
@@ -123,12 +146,34 @@ export function BillsPage() {
   function openBill(o: Order) {
     setSelected(o);
     setEditing(false);
+    setThermal(null);
     const qty: Record<string, number> = {};
     for (const i of o.items) {
       if (i.id) qty[i.id] = i.quantity;
     }
     setEditQty(qty);
   }
+
+  useEffect(() => {
+    if (!selected?.id || editing) return;
+    let cancelled = false;
+    api<{
+      text: string;
+      paperWidth?: number;
+      logoUrl?: string | null;
+      paidStampUrl?: string | null;
+      unpaidStampUrl?: string | null;
+    }>(`/orders/${selected.id}/bill-preview`)
+      .then((r) => {
+        if (!cancelled) setThermal(r);
+      })
+      .catch(() => {
+        if (!cancelled) setThermal(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.id, selected?.paymentStatus, selected?.paidAmount, selected?.total, editing]);
 
   async function startBillEdit(o: Order) {
     const qty: Record<string, number> = {};
@@ -247,6 +292,7 @@ export function BillsPage() {
                 shown.map((o) => ({
                   OrderNo: o.orderNo,
                   Table: o.tableNo || "",
+                  Time: billTime(o.createdAt),
                   Items: o.items
                     .map((i) => `${i.quantity} ${i.sellUnit} ${i.name}`)
                     .join("; "),
@@ -355,6 +401,7 @@ export function BillsPage() {
               <tr>
                 <th>#</th>
                 <th>{t("common.table")}</th>
+                <th>{t("common.time")}</th>
                 <th>{t("bills.orderedBy")}</th>
                 <th>{t("bills.assignedCashier")}</th>
                 <th>{t("common.items")}</th>
@@ -366,7 +413,10 @@ export function BillsPage() {
               </tr>
             </thead>
             <tbody>
-              {pageRows.map((o) => (
+              {pageRows.map((o) => {
+                const preview = o.items.slice(0, ITEMS_PREVIEW);
+                const extra = o.items.length - preview.length;
+                return (
                 <tr
                   key={o.id}
                   className={
@@ -382,6 +432,7 @@ export function BillsPage() {
                       </span>
                     )}
                   </td>
+                  <td className="tiny bill-time-cell">{billTime(o.createdAt)}</td>
                   <td className="tiny">
                     {o.orderedBy
                       ? `${o.orderedBy.name} (${o.orderedBy.roleName})`
@@ -393,10 +444,47 @@ export function BillsPage() {
                     )}
                   </td>
                   <td className="tiny">{o.assignedCashier?.name || "—"}</td>
-                  <td>
-                    {o.items
-                      .map((i) => `${i.quantity} ${unitLabel(i.sellUnit)} ${i.name}`)
-                      .join(", ")}
+                  <td className="bill-items-cell">
+                    {!o.items.length ? (
+                      "—"
+                    ) : (
+                      <div className="bill-items">
+                        {preview.map((i) => (
+                          <div key={i.id ?? `${i.name}-${i.quantity}`} className="bill-item-line">
+                            <span className="bill-item-qty">
+                              {i.sellUnit === "PCS"
+                                ? `${i.quantity}×`
+                                : `${i.quantity} ${unitLabel(i.sellUnit)}`}
+                            </span>
+                            <span className="bill-item-name">{i.name}</span>
+                          </div>
+                        ))}
+                        {extra > 0 && (
+                          <div className="bill-items-more">
+                            <span className="bill-items-more-trigger" tabIndex={0}>
+                              {t("bills.moreItems", { n: extra })}
+                            </span>
+                            <div className="bill-items-tip" role="tooltip">
+                              <div className="bill-items-tip-head">
+                                {t("common.items")} · {o.items.length}
+                              </div>
+                              <ul className="bill-items-tip-list">
+                                {o.items.map((i) => (
+                                  <li key={i.id ?? `${i.name}-${i.quantity}`}>
+                                    <span className="bill-item-qty">
+                                      {i.sellUnit === "PCS"
+                                        ? `${i.quantity}×`
+                                        : `${i.quantity} ${unitLabel(i.sellUnit)}`}
+                                    </span>
+                                    <span className="bill-item-name">{i.name}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </td>
                   <td>
                     <span
@@ -435,7 +523,8 @@ export function BillsPage() {
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
           </div>
@@ -535,8 +624,16 @@ export function BillsPage() {
                     ) : null
                   )}
                 </div>
+              ) : thermal?.text ? (
+                <ThermalPreview
+                  text={thermal.text}
+                  paperWidth={thermal.paperWidth}
+                  logoUrl={thermal.logoUrl}
+                  paidStampUrl={thermal.paidStampUrl}
+                  unpaidStampUrl={thermal.unpaidStampUrl}
+                />
               ) : (
-                <BillPreview order={selected} mode="customer" />
+                <p className="tiny muted">{t("settings.billPreviewLoading")}</p>
               )}
               {!!selected.payments?.length && (
                 <ul className="payment-log no-print">
