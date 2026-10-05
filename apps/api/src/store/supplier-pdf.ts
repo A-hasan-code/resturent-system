@@ -1,4 +1,5 @@
 import PDFDocument from "pdfkit";
+import { VENDOR } from "../common/vendor";
 
 type Hotel = { name: string; tagline: string; address: string; phone: string };
 
@@ -255,7 +256,12 @@ function footer(doc: PDFKit.PDFDocument, hotel: Hotel, supplierName: string) {
       .lineTo(PAGE.width - PAGE.margin, PAGE.height - 28)
       .stroke();
     doc.fillColor(MUTED).font("Helvetica").fontSize(8);
-    doc.text(`${hotel.name} · ${supplierName}`, PAGE.margin, PAGE.height - 22, { lineBreak: false });
+    doc.text(
+      `${hotel.name} · ${supplierName} · ${VENDOR.line} · ${VENDOR.phoneDisplay}`,
+      PAGE.margin,
+      PAGE.height - 22,
+      { lineBreak: false, width: PAGE.width - PAGE.margin * 2 - 90 },
+    );
     doc.text(`Page ${n} of ${range.count}`, PAGE.width - PAGE.margin - 80, PAGE.height - 22, {
       width: 80,
       align: "right",

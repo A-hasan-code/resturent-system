@@ -7,6 +7,7 @@ import {
   OnModuleDestroy,
 } from "@nestjs/common";
 import { Prisma, Printer, PrintJob } from "@prisma/client";
+import { basename } from "path";
 import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
 import { ServerIdentityService } from "../system/server-identity.service";
@@ -164,6 +165,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       servedBy: payload.servedBy,
       time: payload.time,
       notes: payload.notes,
+      footer: payload.footer || null,
       showOrderBy: payload.showOrderBy !== false,
       items: payload.items.map((i) => ({
         name: i.name,
@@ -174,6 +176,27 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       })),
       text: renderKot(payload, paperWidth).plain(),
       paperWidth,
+      logoUrl: brandingPublicUrl(this.settings.logoFilePath()),
+      paidStampUrl: null,
+      unpaidStampUrl: null,
+    };
+  }
+
+  /** Exact customer-bill bytes as plain text — same payload path as thermal print. */
+  async previewBill(orderId: string) {
+    const payload = await this.loadBillPayload(orderId);
+    const printer = await this.prisma.printer.findFirst({
+      where: { active: true, printsBill: true },
+      orderBy: { createdAt: "asc" },
+    });
+    const paperWidth = printer?.paperWidth ?? 80;
+    return {
+      text: renderBill(payload, paperWidth).plain(),
+      paperWidth,
+      paymentStatus: payload.paymentStatus,
+      logoUrl: brandingPublicUrl(this.settings.logoFilePath()),
+      paidStampUrl: "/branding/paid-stamp.png",
+      unpaidStampUrl: "/branding/unpaid-stamp.png",
     };
   }
 
@@ -215,6 +238,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     const restaurant = await this.settings.restaurant();
     const time = new Date().toISOString();
     const kotOpts = await this.tips.printKotOpts();
+    const billOpts = await this.tips.printBillOpts();
 
     return {
       orderNo: order.orderNo,
@@ -241,6 +265,10 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
           notes: opts.round && opts.round > 1 ? null : order.notes,
           items: mine.map((i) => i.line),
           showOrderBy: kotOpts.showOrderBy,
+          showLogo: billOpts.showLogo,
+          showName: billOpts.showName,
+          showPhone: billOpts.showPhone,
+          showAddress: billOpts.showAddress,
           footer: kotOpts.footer || undefined,
           logoPath: this.settings.logoFilePath(),
         };
@@ -251,15 +279,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   async enqueueBill(orderId: string, requestedById?: string | null) {
     const order = await this.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
-      include: {
-        items: { orderBy: { createdAt: "asc" } },
-        waiter: { select: { name: true, role: { select: { name: true } } } },
-        cashier: { select: { name: true } },
-        assignedCashier: { select: { id: true, name: true, billPrinterId: true } },
-        creditCustomer: { select: { name: true } },
-        payments: { select: { collectedBy: { select: { name: true } } } },
-        table: { include: { partition: { select: { name: true } } } },
-      },
+      select: { orderNo: true, assignedCashier: { select: { billPrinterId: true } } },
     });
     const printers = await this.prisma.printer.findMany({ where: { active: true, printsBill: true } });
     if (!printers.length) return [await this.noPrinterJob("BILL", orderId, requestedById, order.orderNo)];
@@ -269,12 +289,27 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       requestedById,
       order.assignedCashier?.billPrinterId ?? null,
     );
+    const payload = await this.loadBillPayload(orderId);
+    return [await this.createJob("BILL", printerId, payload, orderId, requestedById)];
+  }
 
+  private async loadBillPayload(orderId: string): Promise<BillPayload> {
+    const order = await this.prisma.order.findUniqueOrThrow({
+      where: { id: orderId },
+      include: {
+        items: { orderBy: { createdAt: "asc" } },
+        waiter: { select: { name: true, role: { select: { name: true } } } },
+        cashier: { select: { name: true } },
+        creditCustomer: { select: { name: true } },
+        payments: { select: { collectedBy: { select: { name: true } } } },
+        table: { include: { partition: { select: { name: true } } } },
+      },
+    });
     const cashier = order.cashier?.name ?? null;
     const collectors = [...new Set(order.payments.map((p) => p.collectedBy.name))].filter((n) => n !== cashier);
     const billOpts = await this.tips.printBillOpts();
     const restaurant = await this.settings.restaurant();
-    const payload: BillPayload = {
+    return {
       restaurant: {
         name: restaurant.name,
         tagline: restaurant.tagline,
@@ -321,9 +356,9 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       paidStampText: billOpts.paidStampText,
       paidStampBig: billOpts.paidStampBig,
       paidStampPath: this.settings.paidStampFilePath(),
+      unpaidStampPath: this.settings.unpaidStampFilePath(),
       footer: billOpts.footer,
     };
-    return [await this.createJob("BILL", printerId, payload, orderId, requestedById)];
   }
 
   /**
@@ -643,6 +678,12 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
 
 function staffLabel(u: { name: string; role: { name: string } } | null | undefined) {
   return u ? `${u.name} (${u.role.name})` : null;
+}
+
+/** Public /branding URL for a file under the branding data dir (PNG preferred for print). */
+function brandingPublicUrl(absPath: string | null | undefined) {
+  if (!absPath) return null;
+  return `/branding/${basename(absPath)}`;
 }
 
 function splitCats(s: string) {

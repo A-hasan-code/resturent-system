@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { api, uploadApi } from "../api";
 import { useAuth } from "../auth";
@@ -421,6 +421,13 @@ function BillDesignSection() {
   const [d, setD] = useState<BillDesignState>(DEFAULT_BILL_DESIGN);
   const [paperWidth, setPaperWidth] = useState<58 | 72 | 80 | 112>(80);
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<{
+    text: string;
+    paperWidth: number;
+    logoUrl?: string | null;
+    paidStampUrl?: string | null;
+    unpaidStampUrl?: string | null;
+  } | null>(null);
 
   useEffect(() => {
     api<{
@@ -447,6 +454,40 @@ function BillDesignSection() {
       })
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      api<{
+        text: string;
+        paperWidth: number;
+        logoUrl?: string | null;
+        paidStampUrl?: string | null;
+        unpaidStampUrl?: string | null;
+      }>("/system/bill-preview", {
+        method: "POST",
+        body: JSON.stringify({
+          showLogo: d.showLogo ? "1" : "0",
+          showName: d.showName ? "1" : "0",
+          showTagline: d.showTagline ? "1" : "0",
+          showAddress: d.showAddress ? "1" : "0",
+          showPhone: d.showPhone ? "1" : "0",
+          title: d.title,
+          showOrderBy: d.showOrderBy ? "1" : "0",
+          showServedBy: d.showServedBy ? "1" : "0",
+          showCashier: d.showCashier ? "1" : "0",
+          showTip: d.showTip ? "1" : "0",
+          showPaidStamp: d.showPaidStamp ? "1" : "0",
+          paidStampText: d.paidStampText,
+          paidStampBig: d.paidStampBig ? "1" : "0",
+          footer: d.footer,
+          paperWidth,
+        }),
+      })
+        .then(setPreview)
+        .catch(() => undefined);
+    }, 200);
+    return () => window.clearTimeout(handle);
+  }, [d, paperWidth]);
 
   function patch(p: Partial<BillDesignState>) {
     setD((prev) => ({ ...prev, ...p }));
@@ -482,24 +523,6 @@ function BillDesignSection() {
       setBusy(false);
     }
   }
-
-  const designOverride = useMemo(
-    () => ({
-      showLogo: d.showLogo,
-      showName: d.showName,
-      showTagline: d.showTagline,
-      showAddress: d.showAddress,
-      showPhone: d.showPhone,
-      title: d.title,
-      showOrderBy: d.showOrderBy,
-      showServedBy: d.showServedBy,
-      showCashier: d.showCashier,
-      showTip: d.showTip,
-      showPaidStamp: d.showPaidStamp,
-      footer: d.footer,
-    }),
-    [d]
-  );
 
   return (
     <form className="panel panel-pad bill-design" onSubmit={save} style={{ marginBottom: "1rem" }}>
@@ -575,7 +598,8 @@ function BillDesignSection() {
           </label>
           {d.showPaidStamp ? (
             <div className="paid-stamp-sample" aria-hidden>
-              <img src={brandingUrl("/branding/paid-stamp.png")} alt="" />
+              <img src={brandingUrl("/branding/paid-stamp.png?v=2")} alt="" />
+              <img src={brandingUrl("/branding/unpaid-stamp.png?v=2")} alt="" />
               <span className="tiny muted">{t("settings.paidStampGraphicHint")}</span>
             </div>
           ) : null}
@@ -622,13 +646,18 @@ function BillDesignSection() {
           <p className="tiny muted" style={{ marginTop: 0 }}>
             {t("settings.paperSizesHint")}
           </p>
-          <div className="bill-design-preview-frame">
-            <BillPreview
-              order={SAMPLE_BILL}
-              mode="customer"
-              paperWidth={paperWidth}
-              designOverride={designOverride}
-            />
+          <div className="bill-design-preview-frame" style={{ ["--preview-mm" as string]: `${paperWidth}mm` }}>
+            {preview?.text ? (
+              <ThermalPreview
+                text={preview.text}
+                paperWidth={preview.paperWidth || paperWidth}
+                logoUrl={preview.logoUrl}
+                paidStampUrl={preview.paidStampUrl}
+                unpaidStampUrl={preview.unpaidStampUrl}
+              />
+            ) : (
+              <p className="tiny muted">{t("settings.billPreviewLoading")}</p>
+            )}
           </div>
         </div>
       </div>

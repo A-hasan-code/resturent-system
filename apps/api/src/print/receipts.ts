@@ -1,4 +1,5 @@
-import { columnsFor, EscPos, paperDotsFor } from "./escpos";
+import { columnsFor, EscPos, paperDotsFor, wrap } from "./escpos";
+import { VENDOR } from "../common/vendor";
 import { logoRasterFromFile } from "./logo-raster";
 import { splitTableLabel } from "./table-label";
 
@@ -22,6 +23,10 @@ export type KotPayload = {
   notes: string | null;
   items: Array<{ name: string; quantity: number; unit: string; notes: string | null; round: number }>;
   showOrderBy?: boolean;
+  showLogo?: boolean;
+  showName?: boolean;
+  showPhone?: boolean;
+  showAddress?: boolean;
   footer?: string;
   /** Absolute path to branding logo file (PNG prints as raster). */
   logoPath?: string | null;
@@ -46,6 +51,8 @@ export type BillDesign = {
   logoPath?: string | null;
   /** Absolute path to PAID stamp PNG (preferred over text stamp). */
   paidStampPath?: string | null;
+  /** Absolute path to UNPAID stamp PNG. */
+  unpaidStampPath?: string | null;
 };
 
 export type BillPayload = BillDesign & {
@@ -83,7 +90,7 @@ export type TestPayload = {
   time: string;
 };
 
-const UNIT: Record<string, string> = { KG: "kg", G: "g", L: "ltr", ML: "ml", PCS: "pcs" };
+const UNIT: Record<string, string> = { KG: "kg", G: "g", L: "liter", ML: "ml", PCS: "pcs" };
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function qtyNum(q: number) {
@@ -159,19 +166,24 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   const dots = paperDotsFor(paperWidth);
   const billNo = p.orderNo;
 
+  const showLogo = p.showLogo !== false;
+  const showName = p.showName !== false;
+  const showPhone = p.showPhone !== false;
+  const showAddress = p.showAddress !== false;
+
   e.align("center");
-  if (p.logoPath) {
-    const img = logoRasterFromFile(p.logoPath, logoMaxDots(paperWidth), { centerOnPaperDots: dots });
+  if (showLogo && p.logoPath) {
+    const img = logoRasterFromFile(p.logoPath, logoMaxDots(paperWidth), { centerOnPaperDots: dots, frame: true });
     if (img) {
       e.raster(img);
       e.line("");
     }
   }
-  if (p.restaurant?.name) e.bold().big().wrapped(p.restaurant.name).big(false).bold(false);
-  if (p.restaurant?.phone) e.line(p.restaurant.phone);
-  if (p.restaurant?.address) e.wrapped(p.restaurant.address);
+  if (showName && p.restaurant?.name) e.bold().wrapped(p.restaurant.name).bold(false);
+  if (showPhone && p.restaurant?.phone) e.line(p.restaurant.phone);
+  if (showAddress && p.restaurant?.address) e.wrapped(p.restaurant.address);
   e.line("");
-  e.bold().big().line("KITCHEN ORDER").big(false).bold(false);
+  e.bold().line("KITCHEN ORDER").bold(false);
   if (p.station) e.line(`[ ${p.station} ]`);
   if (p.reprint) e.bold().line("*** REPRINT ***").bold(false);
   e.align("left").line("");
@@ -185,9 +197,19 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   if (p.round) e.align("center").bold().line(`Round ${p.round}`).bold(false).align("left");
 
   e.rule("-");
+  const qtyWidth = e.cols <= 32 ? 9 : 10;
   for (const i of p.items) {
-    e.bold().big().wrapped(`${qty(i.quantity, i.unit)}  ${i.name}`).big(false).bold(false);
-    if (i.notes) e.wrapped(`>> ${i.notes}`, 2);
+    const q = qty(i.quantity, i.unit);
+    const nameWidth = Math.max(6, e.width() - qtyWidth - 1);
+    const names = wrap(i.name, nameWidth);
+    if (q.length > qtyWidth) {
+      e.bold().line(q).bold(false);
+      for (const n of names) e.line(`${" ".repeat(qtyWidth)} ${n}`);
+    } else {
+      e.bold().line(`${q.padEnd(qtyWidth)} ${names[0] || ""}`.trimEnd()).bold(false);
+      for (const extra of names.slice(1)) e.line(`${" ".repeat(qtyWidth)} ${extra}`);
+    }
+    if (i.notes) e.wrapped(`>> ${i.notes}`);
   }
   e.rule("-");
 
@@ -201,7 +223,7 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   if (showBy && takenBy) e.line(`Order taken by: ${takenBy}`);
   if (p.servedBy) e.line(`Served by: ${p.servedBy}`);
 
-  e.align("center").line("-- no prices on kitchen copy --");
+  e.align("center").line("*** Kitchen copy - no prices ***");
   if (p.footer) e.wrapped(p.footer);
   return e.feed(4).beep().cut();
 }
@@ -243,18 +265,18 @@ export function renderBill(p: BillPayload, paperWidth: number) {
   // Header: logo → name → phone → address → Customer Bill (matches sample slip)
   e.align("center");
   if (showLogo && p.logoPath) {
-    const img = logoRasterFromFile(p.logoPath, logoMaxDots(paperWidth), { centerOnPaperDots: dots });
+    const img = logoRasterFromFile(p.logoPath, logoMaxDots(paperWidth), { centerOnPaperDots: dots, frame: true });
     if (img) {
       e.raster(img);
       e.line("");
     }
   }
-  if (showName) e.bold().big().wrapped(r.name).big(false).bold(false);
+  if (showName) e.bold().wrapped(r.name).bold(false);
   if (showPhone && r.phone) e.line(r.phone);
   if (showAddress && r.address) e.wrapped(r.address);
   if (showTagline && r.tagline) e.wrapped(r.tagline);
   e.line("");
-  e.bold().big().line(title).big(false).bold(false);
+  e.bold().line(title).bold(false);
   e.align("left").line("");
 
   e.pair(`Date: ${datePart(p.time)}`, `Time: ${timePart(p.time)}`);
@@ -293,13 +315,18 @@ export function renderBill(p: BillPayload, paperWidth: number) {
   if (foodPaid > 0 && foodPaid < net) e.pair("Balance:", money(net - foodPaid));
   if (p.receivedBy) e.line(`Received by: ${p.receivedBy}`);
 
-  if (p.paymentStatus === "PAID" && showPaidStamp) {
+  if (showPaidStamp) {
+    const paid = p.paymentStatus === "PAID";
+    const stampPath = paid ? p.paidStampPath : p.unpaidStampPath;
     e.align("center").line("");
-    const stampImg = p.paidStampPath
-      ? logoRasterFromFile(p.paidStampPath, stampMaxDots(paperWidth), { centerOnPaperDots: dots })
+    const stampImg = stampPath
+      ? logoRasterFromFile(stampPath, stampMaxDots(paperWidth), {
+          centerOnPaperDots: dots,
+          maxHeight: stampMaxDots(paperWidth),
+        })
       : null;
-    if (stampImg) e.raster(stampImg, "[PAID STAMP]");
-    else {
+    if (stampImg) e.raster(stampImg, paid ? "[PAID STAMP]" : "[UNPAID STAMP]");
+    else if (paid) {
       e.bold();
       if (paidStampBig) e.big();
       e.line(paidStamp);
@@ -311,6 +338,9 @@ export function renderBill(p: BillPayload, paperWidth: number) {
 
   e.line("");
   e.align("center").wrapped(p.footer || "Thanks for your Visit..");
+  e.line("");
+  e.line(VENDOR.line);
+  e.line(VENDOR.phoneDisplay);
   return e.feed(4).cut();
 }
 

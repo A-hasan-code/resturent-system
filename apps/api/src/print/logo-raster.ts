@@ -7,14 +7,16 @@ export type RasterImage = { widthBytes: number; height: number; data: Buffer };
 export function logoRasterFromFile(
   path: string | null | undefined,
   maxDots: number,
-  opts?: { centerOnPaperDots?: number }
+  opts?: { centerOnPaperDots?: number; frame?: boolean; maxHeight?: number }
 ): RasterImage | null {
   if (!path || !existsSync(path)) return null;
   if (!path.toLowerCase().endsWith(".png")) return null;
   try {
     const png = decodePng(readFileSync(path));
     if (!png) return null;
-    const raster = toRaster(png, Math.max(96, Math.min(maxDots, 576)));
+    const max = Math.max(96, Math.min(maxDots, 576));
+    let raster = toRaster(trimContent(png), max, opts?.maxHeight ?? 180);
+    if (opts?.frame) raster = frameRaster(raster);
     if (opts?.centerOnPaperDots) return centerRaster(raster, opts.centerOnPaperDots);
     return raster;
   } catch {
@@ -35,8 +37,11 @@ export function centerRaster(img: RasterImage, paperDots: number): RasterImage {
   return { widthBytes: paperBytes, height: img.height, data };
 }
 
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
 function decodePng(buf: Buffer): { width: number; height: number; rgba: Buffer } | null {
-  if (buf.length < 8 || buf.toString("ascii", 0, 8) !== "\x89PNG\r\n\x1a\n") return null;
+  // Do not use "ascii": Node strips the high bit, so byte 0x89 never matches.
+  if (buf.length < 8 || !buf.subarray(0, 8).equals(PNG_SIG)) return null;
   let width = 0;
   let height = 0;
   let bitDepth = 0;
@@ -130,8 +135,85 @@ function paeth(a: number, b: number, c: number) {
   return c;
 }
 
-function toRaster(img: { width: number; height: number; rgba: Buffer }, maxDots: number): RasterImage {
-  const scale = Math.min(1, maxDots / img.width, 180 / img.height);
+/** Drop empty margins so a stamp fills the print area instead of shrinking inside whitespace. */
+function trimContent(img: { width: number; height: number; rgba: Buffer }) {
+  const ink = (i: number) => {
+    if (img.rgba[i + 3] < 16) return false;
+    const lum = 0.299 * img.rgba[i] + 0.587 * img.rgba[i + 1] + 0.114 * img.rgba[i + 2];
+    return lum < 245;
+  };
+  let top = 0;
+  let bottom = img.height - 1;
+  let left = 0;
+  let right = img.width - 1;
+  const rowInk = (y: number) => {
+    for (let x = 0; x < img.width; x++) if (ink((y * img.width + x) * 4)) return true;
+    return false;
+  };
+  const colInk = (x: number) => {
+    for (let y = top; y <= bottom; y++) if (ink((y * img.width + x) * 4)) return true;
+    return false;
+  };
+  while (top < bottom && !rowInk(top)) top++;
+  while (bottom > top && !rowInk(bottom)) bottom--;
+  while (left < right && !colInk(left)) left++;
+  while (right > left && !colInk(right)) right--;
+  const pad = 2;
+  top = Math.max(0, top - pad);
+  left = Math.max(0, left - pad);
+  bottom = Math.min(img.height - 1, bottom + pad);
+  right = Math.min(img.width - 1, right + pad);
+  const w = right - left + 1;
+  const h = bottom - top + 1;
+  if (w < 8 || h < 8 || (w === img.width && h === img.height)) return img;
+  const rgba = Buffer.alloc(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    img.rgba.copy(rgba, y * w * 4, ((top + y) * img.width + left) * 4, ((top + y) * img.width + right + 1) * 4);
+  }
+  return { width: w, height: h, rgba };
+}
+
+/** Black rectangle around a logo so the paper matches the boxed logo on screen. */
+function frameRaster(img: RasterImage, pad = 6, thick = 2): RasterImage {
+  const srcDots = img.widthBytes * 8;
+  const extra = (pad + thick) * 2;
+  const widthDots = srcDots + extra;
+  const widthBytes = Math.ceil(widthDots / 8);
+  const height = img.height + extra;
+  const data = Buffer.alloc(widthBytes * height);
+  const ox = pad + thick;
+  const oy = pad + thick;
+  for (let y = 0; y < img.height; y++) {
+    for (let x = 0; x < srcDots; x++) {
+      const on = img.data[y * img.widthBytes + (x >> 3)] & (0x80 >> (x & 7));
+      if (!on) continue;
+      const nx = x + ox;
+      data[(y + oy) * widthBytes + (nx >> 3)] |= 0x80 >> (nx & 7);
+    }
+  }
+  const x0 = pad;
+  const y0 = pad;
+  const x1 = ox + srcDots + thick - 1;
+  const y1 = oy + img.height + thick - 1;
+  const set = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= widthDots || y >= height) return;
+    data[y * widthBytes + (x >> 3)] |= 0x80 >> (x & 7);
+  };
+  for (let t = 0; t < thick; t++) {
+    for (let x = x0; x <= x1; x++) {
+      set(x, y0 + t);
+      set(x, y1 - t);
+    }
+    for (let y = y0; y <= y1; y++) {
+      set(x0 + t, y);
+      set(x1 - t, y);
+    }
+  }
+  return { widthBytes, height, data };
+}
+
+function toRaster(img: { width: number; height: number; rgba: Buffer }, maxDots: number, maxHeight = 180): RasterImage {
+  const scale = Math.min(1, maxDots / img.width, maxHeight / img.height);
   const w = Math.max(1, Math.round(img.width * scale));
   const h = Math.max(1, Math.round(img.height * scale));
   const widthBytes = Math.ceil(w / 8);
