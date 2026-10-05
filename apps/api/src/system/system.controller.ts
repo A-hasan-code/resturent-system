@@ -172,10 +172,19 @@ export class SystemController {
         footer: dto.footer?.trim() ?? saved.footer,
         logoPath: this.settings.logoFilePath(),
         paidStampPath: this.settings.paidStampFilePath(),
+        unpaidStampPath: this.settings.unpaidStampFilePath(),
       },
       paperWidth
     );
-    return { text, paperWidth, paidStampUrl: "/branding/paid-stamp.png" };
+    return {
+      text,
+      paperWidth,
+      logoUrl: this.settings.logoFilePath()
+        ? `/branding/${this.settings.logoFilePath()!.split(/[/\\]/).pop()}`
+        : null,
+      paidStampUrl: "/branding/paid-stamp.png",
+      unpaidStampUrl: "/branding/unpaid-stamp.png",
+    };
   }
 
   @Patch("settings")

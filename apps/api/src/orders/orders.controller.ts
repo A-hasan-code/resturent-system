@@ -85,6 +85,12 @@ export class OrdersController {
     return this.orders.kotPreview(id, r && r > 0 ? r : undefined);
   }
 
+  @Get(":id/bill-preview")
+  @RequirePerms("print.bill", "order.pay")
+  billPreview(@Param("id") id: string) {
+    return this.orders.billPreview(id);
+  }
+
   @Post(":id/print-bill")
   @RequirePerms("print.bill")
   printBill(@CurrentUser() user: AuthUser, @Param("id") id: string) {

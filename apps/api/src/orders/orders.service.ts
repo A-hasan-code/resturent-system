@@ -442,6 +442,10 @@ export class OrdersService {
     return this.print.previewKot(id, round);
   }
 
+  billPreview(id: string) {
+    return this.print.previewBill(id);
+  }
+
   async printBill(user: AuthUser, id: string) {
     const jobs = await this.print.enqueueBill(id, user.id);
     return { queued: jobs.length, jobs: jobs.map((j) => ({ id: j.id, status: j.status, error: j.lastError })) };

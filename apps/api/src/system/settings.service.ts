@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "fs";
+import { copyFileSync, existsSync, readdirSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { extname, join } from "path";
 import { PrismaService } from "../prisma/prisma.service";
 import { dataDir } from "../config/env";
@@ -46,23 +46,22 @@ export class SettingsService {
   }
 
   /** Absolute path to the uploaded logo file, if present. */
+  /** Absolute path to logo PNG only — thermal printers cannot rasterize JPG/WEBP/SVG. */
   logoFilePath(): string | null {
     const dir = this.brandingDir();
     if (!existsSync(dir)) return null;
-    const file = readdirSync(dir).find((f) => f.startsWith("logo."));
-    return file ? join(dir, file) : null;
+    const png = readdirSync(dir).find((f) => /^logo\.png$/i.test(f));
+    return png ? join(dir, png) : null;
   }
 
-  /** Ensure bundled PAID stamp is available under /branding and return its path. */
+  /** Bundled PAID stamp, refreshed when the shipped graphic changes. */
   paidStampFilePath(): string | null {
-    const dir = this.brandingDir();
-    mkdirSync(dir, { recursive: true });
-    const dest = join(dir, "paid-stamp.png");
-    if (!existsSync(dest)) {
-      const bundled = bundledPaidStampPath();
-      if (bundled) copyFileSync(bundled, dest);
-    }
-    return existsSync(dest) ? dest : bundledPaidStampPath();
+    return installBundledAsset("paid-stamp.png");
+  }
+
+  /** Bundled UNPAID stamp, refreshed when the shipped graphic changes. */
+  unpaidStampFilePath(): string | null {
+    return installBundledAsset("unpaid-stamp.png");
   }
 
   async restaurant() {
@@ -130,24 +129,37 @@ function mimeExt(mime: string) {
   return "";
 }
 
-function bundledPaidStampPath(): string | null {
+function bundledAsset(fileName: string): string | null {
   const candidates = [
-    join(__dirname, "..", "..", "assets", "paid-stamp.png"), // dist/system → apps/api/assets
-    join(__dirname, "..", "assets", "paid-stamp.png"),
-    join(process.cwd(), "assets", "paid-stamp.png"),
-    join(process.cwd(), "apps", "api", "assets", "paid-stamp.png"),
+    join(__dirname, "..", "..", "assets", fileName), // dist/system → apps/api/assets
+    join(__dirname, "..", "assets", fileName),
+    join(process.cwd(), "assets", fileName),
+    join(process.cwd(), "apps", "api", "assets", fileName),
   ];
   return candidates.find((p) => existsSync(p)) ?? null;
 }
 
-// Ensure folder exists when the module loads (installers / first run).
-mkdirSync(dataDir("branding"), { recursive: true });
-try {
-  const dest = join(dataDir("branding"), "paid-stamp.png");
-  if (!existsSync(dest)) {
-    const bundled = bundledPaidStampPath();
-    if (bundled) copyFileSync(bundled, dest);
+/** Copy a shipped PNG into /branding when it is missing or the bundle was replaced. */
+function installBundledAsset(fileName: string): string | null {
+  const bundled = bundledAsset(fileName);
+  const dest = join(dataDir("branding"), fileName);
+  try {
+    if (bundled) {
+      const src = statSync(bundled);
+      const stale =
+        !existsSync(dest) || statSync(dest).size !== src.size || src.mtimeMs > statSync(dest).mtimeMs + 500;
+      if (stale) copyFileSync(bundled, dest);
+    }
+  } catch {
+    /* ignore first-run copy errors */
   }
+  if (existsSync(dest)) return dest;
+  return bundled;
+}
+
+try {
+  installBundledAsset("paid-stamp.png");
+  installBundledAsset("unpaid-stamp.png");
 } catch {
   /* ignore first-run copy errors */
 }
