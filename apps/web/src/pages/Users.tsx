@@ -4,7 +4,10 @@ import { useAuth } from "../auth";
 import { useT, type MessageKey } from "../i18n";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
+import { Pagination, paginate } from "../components/Pagination";
 import { SearchField, matchesSearch } from "../components/SearchField";
+
+const PAGE_SIZE = 15;
 
 type StaffUser = {
   id: string;
@@ -74,6 +77,7 @@ export function UsersPage() {
   const [roles, setRoles] = useState<Role[]>([]);
   const [billPrinters, setBillPrinters] = useState<BillPrinter[]>([]);
   const [q, setQ] = useState("");
+  const [page, setPage] = useState(1);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
   const isAdmin = user?.roleCode === "ADMIN";
@@ -99,6 +103,11 @@ export function UsersPage() {
 
   const assignable = roles.filter((r) => isAdmin || r.code !== "ADMIN");
   const shown = users.filter((u) => matchesSearch(q, u.name, u.username, u.roleName, u.roleCode));
+  const pageRows = paginate(shown, page, PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [q]);
 
   function edit(u: StaffUser) {
     setDraft({
@@ -206,7 +215,7 @@ export function UsersPage() {
             </tr>
           </thead>
           <tbody>
-            {shown.map((u) => (
+            {pageRows.map((u) => (
               <tr key={u.id} className={u.active ? "" : "inactive-row"}>
                 <td>
                   <strong>{u.name}</strong>
@@ -247,6 +256,7 @@ export function UsersPage() {
             )}
           </tbody>
         </table>
+        <Pagination page={page} pageSize={PAGE_SIZE} total={shown.length} onChange={setPage} />
         <p className="tiny muted" style={{ marginBottom: 0 }}>
           {t("users.footer")}
         </p>

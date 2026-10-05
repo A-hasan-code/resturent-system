@@ -29,13 +29,13 @@ type KotPreview = {
   notes?: string | null;
   showOrderBy?: boolean;
   paperWidth?: number;
-  items: Array<{
+  items?: Array<{
     name: string;
     quantity: number;
     sellUnit: string;
     notes?: string | null;
     round?: number;
-  }>;
+  }> | null;
   text: string;
 };
 
@@ -93,7 +93,7 @@ export function KotPreviewModal({ target, onClose }: { target: KotTarget | null;
           ? { name: preview.takenBy.replace(/\s*\(.*\)$/, ""), roleName: preview.takenBy.match(/\(([^)]+)\)/)?.[1] || "" }
           : null,
         servedByName: preview.servedBy,
-        items: preview.items.map((i) => ({
+        items: (preview.items ?? []).map((i) => ({
           name: i.name,
           quantity: i.quantity,
           sellUnit: i.sellUnit,

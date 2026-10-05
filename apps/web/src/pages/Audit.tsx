@@ -125,6 +125,7 @@ const stamp = (iso: string) =>
   new Date(iso).toLocaleString("en-PK", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 
 const SALE_PAGE = 20;
+const PAGE_SIZE = 15;
 
 function Bars({ days }: { days: Day[] }) {
   const t = useT();
@@ -222,6 +223,11 @@ export function AuditPage() {
   const [busy, setBusy] = useState(false);
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
+  const [daysPage, setDaysPage] = useState(1);
+  const [orderTakerPage, setOrderTakerPage] = useState(1);
+  const [staffPage, setStaffPage] = useState(1);
+  const [paymentsPage, setPaymentsPage] = useState(1);
+  const [storedPage, setStoredPage] = useState(1);
 
   useEffect(() => {
     api<{ firstSaleDate: string | null }>("/audit/meta")
@@ -258,6 +264,27 @@ export function AuditPage() {
   }, []);
 
   useEffect(() => setPage(1), [applied, q]);
+
+  useEffect(() => {
+    setDaysPage(1);
+    setOrderTakerPage(1);
+    setStaffPage(1);
+    setPaymentsPage(1);
+  }, [applied]);
+
+  useEffect(() => {
+    setStoredPage(1);
+  }, [stored.length]);
+
+  const dayRows = useMemo(
+    () => (report?.days ?? []).filter((d) => d.sales || d.orders),
+    [report?.days]
+  );
+  const pageDayRows = paginate(dayRows, daysPage, PAGE_SIZE);
+  const pageOrderTakers = paginate(report?.byOrderTaker ?? [], orderTakerPage, PAGE_SIZE);
+  const pageByStaff = paginate(report?.byStaff ?? [], staffPage, PAGE_SIZE);
+  const pagePayments = paginate(report?.payments ?? [], paymentsPage, PAGE_SIZE);
+  const pageStored = paginate(stored, storedPage, PAGE_SIZE);
 
   function commit(next: { from: string; to: string; staff: string }) {
     if (next.from > next.to) {
@@ -509,9 +536,7 @@ export function AuditPage() {
                 </tr>
               </thead>
               <tbody>
-                {report.days
-                  .filter((d) => d.sales || d.orders)
-                  .map((d) => (
+                {pageDayRows.map((d) => (
                     <tr key={d.date}>
                       <td>{d.date}</td>
                       <td>
@@ -523,6 +548,7 @@ export function AuditPage() {
                   ))}
               </tbody>
             </table>
+            <Pagination page={daysPage} pageSize={PAGE_SIZE} total={dayRows.length} onChange={setDaysPage} />
             </div>
           )}
         </div>
@@ -540,7 +566,7 @@ export function AuditPage() {
                 </tr>
               </thead>
               <tbody>
-                {report.byOrderTaker.map((r) => (
+                {pageOrderTakers.map((r) => (
                   <tr key={r.name}>
                     <td>
                       <strong>{r.name}</strong> <span className="tiny muted">{r.role}</span>
@@ -552,6 +578,12 @@ export function AuditPage() {
                 ))}
               </tbody>
             </table>
+            <Pagination
+              page={orderTakerPage}
+              pageSize={PAGE_SIZE}
+              total={report.byOrderTaker.length}
+              onChange={setOrderTakerPage}
+            />
             </div>
           ) : (
             <div className="empty">{t("common.noMatch")}</div>
@@ -623,7 +655,7 @@ export function AuditPage() {
                 </tr>
               </thead>
               <tbody>
-                {report.byStaff.map((r) => (
+                {pageByStaff.map((r) => (
                   <tr key={r.name}>
                     <td>
                       <strong>{r.name}</strong> <span className="tiny muted">{r.role}</span>
@@ -634,6 +666,12 @@ export function AuditPage() {
                 ))}
               </tbody>
             </table>
+            <Pagination
+              page={staffPage}
+              pageSize={PAGE_SIZE}
+              total={report.byStaff.length}
+              onChange={setStaffPage}
+            />
             </div>
           ) : (
             <div className="empty">{t("payments.empty")}</div>
@@ -653,8 +691,8 @@ export function AuditPage() {
                 </tr>
               </thead>
               <tbody>
-                {report.payments.slice(0, 12).map((p, i) => (
-                  <tr key={`${p.orderNo}-${i}`}>
+                {pagePayments.map((p, i) => (
+                  <tr key={`${p.orderNo}-${p.time}-${i}`}>
                     <td>{stamp(p.time)}</td>
                     <td>#{p.orderNo}</td>
                     <td>
@@ -668,6 +706,12 @@ export function AuditPage() {
                 ))}
               </tbody>
             </table>
+            <Pagination
+              page={paymentsPage}
+              pageSize={PAGE_SIZE}
+              total={report.payments.length}
+              onChange={setPaymentsPage}
+            />
             </div>
           ) : (
             <div className="empty">{t("payments.empty")}</div>
@@ -690,7 +734,7 @@ export function AuditPage() {
               </tr>
             </thead>
             <tbody>
-              {stored.map((f) => (
+              {pageStored.map((f) => (
                 <tr key={f.file}>
                   <td>
                     <strong>{f.month}</strong>{" "}
@@ -709,6 +753,7 @@ export function AuditPage() {
               ))}
             </tbody>
           </table>
+          <Pagination page={storedPage} pageSize={PAGE_SIZE} total={stored.length} onChange={setStoredPage} />
           </div>
         ) : (
           <div className="empty">{t("audit.savedEmpty")}</div>

@@ -366,7 +366,11 @@ export function BillsPage() {
               </tr>
             </thead>
             <tbody>
-              {pageRows.map((o) => (
+              {pageRows.map((o) => {
+                const itemsText = o.items
+                  .map((i) => `${i.quantity} ${unitLabel(i.sellUnit)} ${i.name}`)
+                  .join(", ");
+                return (
                 <tr
                   key={o.id}
                   className={
@@ -393,10 +397,8 @@ export function BillsPage() {
                     )}
                   </td>
                   <td className="tiny">{o.assignedCashier?.name || "—"}</td>
-                  <td>
-                    {o.items
-                      .map((i) => `${i.quantity} ${unitLabel(i.sellUnit)} ${i.name}`)
-                      .join(", ")}
+                  <td className="cell-ellipsis" title={itemsText}>
+                    {itemsText}
                   </td>
                   <td>
                     <span
@@ -435,7 +437,8 @@ export function BillsPage() {
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
           </div>

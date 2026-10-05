@@ -4,7 +4,10 @@ import { useAuth } from "../auth";
 import { useT } from "../i18n";
 import { useSocketEvent } from "../socket";
 import { DateField } from "./DateField";
+import { Pagination, paginate } from "./Pagination";
 import type { PaymentRow } from "./CashHandovers";
+
+const PAGE_SIZE = 15;
 
 type Result = {
   rows: PaymentRow[];
@@ -24,6 +27,7 @@ export function CashRecord() {
   const { user } = useAuth();
   const t = useT();
   const [day, setDay] = useState(isoDay(new Date()));
+  const [page, setPage] = useState(1);
   const [data, setData] = useState<Result | null>(null);
 
   const load = useCallback(() => {
@@ -33,6 +37,9 @@ export function CashRecord() {
   }, [day]);
 
   useEffect(load, [load]);
+  useEffect(() => {
+    setPage(1);
+  }, [day]);
   useSocketEvent("payments.changed", load);
 
   const totals = useMemo(() => {
@@ -54,6 +61,7 @@ export function CashRecord() {
   }, [data, user?.id]);
 
   const rows = data?.rows ?? [];
+  const pageRows = paginate(rows, page, PAGE_SIZE);
 
   return (
     <div>
@@ -107,7 +115,7 @@ export function CashRecord() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((p) => {
+              {pageRows.map((p) => {
                 const mine = p.collectedBy.id === user?.id;
                 return (
                   <tr key={p.id}>
@@ -146,6 +154,7 @@ export function CashRecord() {
             </tbody>
           </table>
         )}
+        <Pagination page={page} pageSize={PAGE_SIZE} total={rows.length} onChange={setPage} />
       </div>
     </div>
   );

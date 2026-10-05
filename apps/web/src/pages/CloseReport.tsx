@@ -4,6 +4,9 @@ import { useAuth } from "../auth";
 import { DateField } from "../components/DateField";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
+import { Pagination, paginate } from "../components/Pagination";
+
+const PAGE_SIZE = 15;
 
 type CounterKind = "COUNTER_1" | "COUNTER_2";
 
@@ -223,6 +226,27 @@ export function CloseReportPage() {
     COUNTER_1: "",
     COUNTER_2: "",
   });
+  const [soldPage, setSoldPage] = useState(1);
+  const [pendingPage, setPendingPage] = useState(1);
+  const [paidPage, setPaidPage] = useState(1);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [counterBillsPage, setCounterBillsPage] = useState<Record<CounterKind, number>>({
+    COUNTER_1: 1,
+    COUNTER_2: 1,
+  });
+  const [counterPaymentsPage, setCounterPaymentsPage] = useState<Record<CounterKind, number>>({
+    COUNTER_1: 1,
+    COUNTER_2: 1,
+  });
+
+  useEffect(() => {
+    setSoldPage(1);
+    setPendingPage(1);
+    setPaidPage(1);
+    setHistoryPage(1);
+    setCounterBillsPage({ COUNTER_1: 1, COUNTER_2: 1 });
+    setCounterPaymentsPage({ COUNTER_1: 1, COUNTER_2: 1 });
+  }, [date, sheet?.businessDate]);
 
   const load = useCallback(
     async (d?: string) => {
@@ -525,7 +549,7 @@ export function CloseReportPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {c.bills.map((b) => (
+                      {paginate(c.bills, counterBillsPage[c.kind], PAGE_SIZE).map((b) => (
                         <tr key={b.orderId}>
                           <td>
                             <div className="row" style={{ gap: "0.35rem", flexWrap: "wrap" }}>
@@ -546,6 +570,12 @@ export function CloseReportPage() {
                       ))}
                     </tbody>
                   </table>
+                  <Pagination
+                    page={counterBillsPage[c.kind]}
+                    pageSize={PAGE_SIZE}
+                    total={c.bills.length}
+                    onChange={(p) => setCounterBillsPage((prev) => ({ ...prev, [c.kind]: p }))}
+                  />
                 </div>
               )}
 
@@ -565,7 +595,7 @@ export function CloseReportPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {c.payments.map((p) => (
+                      {paginate(c.payments, counterPaymentsPage[c.kind], PAGE_SIZE).map((p) => (
                         <tr key={p.id}>
                           <td>{clock(p.createdAt)}</td>
                           <td>
@@ -593,6 +623,12 @@ export function CloseReportPage() {
                       ))}
                     </tbody>
                   </table>
+                  <Pagination
+                    page={counterPaymentsPage[c.kind]}
+                    pageSize={PAGE_SIZE}
+                    total={c.payments.length}
+                    onChange={(p) => setCounterPaymentsPage((prev) => ({ ...prev, [c.kind]: p }))}
+                  />
                 </div>
               )}
             </div>
@@ -701,7 +737,7 @@ export function CloseReportPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {sheet.soldItems.map((i) => (
+                  {paginate(sheet.soldItems, soldPage, PAGE_SIZE).map((i) => (
                     <tr key={i.name}>
                       <td>{i.name}</td>
                       <td>{i.qty}</td>
@@ -712,6 +748,12 @@ export function CloseReportPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination
+                page={soldPage}
+                pageSize={PAGE_SIZE}
+                total={sheet.soldItems.length}
+                onChange={setSoldPage}
+              />
             </div>
           )}
         </div>
@@ -732,7 +774,7 @@ export function CloseReportPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {sheet.pendingBills.map((b) => (
+                  {paginate(sheet.pendingBills, pendingPage, PAGE_SIZE).map((b) => (
                     <tr key={b.orderNo}>
                       <td>
                         <div className="row" style={{ gap: "0.35rem", flexWrap: "wrap" }}>
@@ -755,6 +797,12 @@ export function CloseReportPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination
+                page={pendingPage}
+                pageSize={PAGE_SIZE}
+                total={sheet.pendingBills.length}
+                onChange={setPendingPage}
+              />
             </div>
           )}
         </div>
@@ -778,7 +826,7 @@ export function CloseReportPage() {
                 </tr>
               </thead>
               <tbody>
-                {sheet.paidBills.map((b) => (
+                {paginate(sheet.paidBills, paidPage, PAGE_SIZE).map((b) => (
                   <tr key={b.orderNo}>
                     <td>{clock(b.createdAt)}</td>
                     <td>
@@ -801,6 +849,12 @@ export function CloseReportPage() {
                 ))}
               </tbody>
             </table>
+            <Pagination
+              page={paidPage}
+              pageSize={PAGE_SIZE}
+              total={sheet.paidBills.length}
+              onChange={setPaidPage}
+            />
           </div>
         )}
       </div>
@@ -824,7 +878,7 @@ export function CloseReportPage() {
                 </tr>
               </thead>
               <tbody>
-                {history.map((h) => {
+                {paginate(history, historyPage, PAGE_SIZE).map((h) => {
                   const todayRow = h.businessDate === sheet?.today;
                   return (
                     <tr key={h.id}>
@@ -858,6 +912,7 @@ export function CloseReportPage() {
                 })}
               </tbody>
             </table>
+            <Pagination page={historyPage} pageSize={PAGE_SIZE} total={history.length} onChange={setHistoryPage} />
           </div>
         )}
       </div>

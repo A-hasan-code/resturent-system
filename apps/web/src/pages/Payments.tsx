@@ -54,6 +54,8 @@ export function PaymentsPage() {
   const [status, setStatus] = useState<Status>("");
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
+  const [staffPage, setStaffPage] = useState(1);
+  const [receivedPage, setReceivedPage] = useState(1);
   const [data, setData] = useState<Result | null>(null);
 
   const load = useCallback(async () => {
@@ -72,7 +74,11 @@ export function PaymentsPage() {
     void load();
   }, [load]);
   useSocketEvent("payments.changed", () => void load());
-  useEffect(() => setPage(1), [from, to, status, q]);
+  useEffect(() => {
+    setPage(1);
+    setStaffPage(1);
+    setReceivedPage(1);
+  }, [from, to, status, q]);
 
   const rows = useMemo(
     () =>
@@ -111,6 +117,9 @@ export function PaymentsPage() {
     }
     return [...m.values()];
   }, [rows]);
+
+  const pageByStaff = paginate(byStaff, staffPage, PAGE_SIZE);
+  const pageReceived = paginate(received, receivedPage, PAGE_SIZE);
 
   function exportCsv() {
     downloadExcelCsv(
@@ -197,7 +206,7 @@ export function PaymentsPage() {
                 </tr>
               </thead>
               <tbody>
-                {byStaff.map((r) => (
+                {pageByStaff.map((r) => (
                   <tr key={r.name}>
                     <td>
                       <strong>{r.name}</strong>
@@ -210,6 +219,7 @@ export function PaymentsPage() {
                 ))}
               </tbody>
             </table>
+            <Pagination page={staffPage} pageSize={PAGE_SIZE} total={byStaff.length} onChange={setStaffPage} />
             </div>
           </div>
           <div className="panel panel-pad">
@@ -225,7 +235,7 @@ export function PaymentsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {received.map((r) => (
+                  {pageReceived.map((r) => (
                     <tr key={r.name}>
                       <td>
                         <strong>{r.name}</strong>
@@ -236,6 +246,7 @@ export function PaymentsPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination page={receivedPage} pageSize={PAGE_SIZE} total={received.length} onChange={setReceivedPage} />
               </div>
             ) : (
               <div className="empty">{t("payments.noHandovers")}</div>
