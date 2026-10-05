@@ -3,7 +3,7 @@ import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
 import { CreditService } from "./credit.service";
-import { CreditCustomerDto } from "./dto";
+import { CreditCustomerDto, SettleCreditDto } from "./dto";
 
 @Controller("credit-customers")
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -36,7 +36,7 @@ export class CreditController {
 
   @Post(":id/settle")
   @RequirePerms("order.pay")
-  settle(@CurrentUser() user: AuthUser, @Param("id") id: string) {
-    return this.credit.settle(user, id);
+  settle(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: SettleCreditDto) {
+    return this.credit.settle(user, id, dto.amount);
   }
 }

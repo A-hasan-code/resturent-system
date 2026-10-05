@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useT } from "../i18n";
+import { acquireScrollLock, releaseScrollLock } from "../scroll-lock";
 import { BrandLoader } from "./BrandLoader";
 import { connectManually, connStatus, onConnStatus, reportLost, scanProgress, type ConnStatus } from "../server";
 
@@ -23,6 +24,12 @@ export function ConnectionOverlay() {
     if (status === "ok") return;
     const timer = setInterval(() => setDetail(scanProgress()), 400);
     return () => clearInterval(timer);
+  }, [status]);
+
+  useEffect(() => {
+    if (status === "ok") return;
+    acquireScrollLock();
+    return () => releaseScrollLock();
   }, [status]);
 
   if (status === "ok") return null;

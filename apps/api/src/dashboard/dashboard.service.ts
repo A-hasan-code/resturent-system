@@ -113,6 +113,8 @@ export class DashboardService {
       myOrdersToday,
       myServedToday,
       waiterOrderCounts,
+      creditOpenAgg,
+      creditPaidTodayAgg,
     ] = await Promise.all([
       this.prisma.order.count({ where: { status: "PENDING" } }),
       this.prisma.order.count({ where: { status: "PREPARING" } }),
@@ -123,20 +125,20 @@ export class DashboardService {
       }),
       this.prisma.order.aggregate({
         where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] }, creditCustomerId: null },
-        _sum: { total: true },
+        _sum: { total: true, discountAmount: true, paidAmount: true },
       }),
       this.prisma.order.count({ where: { paymentStatus: "PAID" } }),
       this.prisma.order.aggregate({
         where: { paymentStatus: "PAID", updatedAt: { gte: start } },
-        _sum: { total: true, costTotal: true, tipAmount: true },
+        _sum: { total: true, discountAmount: true, costTotal: true, tipAmount: true },
       }),
       this.prisma.order.aggregate({
         where: { paymentStatus: "PAID" },
-        _sum: { total: true, costTotal: true },
+        _sum: { total: true, discountAmount: true, costTotal: true },
       }),
       this.prisma.order.aggregate({
         where: { createdAt: { gte: start }, status: { not: "CANCELLED" } },
-        _sum: { total: true, costTotal: true },
+        _sum: { total: true, discountAmount: true, costTotal: true },
       }),
       this.prisma.order.count({
         where: { createdAt: { gte: start }, status: { not: "CANCELLED" } },
@@ -203,6 +205,23 @@ export class DashboardService {
         _count: true,
         _sum: { total: true },
       }),
+      this.prisma.order.aggregate({
+        where: {
+          creditCustomerId: { not: null },
+          status: { not: "CANCELLED" },
+          paymentStatus: { in: ["UNPAID", "PARTIAL"] },
+        },
+        _sum: { total: true, discountAmount: true, paidAmount: true },
+        _count: true,
+      }),
+      this.prisma.payment.aggregate({
+        where: {
+          createdAt: { gte: start },
+          order: { creditCustomerId: { not: null } },
+        },
+        _sum: { amount: true },
+        _count: true,
+      }),
     ]);
 
     const mapOrder = (o: (typeof kitchenActive)[0]): DashOrder => {
@@ -260,7 +279,10 @@ export class DashboardService {
       createdAt: m.createdAt,
     }));
 
-    const salesToday = toNumber(ordersTodayAgg._sum.total ?? 0);
+    const salesToday = Math.max(
+      0,
+      toNumber(ordersTodayAgg._sum.total ?? 0) - toNumber(ordersTodayAgg._sum.discountAmount ?? 0),
+    );
     let costToday = toNumber(ordersTodayAgg._sum.costTotal ?? 0);
 
     let stockMoveCostToday = 0;
@@ -272,12 +294,32 @@ export class DashboardService {
     }
 
     const profitToday = salesToday - costToday;
-    const paidRevenueToday = toNumber(revenueTodayAgg._sum.total ?? 0);
+    const paidRevenueToday = Math.max(
+      0,
+      toNumber(revenueTodayAgg._sum.total ?? 0) - toNumber(revenueTodayAgg._sum.discountAmount ?? 0),
+    );
     const paidCostToday = toNumber(revenueTodayAgg._sum.costTotal ?? 0);
     const tipsCollectedToday = toNumber(revenueTodayAgg._sum.tipAmount ?? 0);
-    const revenueAll = toNumber(revenueAllAgg._sum.total ?? 0);
+    const revenueAll = Math.max(
+      0,
+      toNumber(revenueAllAgg._sum.total ?? 0) - toNumber(revenueAllAgg._sum.discountAmount ?? 0),
+    );
     const costPaidAll = toNumber(revenueAllAgg._sum.costTotal ?? 0);
-    const unpaidAmount = toNumber(unpaidAgg._sum.total ?? 0);
+    const unpaidAmount = Math.max(
+      0,
+      toNumber(unpaidAgg._sum.total ?? 0) -
+        toNumber(unpaidAgg._sum.discountAmount ?? 0) -
+        toNumber(unpaidAgg._sum.paidAmount ?? 0),
+    );
+    const creditOutstanding = Math.max(
+      0,
+      toNumber(creditOpenAgg._sum.total ?? 0) -
+        toNumber(creditOpenAgg._sum.discountAmount ?? 0) -
+        toNumber(creditOpenAgg._sum.paidAmount ?? 0),
+    );
+    const creditOutstandingCount = creditOpenAgg._count;
+    const creditPaidToday = Math.max(0, toNumber(creditPaidTodayAgg._sum.amount ?? 0));
+    const creditPaidTodayCount = creditPaidTodayAgg._count;
 
     const showNet =
       role === "ADMIN" ||
@@ -333,6 +375,10 @@ export class DashboardService {
       totalOrders: totalOrdersAll,
       unpaidCount,
       unpaidAmount,
+      creditOutstanding,
+      creditOutstandingCount,
+      creditPaidToday,
+      creditPaidTodayCount,
       paidCount,
       ordersToday,
       orderAmountToday: salesToday,
@@ -373,6 +419,10 @@ export class DashboardService {
         orderAmountToday: 0,
         unpaidCount: 0,
         unpaidAmount: 0,
+        creditOutstanding: 0,
+        creditOutstandingCount: 0,
+        creditPaidToday: 0,
+        creditPaidTodayCount: 0,
         paidCount: 0,
         unpaidOrders: emptyOrders,
         lowStockCount: 0,
@@ -401,6 +451,10 @@ export class DashboardService {
         orderAmountToday: 0,
         unpaidCount: 0,
         unpaidAmount: 0,
+        creditOutstanding: 0,
+        creditOutstandingCount: 0,
+        creditPaidToday: 0,
+        creditPaidTodayCount: 0,
         paidCount: 0,
         unpaidOrders: emptyOrders,
         lowStockCount: 0,
@@ -427,6 +481,10 @@ export class DashboardService {
         totalOrders: 0,
         unpaidCount: 0,
         unpaidAmount: 0,
+        creditOutstanding: 0,
+        creditOutstandingCount: 0,
+        creditPaidToday: 0,
+        creditPaidTodayCount: 0,
         paidCount: 0,
         ordersToday: 0,
         revenueToday: 0,

@@ -23,7 +23,9 @@ One **main server** holds the database and print queue. Cashier / kitchen PCs ru
 
 ## Printers (per counter)
 
-1. Put each billing printer in **network mode** (not USB-to-cashier-PC). Give it a fixed LAN IP.
+### Option A — LAN / network printers (recommended for shared kitchen)
+
+1. Put each billing printer in **network mode**. Give it a fixed LAN IP.
 2. On the server, **Settings → Printers → Add**:
    - Type: **LAN / network**
    - Target: `192.168.x.x:9100`
@@ -32,11 +34,23 @@ One **main server** holds the database and print queue. Cashier / kitchen PCs ru
 3. **Test print**.
 4. **Users**: edit each cashier → **Bill printer** → assign that counter’s printer.
 
-When that cashier prints a bill, the server sends it to **their** printer.
+### Option B — USB on Additional (cashier) PC
 
-Kitchen slips: add a printer with **Kitchen slip** ticked (often one shared kitchen printer).
+1. Plug the USB printer into the **cashier Additional PC** (not the main server).
+2. Install Windows drivers so the printer appears in Windows.
+3. Run **Hotel System desktop app** on that PC (Additional PC mode) and leave it open.
+4. On the server, **Settings → Printers** — the USB printer appears automatically as **USB (Additional PC)**.
+5. Tick **Bill**, set Station (e.g. `Cashier 1`), **Test print**.
+6. **Users** → that cashier → **Bill printer** → assign it.
+
+When that cashier prints a bill, the server queues the job and the desktop app on their PC prints to the local USB printer.
+
+Kitchen slips: one printer per station (Beverages / Cooking / BBQ) with **Kitchen slip** ticked and matching station/categories.
+
+- Only one station in the order → that printer only.
+- Mixed stations in the same order → each involved printer gets the **full** slip (all items).
 
 ## Do not
 
 - Install “Main PC” on more than one computer.
-- Rely on USB printers attached only to Additional PCs — the server cannot see those. Use network printers, or plug USB into the **main server** PC only.
+- Expect Additional PC USB printers to work from a browser alone — the **desktop app** must stay open on that PC.

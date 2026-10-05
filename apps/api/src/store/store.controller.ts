@@ -6,8 +6,14 @@ import {
   Patch,
   Post,
   Query,
+  StreamableFile,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
+import { createReadStream } from "fs";
+import { memoryStorage } from "multer";
 import { StoreService } from "./store.service";
 import { PurchasesService } from "./purchases.service";
 import { DayUseService } from "./day-use.service";
@@ -81,6 +87,16 @@ export class StoreController {
     return this.purchases.ledger(id);
   }
 
+  @Get("suppliers/:id/ledger.pdf")
+  @RequirePerms("store.view", "store.manage")
+  async supplierLedgerPdf(@Param("id") id: string) {
+    const { filename, body } = await this.purchases.ledgerPdf(id);
+    return new StreamableFile(body, {
+      type: "application/pdf",
+      disposition: `attachment; filename="${filename}"`,
+    });
+  }
+
   @Post("suppliers/:id/payments")
   @RequirePerms("store.manage")
   paySupplier(@Param("id") id: string, @Body() dto: SupplierPaymentDto) {
@@ -111,6 +127,28 @@ export class StoreController {
   @RequirePerms("store.manage")
   createPurchase(@Body() dto: CreatePurchaseDto) {
     return this.purchases.createPurchase(dto);
+  }
+
+  @Post("purchases/:id/bill")
+  @RequirePerms("store.manage")
+  @UseInterceptors(
+    FileInterceptor("file", {
+      storage: memoryStorage(),
+      limits: { fileSize: 5 * 1024 * 1024 },
+    })
+  )
+  savePurchaseBill(@Param("id") id: string, @UploadedFile() file: Express.Multer.File) {
+    return this.purchases.saveBillImage(id, file);
+  }
+
+  @Get("purchases/:id/bill")
+  @RequirePerms("store.view", "store.manage")
+  async purchaseBill(@Param("id") id: string) {
+    const img = await this.purchases.billImage(id);
+    return new StreamableFile(createReadStream(img.path), {
+      type: img.contentType,
+      disposition: `inline; filename="${img.filename}"`,
+    });
   }
 
   @Get("categories")

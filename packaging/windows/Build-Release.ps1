@@ -185,8 +185,17 @@ Copy-Item (Join-Path $Root "apps\web\dist") (Join-Path $Stage "app\web\dist") -R
 if (-not $SkipAndroid) {
   Step "Android app (served to tablets at /downloads)"
   & (Join-Path $Root "packaging\android\Build-Apk.ps1") -SkipWeb
+}
+
+$apkBuilt = Join-Path $Releases "android\hotel-system.apk"
+if (Test-Path $apkBuilt) {
   New-Item -ItemType Directory -Force -Path (Join-Path $Stage "app\downloads") | Out-Null
-  Copy-Item (Join-Path $Releases "android\hotel-system.apk") (Join-Path $Stage "app\downloads\hotel-system.apk")
+  Copy-Item $apkBuilt (Join-Path $Stage "app\downloads\hotel-system.apk")
+  if ($SkipAndroid) {
+    Write-Host "Using existing APK: $apkBuilt" -ForegroundColor Green
+  }
+} elseif (-not $SkipAndroid) {
+  throw "APK missing after Android build: $apkBuilt"
 }
 
 if (-not $SkipDesktop) {
@@ -197,12 +206,27 @@ if (-not $SkipDesktop) {
   Remove-Item Env:CSC_LINK -ErrorAction SilentlyContinue
   Remove-Item Env:CSC_KEY_PASSWORD -ErrorAction SilentlyContinue
   try {
-    Invoke-Checked "pnpm" @("--filter", "@hotel/desktop", "exec", "electron-builder", "--dir", "-c.extraMetadata.version=$Version")
+    # Unique output dir avoids EBUSY when releases\desktop\win-unpacked is locked (IDE/antivirus).
+    $desktopOutRel = "../../releases/desktop-build"
+    $desktopOutAbs = Join-Path $Releases "desktop-build"
+    if (Test-Path $desktopOutAbs) {
+      $stamp = Get-Date -Format "HHmmss"
+      $desktopOutRel = "../../releases/desktop-build-$stamp"
+      $desktopOutAbs = Join-Path $Releases "desktop-build-$stamp"
+    }
+    Invoke-Checked "pnpm" @(
+      "--filter", "@hotel/desktop", "exec", "electron-builder", "--dir",
+      "-c.extraMetadata.version=$Version",
+      "-c.directories.output=$desktopOutRel"
+    )
   } finally {
     if ($prevCsc) { $env:CSC_LINK = $prevCsc }
   }
-  $unpacked = Join-Path $Releases "desktop\win-unpacked"
-  if (-not (Test-Path (Join-Path $unpacked "Hotel System.exe"))) { throw "Electron build missing: $unpacked" }
+  $unpacked = Join-Path $desktopOutAbs "win-unpacked"
+  $desktopExeName = "PixalBotics Restaurant.exe"
+  if (-not (Test-Path (Join-Path $unpacked $desktopExeName))) {
+    throw "Electron build missing: $(Join-Path $unpacked $desktopExeName)"
+  }
   Copy-Item $unpacked (Join-Path $Stage "desktop") -Recurse
 }
 
@@ -214,7 +238,9 @@ Set-Content -Path (Join-Path $Stage "VERSION") -Value $Version -NoNewline -Encod
 Step "Authenticode sign staged binaries"
 $signScript = Join-Path $PSScriptRoot "Sign.ps1"
 $toSign = @()
-if (Test-Path (Join-Path $Stage "desktop\Hotel System.exe")) { $toSign += (Join-Path $Stage "desktop\Hotel System.exe") }
+if (Test-Path (Join-Path $Stage "desktop\PixalBotics Restaurant.exe")) {
+  $toSign += (Join-Path $Stage "desktop\PixalBotics Restaurant.exe")
+}
 if (Test-Path (Join-Path $Stage "winsw\HotelSystemAPI.exe")) { $toSign += (Join-Path $Stage "winsw\HotelSystemAPI.exe") }
 $signResult = & $signScript -Path $toSign -Required:$RequireSign
 if ($signResult -is [hashtable] -and -not $signResult.Signed -and $RequireSign) {
@@ -256,16 +282,14 @@ $isccArgs = @(
 $signWrapper = Get-InnoSignWrapperPath
 if ($signWrapper) {
   Write-Host "Inno SignTool enabled (Authenticode)" -ForegroundColor Green
+  $isccArgs += "/DHotelDoSign=1"
   $isccArgs += "/SHotelSign=$signWrapper `$f"
 } else {
-  # Inno still references SignTool=HotelSign - provide a no-op that copies "success"
-  # only when signing is optional. Prefer real signing for client releases.
+  # Inno 6.7+ verifies SignTool actually signed the file — do not pass a no-op.
+  # HotelSystem.iss omits SignTool unless /DHotelDoSign=1 is set.
   Write-Host "WARNING: Building UNSIGNED installer (dev/internal only)." -ForegroundColor Yellow
   Write-Host "Configure signing.env + docs\CODE-SIGNING.md for Smart App Control-safe releases." -ForegroundColor Yellow
   if ($RequireSign) { throw "HOTEL_SIGN_REQUIRED / -RequireSign set but signing is not configured." }
-  $noop = Join-Path $env:TEMP "hotel-innosign-noop.cmd"
-  Set-Content -Path $noop -Value "@echo off`r`nrem unsigned build - SignTool noop`r`nexit /b 0" -Encoding ascii
-  $isccArgs += "/SHotelSign=$noop `$f"
 }
 $isccArgs += (Join-Path $PSScriptRoot "HotelSystem.iss")
 Invoke-Checked $iscc $isccArgs

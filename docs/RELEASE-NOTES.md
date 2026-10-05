@@ -1,6 +1,10 @@
-# Hotel System v1.3.1 — Release Notes
+# Hotel System v1.3.2 — Release Notes
 
-**Date:** 2026-10-02
+**Date:** 2026-10-05
+
+### v1.3.2
+- **UI:** Mobile/tablet responsive alignment — waiter cart, bills toolbar, audit/settings tables, purchase lines, credit list, close-report meta.
+- **Packaging:** Desktop exe name `PixalBotics Restaurant.exe`; release build tolerates locked Electron output dirs.
 
 ### v1.3.1
 - **Fix:** Desktop app (cashier/kitchen PCs) no longer connects to Hyper-V virtual IPs (e.g. `172.28.x`) — prefers server beacon `192.168.x` like tablets.
@@ -76,7 +80,7 @@ Run the newer installer over the old install. Data, secrets, and ports under `C:
 ## Known limitations
 
 - One Main PC only (do not install “server” mode on two PCs).
-- USB printers must be on the **main server**, or use network printers at counters.
+- USB on the **main server** works as before. USB on an **Additional PC** works when that PC runs the desktop app (printer appears in Settings automatically). Or use LAN printers at counters.
 - Plain-HTTP tablet home-screen shortcuts need a stable server IP (use DHCP reservation).
 - Guest Wi‑Fi / client isolation must be off so devices can reach the server.
 

@@ -20,7 +20,7 @@ export type Branding = {
 };
 
 const DEFAULT: Branding = {
-  name: "Hotel System",
+  name: "PixalBotics Restaurant",
   tagline: "Offline POS · Store · Kitchen",
   address: "",
   phone: "",

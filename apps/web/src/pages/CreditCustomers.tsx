@@ -3,7 +3,7 @@ import { api, money, unitLabel } from "../api";
 import { useBrand } from "../brand";
 import { Modal } from "../components/Modal";
 import { SearchField } from "../components/SearchField";
-import { useI18n, useT } from "../i18n";
+import { useI18n, useT, type MessageKey } from "../i18n";
 import { useToast } from "../toast";
 
 type CustomerRow = {
@@ -22,6 +22,7 @@ type Invoice = {
   tableNo: string | null;
   createdAt: string;
   total: number;
+  paidAmount: number;
   due: number;
   paymentStatus: string;
   items: { name: string; quantity: number; unit: string; amount: number }[];
@@ -51,13 +52,24 @@ type Slip = {
       orderNo: number;
       tableNo: string | null;
       total: number;
+      paid: number;
+      dueAfter: number;
       items: { name: string; quantity: number; unit: string; amount: number }[];
     }[];
   }[];
   total: number;
+  outstandingBefore: number;
+  remaining: number;
+  cleared: boolean;
 };
 
 const emptyForm = { name: "", phone: "", address: "", cnic: "" };
+
+function statusBadge(status: string, t: (k: MessageKey) => string) {
+  if (status === "PAID") return { cls: "paid", label: t("credit.paid") };
+  if (status === "PARTIAL") return { cls: "pending", label: t("credit.partial") };
+  return { cls: "unpaid", label: t("credit.open") };
+}
 
 export function CreditCustomersPage() {
   const t = useT();
@@ -69,6 +81,7 @@ export function CreditCustomersPage() {
   const [form, setForm] = useState(emptyForm);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [payAmount, setPayAmount] = useState("");
   const [slip, setSlip] = useState<Slip | null>(null);
   const [preview, setPreview] = useState<Slip | null>(null);
   const [openBill, setOpenBill] = useState<string | null>(null);
@@ -85,6 +98,7 @@ export function CreditCustomersPage() {
     setSlip(null);
     const detail = await api<Account>(`/credit-customers/${id}`);
     setAccount(detail);
+    setPayAmount(detail.outstanding > 0 ? String(detail.outstanding) : "");
     setForm({
       name: detail.name,
       phone: detail.phone,
@@ -136,10 +150,19 @@ export function CreditCustomersPage() {
 
   async function settle() {
     if (!account || account.outstanding <= 0) return;
+    const value = Math.round(Number(payAmount) * 100) / 100;
+    if (!(value > 0)) {
+      toast.push(t("credit.enterAmount"), "err");
+      return;
+    }
+    const amount = Math.min(value, account.outstanding);
     setBusy(true);
     try {
-      const paid = await api<Slip>(`/credit-customers/${account.id}/settle`, { method: "POST" });
-      toast.push(t("credit.settled"), "ok");
+      const paid = await api<Slip>(`/credit-customers/${account.id}/settle`, {
+        method: "POST",
+        body: JSON.stringify({ amount }),
+      });
+      toast.push(paid.cleared ? t("credit.settledClear") : t("credit.settled"), "ok");
       await loadList(q);
       await openAccount(account.id);
       setSlip(paid);
@@ -151,45 +174,60 @@ export function CreditCustomersPage() {
     }
   }
 
+  const payValue = Math.max(0, Number(payAmount) || 0);
+  const payNow = account ? Math.min(payValue, account.outstanding) : 0;
+  const remainingAfter = account ? Math.max(0, Math.round((account.outstanding - payNow) * 100) / 100) : 0;
+
   return (
-    <div className="page">
-      <header className="page-head">
+    <div>
+      <div className="page-head">
         <div>
           <h1>{t("credit.title")}</h1>
-          <p className="muted">{t("credit.subtitle")}</p>
+          <p>{t("credit.subtitle")}</p>
         </div>
-      </header>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            setSelectedId(null);
+            setAccount(null);
+            setEditing(true);
+            setForm(emptyForm);
+            setPayAmount("");
+            setSlip(null);
+            setPreview(null);
+          }}
+        >
+          {t("credit.new")}
+        </button>
+      </div>
       <div className="credit-layout">
         <section className="panel panel-pad">
           <SearchField value={q} onChange={setQ} placeholder={t("credit.searchPh")} />
-          {q.trim() && !rows.length && <div className="tiny muted" style={{ marginTop: "0.45rem" }}>{t("credit.noMatch")}</div>}
-          <button
-            type="button"
-            className="btn sm"
-            style={{ marginTop: "0.6rem" }}
-            onClick={() => {
-              setSelectedId(null);
-              setAccount(null);
-              setEditing(true);
-              setForm(emptyForm);
-              setSlip(null);
-              setPreview(null);
-            }}
-          >
-            {t("credit.new")}
-          </button>
-          <ul className="credit-list">
+          {q.trim() && !rows.length && (
+            <div className="tiny muted" style={{ marginTop: "0.45rem" }}>
+              {t("credit.noMatch")}
+            </div>
+          )}
+          <div className="suggest-list" style={{ marginTop: "0.75rem", maxHeight: 480 }}>
             {rows.map((r) => (
-              <li key={r.id}>
-                <button type="button" className={selectedId === r.id ? "active" : ""} onClick={() => void openAccount(r.id)}>
+              <button
+                key={r.id}
+                type="button"
+                className={`suggest-item credit-suggest-item ${selectedId === r.id ? "active" : ""}`}
+                onClick={() => void openAccount(r.id)}
+              >
+                <span className="credit-suggest-main">
                   <strong>{r.name}</strong>
                   <span className="tiny muted">{r.phone}</span>
-                  <span>{r.outstanding > 0 ? money(r.outstanding) : t("credit.clear")}</span>
-                </button>
-              </li>
+                </span>
+                <span className="tiny credit-suggest-bal">
+                  {r.outstanding > 0 ? money(r.outstanding) : t("credit.clear")}
+                </span>
+              </button>
             ))}
-            {!rows.length && !q.trim() && <li className="empty">{t("credit.empty")}</li>}
-          </ul>
+            {!rows.length && !q.trim() && <div className="empty">{t("credit.empty")}</div>}
+          </div>
         </section>
 
         <section className="panel panel-pad">
@@ -197,7 +235,7 @@ export function CreditCustomersPage() {
             <CustomerForm form={form} setForm={setForm} busy={busy} onSave={() => void saveCustomer()} />
           ) : account ? (
             <>
-              <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div className="credit-account-head">
                 <div>
                   <h2 style={{ margin: 0 }}>{account.name}</h2>
                   <div className="tiny muted">
@@ -206,17 +244,14 @@ export function CreditCustomersPage() {
                   </div>
                   {account.address && <div className="tiny muted">{account.address}</div>}
                 </div>
-                <div style={{ textAlign: "right" }}>
-                  <div className="tiny muted">{t("credit.outstanding")}</div>
+                <div className="panel stat credit-outstanding">
+                  <span>{t("credit.outstanding")}</span>
                   <strong>{money(account.outstanding)}</strong>
                 </div>
               </div>
-              <div className="row" style={{ marginTop: "0.7rem" }}>
+              <div className="row page-head-actions" style={{ marginTop: "0.7rem" }}>
                 <button type="button" className="btn ghost sm" onClick={() => setEditing((v) => !v)}>
                   {t("credit.edit")}
-                </button>
-                <button type="button" className="btn ok sm" disabled={busy || account.outstanding <= 0} onClick={() => void settle()}>
-                  {t("credit.payAll")}
                 </button>
                 {slip && (
                   <button type="button" className="btn ghost sm" onClick={() => setPreview(slip)}>
@@ -224,6 +259,48 @@ export function CreditCustomersPage() {
                   </button>
                 )}
               </div>
+              {account.outstanding > 0 && (
+                <div className="credit-pay-box">
+                  <div className="field">
+                    <label htmlFor="credit-pay-amount">{t("credit.payAmount")}</label>
+                    <input
+                      id="credit-pay-amount"
+                      type="number"
+                      min={0.01}
+                      step={0.01}
+                      inputMode="decimal"
+                      value={payAmount}
+                      onChange={(e) => setPayAmount(e.target.value)}
+                    />
+                  </div>
+                  <div className="credit-pay-meta">
+                    <div className="tiny muted">
+                      {t("credit.outstanding")}: {money(account.outstanding)}
+                    </div>
+                    <div className="tiny">
+                      {t("credit.remaining")}: <strong>{money(remainingAfter)}</strong>
+                    </div>
+                  </div>
+                  <div className="row" style={{ gap: "0.5rem", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      disabled={busy}
+                      onClick={() => setPayAmount(String(account.outstanding))}
+                    >
+                      {t("credit.payAll")}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn ok sm"
+                      disabled={busy || payNow <= 0}
+                      onClick={() => void settle()}
+                    >
+                      {t("credit.pay")} · {money(payNow)}
+                    </button>
+                  </div>
+                </div>
+              )}
               {editing && (
                 <div style={{ marginTop: "0.8rem" }}>
                   <CustomerForm form={form} setForm={setForm} busy={busy} onSave={() => void saveCustomer()} />
@@ -239,28 +316,38 @@ export function CreditCustomersPage() {
                       {day.outstanding > 0 ? ` · ${t("credit.due")} ${money(day.outstanding)}` : ""}
                     </span>
                   </div>
-                  {day.invoices.map((inv) => (
-                    <div key={inv.id} className="credit-invoice">
-                      <button type="button" className="credit-invoice-head" onClick={() => setOpenBill(openBill === inv.id ? null : inv.id)}>
-                        <span>
-                          #{inv.orderNo} · {inv.tableNo || "—"}
-                        </span>
-                        <span>
-                          {money(inv.total)} · {inv.paymentStatus === "PAID" ? t("credit.paid") : t("credit.open")}
-                        </span>
-                      </button>
-                      {openBill === inv.id && (
-                        <ul>
-                          {inv.items.map((item, i) => (
-                            <li key={`${inv.id}-${i}`}>
-                              {item.quantity} {item.unit} {item.name}
-                              <span className="tiny muted"> — {money(item.amount)}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  ))}
+                  {day.invoices.map((inv) => {
+                    const badge = statusBadge(inv.paymentStatus, t);
+                    return (
+                      <div key={inv.id} className="credit-invoice">
+                        <button
+                          type="button"
+                          className="credit-invoice-head"
+                          onClick={() => setOpenBill(openBill === inv.id ? null : inv.id)}
+                        >
+                          <span>
+                            #{inv.orderNo} · {inv.tableNo || "—"}
+                          </span>
+                          <span>
+                            {money(inv.total)}
+                            {inv.due > 0 && inv.paymentStatus !== "UNPAID" ? ` · ${t("credit.due")} ${money(inv.due)}` : ""}
+                            {" · "}
+                            <span className={`badge ${badge.cls}`}>{badge.label}</span>
+                          </span>
+                        </button>
+                        {openBill === inv.id && (
+                          <ul className="tiny" style={{ margin: "0.25rem 0 0.4rem", paddingLeft: "1.1rem" }}>
+                            {inv.items.map((item, i) => (
+                              <li key={`${inv.id}-${i}`}>
+                                {item.quantity} {unitLabel(item.unit)} {item.name}
+                                <span className="muted"> — {money(item.amount)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               ))}
             </>
@@ -280,6 +367,7 @@ function CreditPaidModal({ slip, onClose }: { slip: Slip | null; onClose: () => 
   const { brand, logoSrc } = useBrand();
   const dateLocale = locale === "ur" ? "ur-PK" : "en-PK";
   const when = slip ? new Date(slip.paidAt) : new Date();
+  const cleared = !!slip?.cleared;
 
   return (
     <Modal open={!!slip} title={t("credit.paidSlip")} onClose={onClose}>
@@ -304,7 +392,7 @@ function CreditPaidModal({ slip, onClose }: { slip: Slip | null; onClose: () => 
                   )}
                 </div>
                 <div className="receipt-rule" />
-                <div className="receipt-stamp">{t("credit.paidStamp")}</div>
+                <div className="receipt-stamp">{cleared ? t("credit.paidStamp") : t("credit.partialStamp")}</div>
                 <div className="receipt-meta" style={{ textAlign: "center" }}>
                   <strong>{t("credit.settlement")}</strong>
                 </div>
@@ -333,7 +421,8 @@ function CreditPaidModal({ slip, onClose }: { slip: Slip | null; onClose: () => 
                     {day.invoices.map((inv) => (
                       <div key={inv.orderNo}>
                         <div className="receipt-sub">
-                          #{inv.orderNo} · {inv.tableNo || "—"}
+                          #{inv.orderNo} · {inv.tableNo || "—"} · {t("credit.paidNow")} {money(inv.paid)}
+                          {inv.dueAfter > 0 ? ` · ${t("credit.due")} ${money(inv.dueAfter)}` : ""}
                         </div>
                         {inv.items.map((item, i) => (
                           <div key={`${inv.orderNo}-${i}`} className="receipt-item">
@@ -352,11 +441,19 @@ function CreditPaidModal({ slip, onClose }: { slip: Slip | null; onClose: () => 
                 ))}
                 <div className="receipt-rule" />
                 <div className="receipt-total">
+                  <span>{t("credit.wasDue")}</span>
+                  <strong>{money(slip.outstandingBefore)}</strong>
+                </div>
+                <div className="receipt-total">
                   <span>{t("credit.paidNow")}</span>
                   <strong>{money(slip.total)}</strong>
                 </div>
+                <div className="receipt-total">
+                  <span>{t("credit.remainingBill")}</span>
+                  <strong>{money(slip.remaining)}</strong>
+                </div>
                 <div className="receipt-pay">
-                  <strong>*** {t("credit.paidStamp")} ***</strong>
+                  <strong>*** {cleared ? t("credit.paidStamp") : t("credit.partialStamp")} ***</strong>
                 </div>
               </div>
             </div>
@@ -389,25 +486,43 @@ function CustomerForm({
   const t = useT();
   return (
     <div className="credit-form">
-      <label>
-        {t("credit.name")}
-        <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-      </label>
-      <label>
-        {t("credit.phone")}
-        <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
-      </label>
-      <label>
-        {t("credit.address")}
-        <input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
-      </label>
-      <label>
-        {t("credit.cnic")}
-        <input value={form.cnic} onChange={(e) => setForm({ ...form, cnic: e.target.value })} />
-      </label>
-      <button type="button" className="btn" disabled={busy} onClick={onSave}>
-        {t("credit.save")}
-      </button>
+      <div className="grid-2">
+        <div className="field">
+          <label htmlFor="credit-name">{t("credit.name")}</label>
+          <input
+            id="credit-name"
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            required
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="credit-phone">{t("credit.phone")}</label>
+          <input
+            id="credit-phone"
+            value={form.phone}
+            onChange={(e) => setForm({ ...form, phone: e.target.value })}
+            required
+          />
+        </div>
+      </div>
+      <div className="field">
+        <label htmlFor="credit-address">{t("credit.address")}</label>
+        <input
+          id="credit-address"
+          value={form.address}
+          onChange={(e) => setForm({ ...form, address: e.target.value })}
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="credit-cnic">{t("credit.cnic")}</label>
+        <input id="credit-cnic" value={form.cnic} onChange={(e) => setForm({ ...form, cnic: e.target.value })} />
+      </div>
+      <div className="form-actions">
+        <button type="button" className="btn" disabled={busy} onClick={onSave}>
+          {busy ? t("common.saving") : t("credit.save")}
+        </button>
+      </div>
     </div>
   );
 }

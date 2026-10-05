@@ -1,6 +1,6 @@
 {
   "appId": "com.pixalbotics.hotelsystem",
-  "appName": "Hotel System",
+  "appName": "PixalBotics Restaurant",
   "webDir": "../web/dist",
   "server": {
     "androidScheme": "http",

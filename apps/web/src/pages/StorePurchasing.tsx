@@ -1,5 +1,5 @@
 import { FormEvent, Fragment, useEffect, useMemo, useState } from "react";
-import { api, money, unitLabel } from "../api";
+import { api, authBlobUrl, downloadApi, money, unitLabel, uploadApi } from "../api";
 import { Modal } from "../components/Modal";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
@@ -38,6 +38,7 @@ type RecentBill = {
   paidAmount: number;
   outstanding: number;
   lineCount: number;
+  hasBillImage: boolean;
 };
 
 type DailyLine = {
@@ -65,6 +66,7 @@ type Ledger = SupplierRow & {
     paidAmount: number;
     balance: number;
     note: string | null;
+    hasBillImage: boolean;
     lines: { id: string; item: string; category: string; unit: string; quantity: number; ratePerUnit: number; amount: number }[];
   }[];
   payments: { id: string; paidOn: string; amount: number; note: string | null }[];
@@ -133,7 +135,20 @@ function BuyView({
   const [newItemCat, setNewItemCat] = useState("");
   const [newItemUnit, setNewItemUnit] = useState<string>("KG");
   const [lines, setLines] = useState<DraftLine[]>([]);
+  const [billFile, setBillFile] = useState<File | null>(null);
+  const [billPreview, setBillPreview] = useState<string | null>(null);
+  const [viewBillId, setViewBillId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!billFile) {
+      setBillPreview(null);
+      return;
+    }
+    const url = URL.createObjectURL(billFile);
+    setBillPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [billFile]);
 
   const allItems = useMemo(() => {
     const map = new Map<string, PurchaseItem>();
@@ -292,7 +307,7 @@ function BuyView({
     }
     setBusy(true);
     try {
-      await api("/store/purchases", {
+      const created = await api<{ id: string }>("/store/purchases", {
         method: "POST",
         body: JSON.stringify({
           supplierId,
@@ -306,6 +321,11 @@ function BuyView({
           lines: payload,
         }),
       });
+      if (billFile) {
+        const form = new FormData();
+        form.append("file", billFile);
+        await uploadApi(`/store/purchases/${created.id}/bill`, form);
+      }
       toast.push(t("store.purchaseSaved"), "ok");
       setLines([]);
       setNote("");
@@ -314,6 +334,7 @@ function BuyView({
       setExtraExpense("");
       setExtraNote("");
       setExtraPaidBy("SELF");
+      setBillFile(null);
       await load();
       onChanged();
     } catch (err) {
@@ -671,6 +692,36 @@ function BuyView({
             <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={t("store.notePh")} />
           </div>
 
+          <div className="field" style={{ marginTop: "0.75rem" }}>
+            <label>{t("store.billPhoto")}</label>
+            <p className="tiny muted" style={{ margin: "0 0 0.4rem" }}>
+              {t("store.billPhotoHint")}
+            </p>
+            <div className="row" style={{ gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+              <label className="btn ghost sm" style={{ cursor: "pointer", margin: 0 }}>
+                {billFile ? t("store.billPhotoChange") : t("store.billPhotoPick")}
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  capture="environment"
+                  hidden
+                  onChange={(e) => setBillFile(e.target.files?.[0] ?? null)}
+                />
+              </label>
+              {billFile && (
+                <button type="button" className="btn ghost sm" onClick={() => setBillFile(null)}>
+                  {t("store.billPhotoClear")}
+                </button>
+              )}
+              {billFile && <span className="tiny muted">{billFile.name}</span>}
+            </div>
+            {billPreview && (
+              <div className="bill-photo-preview" style={{ marginTop: "0.55rem" }}>
+                <img src={billPreview} alt="" style={{ maxWidth: "100%", maxHeight: 180, borderRadius: 8 }} />
+              </div>
+            )}
+          </div>
+
           <div className="stats" style={{ marginTop: "0.5rem" }}>
             <div className="panel stat">
               <span>{t("store.inventoryValue")}</span>
@@ -721,6 +772,7 @@ function BuyView({
                   <th>{t("store.extraExpense")}</th>
                   <th>{t("store.paidToSupplier")}</th>
                   <th>{t("store.creditDue")}</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -744,7 +796,27 @@ function BuyView({
                       )}
                     </td>
                     <td>{money(b.paidAmount)}</td>
-                    <td>{b.outstanding > 0 ? <span className="badge unpaid">{money(b.outstanding)}</span> : money(0)}</td>
+                    <td>
+                      {b.outstanding > 0.009 ? (
+                        <>
+                          <span className="badge unpaid">
+                            {b.paidAmount > 0.009 ? t("store.billStatusPartial") : t("store.billStatusUnpaid")}
+                          </span>
+                          <div>{money(b.outstanding)}</div>
+                        </>
+                      ) : (
+                        <span className="badge paid">{t("store.billStatusPaid")}</span>
+                      )}
+                    </td>
+                    <td>
+                      {b.hasBillImage ? (
+                        <button type="button" className="btn ghost sm" onClick={() => setViewBillId(b.id)}>
+                          {t("store.viewBillPhoto")}
+                        </button>
+                      ) : (
+                        <span className="tiny muted">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -752,6 +824,8 @@ function BuyView({
           </div>
         )}
       </div>
+
+      <BillPhotoModal purchaseId={viewBillId} onClose={() => setViewBillId(null)} />
     </div>
   );
 }
@@ -816,11 +890,13 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
   const [address, setAddress] = useState("");
   const [ledger, setLedger] = useState<Ledger | null>(null);
   const [openBillId, setOpenBillId] = useState<string | null>(null);
+  const [viewBillId, setViewBillId] = useState<string | null>(null);
   const [payFor, setPayFor] = useState<SupplierRow | null>(null);
   const [amount, setAmount] = useState("");
   const [paidOn, setPaidOn] = useState(todayIso);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
 
   function resetAddForm() {
     setName("");
@@ -872,6 +948,20 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
       setOpenBillId(firstOpen?.id || next.purchases[0]?.id || null);
     } catch (err) {
       toast.push(err instanceof Error ? err.message : t("common.failed"), "err");
+    }
+  }
+
+  async function downloadLedgerPdf() {
+    if (!ledger) return;
+    setPdfBusy(true);
+    try {
+      const safe = ledger.name.replace(/[^\w\-]+/g, "_").replace(/_+/g, "_").slice(0, 40) || "supplier";
+      await downloadApi(`/store/suppliers/${ledger.id}/ledger.pdf`, `supplier-${safe}.pdf`);
+      toast.push(t("store.ledgerPdfOk"), "ok");
+    } catch (err) {
+      toast.push(err instanceof Error ? err.message : t("store.ledgerPdfFailed"), "err");
+    } finally {
+      setPdfBusy(false);
     }
   }
 
@@ -1008,7 +1098,7 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
               className={`panel panel-pad supplier-card${ledger?.id === s.id ? " is-selected" : ""}`}
             >
               <div className="supplier-card-top">
-                <div className="supplier-profile" style={{ flex: 1, minWidth: 220 }}>
+                <div className="supplier-profile settings-connect-copy">
                   <div className="row" style={{ gap: "0.5rem", alignItems: "center" }}>
                     <h3>{s.name}</h3>
                     {s.outstanding > 0.009 ? (
@@ -1066,7 +1156,7 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
 
       {ledger && (
         <div className="panel panel-pad" style={{ marginTop: "0.8rem" }}>
-          <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem", flexWrap: "wrap" }}>
             <div className="supplier-profile" style={{ flex: 1, minWidth: 240 }}>
               <div className="tiny muted">{t("store.ledgerTitle")}</div>
               <h3>{ledger.name}</h3>
@@ -1080,16 +1170,21 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                 {t("store.ledgerHint")}
               </p>
             </div>
-            <button
-              type="button"
-              className="btn ghost sm"
-              onClick={() => {
-                setLedger(null);
-                setOpenBillId(null);
-              }}
-            >
-              {t("common.close")}
-            </button>
+            <div className="row" style={{ gap: "0.4rem", flexWrap: "wrap" }}>
+              <button type="button" className="btn sm" disabled={pdfBusy} onClick={() => void downloadLedgerPdf()}>
+                {pdfBusy ? t("common.loading") : t("store.downloadLedgerPdf")}
+              </button>
+              <button
+                type="button"
+                className="btn ghost sm"
+                onClick={() => {
+                  setLedger(null);
+                  setOpenBillId(null);
+                }}
+              >
+                {t("common.close")}
+              </button>
+            </div>
           </div>
 
           <div className="stats" style={{ marginTop: "0.75rem" }}>
@@ -1166,13 +1261,20 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                           )}
                         </td>
                         <td>
-                          <button
-                            type="button"
-                            className="btn ghost sm"
-                            onClick={() => setOpenBillId(open ? null : p.id)}
-                          >
-                            {open ? t("common.close") : t("store.billItems")}
-                          </button>
+                          <div className="row" style={{ gap: "0.35rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                            {p.hasBillImage && (
+                              <button type="button" className="btn ghost sm" onClick={() => setViewBillId(p.id)}>
+                                {t("store.viewBillPhoto")}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="btn ghost sm"
+                              onClick={() => setOpenBillId(open ? null : p.id)}
+                            >
+                              {open ? t("common.close") : t("store.billItems")}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                       {open && (
@@ -1297,7 +1399,54 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
           </div>
         </form>
       )}
+
+      <BillPhotoModal purchaseId={viewBillId} onClose={() => setViewBillId(null)} />
     </div>
+  );
+}
+
+function BillPhotoModal({ purchaseId, onClose }: { purchaseId: string | null; onClose: () => void }) {
+  const t = useT();
+  const toast = useToast();
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!purchaseId) {
+      setSrc(null);
+      return;
+    }
+    let active = true;
+    let objectUrl: string | null = null;
+    void authBlobUrl(`/store/purchases/${purchaseId}/bill`)
+      .then((url) => {
+        if (!active) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        objectUrl = url;
+        setSrc(url);
+      })
+      .catch((err) => {
+        toast.push(err instanceof Error ? err.message : t("store.billPhotoMissing"), "err");
+        onClose();
+      });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [purchaseId]);
+
+  return (
+    <Modal open={!!purchaseId} title={t("store.billPhotoTitle")} onClose={onClose} size="lg">
+      <div className="modal-scroll">
+        {!src && <div className="empty">{t("common.loading")}</div>}
+        {src && (
+          <div style={{ textAlign: "center" }}>
+            <img src={src} alt="" style={{ maxWidth: "100%", maxHeight: "70vh", borderRadius: 8 }} />
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }
 

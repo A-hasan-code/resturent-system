@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useEffect } from "react";
 import { useT } from "../i18n";
+import { acquireScrollLock, releaseScrollLock } from "../scroll-lock";
 
 export function Modal({
   open,
@@ -35,16 +36,8 @@ export function Modal({
 
   useEffect(() => {
     if (!open) return;
-    const html = document.documentElement;
-    const body = document.body;
-    const prevHtml = html.style.overflow;
-    const prevBody = body.style.overflow;
-    html.style.overflow = "hidden";
-    body.style.overflow = "hidden";
-    return () => {
-      html.style.overflow = prevHtml;
-      body.style.overflow = prevBody;
-    };
+    acquireScrollLock();
+    return () => releaseScrollLock();
   }, [open]);
 
   if (!open) return null;

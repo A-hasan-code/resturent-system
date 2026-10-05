@@ -21,6 +21,7 @@ import { ServerIdentityService } from "./server-identity.service";
 import { SettingsService } from "./settings.service";
 import { BackupService } from "./backup.service";
 import { TipService } from "./tip.service";
+import { sampleBillPayload } from "../print/receipts";
 
 class UpdateSettingsDto {
   @IsOptional() @IsString() @MaxLength(80) serverName?: string;
@@ -31,10 +32,19 @@ class UpdateSettingsDto {
   @IsOptional() @IsString() @Matches(/^#[0-9a-fA-F]{6}$/) accent?: string;
   /** ORDER_TAKER | SERVER | SPLIT_50 | POOL */
   @IsOptional() @IsString() @Matches(/^(ORDER_TAKER|SERVER|SPLIT_50|POOL)$/i) tipSplit?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) billShowLogo?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) billShowName?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) billShowTagline?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) billShowAddress?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) billShowPhone?: string;
+  @IsOptional() @IsString() @MaxLength(40) billTitle?: string;
   @IsOptional() @IsString() @Matches(/^[01]$/) billShowOrderBy?: string;
   @IsOptional() @IsString() @Matches(/^[01]$/) billShowServedBy?: string;
   @IsOptional() @IsString() @Matches(/^[01]$/) billShowCashier?: string;
   @IsOptional() @IsString() @Matches(/^[01]$/) billShowTip?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) billShowPaidStamp?: string;
+  @IsOptional() @IsString() @MaxLength(40) billPaidStampText?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) billPaidStampBig?: string;
   @IsOptional() @IsString() @MaxLength(120) billFooter?: string;
   @IsOptional() @IsString() @Matches(/^[01]$/) kotShowOrderBy?: string;
   @IsOptional() @IsString() @MaxLength(120) kotFooter?: string;
@@ -43,6 +53,25 @@ class UpdateSettingsDto {
   @IsOptional() @IsString() @MaxLength(40) perHeadLabel?: string;
   /** Business day starts at this server time, HH:mm. Runs until the same time next day. */
   @IsOptional() @IsString() @Matches(/^([01]\d|2[0-3]):[0-5]\d$/) dayStart?: string;
+}
+
+class BillPreviewDto {
+  @IsOptional() @IsString() @Matches(/^[01]$/) showLogo?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) showName?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) showTagline?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) showAddress?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) showPhone?: string;
+  @IsOptional() @IsString() @MaxLength(40) title?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) showOrderBy?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) showServedBy?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) showCashier?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) showTip?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) showPaidStamp?: string;
+  @IsOptional() @IsString() @MaxLength(40) paidStampText?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) paidStampBig?: string;
+  @IsOptional() @IsString() @MaxLength(120) footer?: string;
+  /** Thermal roll width in mm: 58 | 72 | 80 | 112 */
+  @IsOptional() @Type(() => Number) @IsNumber() paperWidth?: number;
 }
 
 @Controller()
@@ -89,15 +118,64 @@ export class SystemController {
       billing: { perHead },
       print: {
         bill: {
+          showLogo: bill.showLogo,
+          showName: bill.showName,
+          showTagline: bill.showTagline,
+          showAddress: bill.showAddress,
+          showPhone: bill.showPhone,
+          title: bill.title,
           showOrderBy: bill.showOrderBy,
           showServedBy: bill.showServedBy,
           showCashier: bill.showCashier,
           showTip: bill.showTip,
+          showPaidStamp: bill.showPaidStamp,
+          paidStampText: bill.paidStampText,
+          paidStampBig: bill.paidStampBig,
           footer: bill.footer,
         },
         kot: { showOrderBy: kot.showOrderBy, footer: kot.footer },
       },
     };
+  }
+
+  @Post("bill-preview")
+  @HttpCodeSafe()
+  @RequirePerms("system.manage")
+  async billPreview(@Body() dto: BillPreviewDto) {
+    const saved = await this.tips.printBillOpts();
+    const restaurant = await this.settings.restaurant();
+    const on = (v: string | undefined, fallback: boolean) => (v == null ? fallback : v !== "0");
+    const paperWidth = [58, 72, 80, 112].includes(Number(dto.paperWidth))
+      ? Number(dto.paperWidth)
+      : 80;
+    const text = sampleBillPayload(
+      {
+        name: restaurant.name,
+        tagline: restaurant.tagline,
+        address: restaurant.address,
+        phone: restaurant.phone,
+      },
+      {
+        showLogo: on(dto.showLogo, saved.showLogo),
+        showName: on(dto.showName, saved.showName),
+        showTagline: on(dto.showTagline, saved.showTagline),
+        showAddress: on(dto.showAddress, saved.showAddress),
+        showPhone: on(dto.showPhone, saved.showPhone),
+        title: dto.title?.trim() || saved.title,
+        showOrderBy: on(dto.showOrderBy, saved.showOrderBy),
+        showServedBy: on(dto.showServedBy, saved.showServedBy),
+        showCashier: on(dto.showCashier, saved.showCashier),
+        showTip: on(dto.showTip, saved.showTip),
+        showPaidStamp: on(dto.showPaidStamp, saved.showPaidStamp),
+        paidStampText: dto.paidStampText?.trim() || saved.paidStampText,
+        paidStampBig: on(dto.paidStampBig, saved.paidStampBig),
+        footer: dto.footer?.trim() ?? saved.footer,
+        logoPath: this.settings.logoFilePath(),
+        paidStampPath: this.settings.paidStampFilePath(),
+      },
+      paperWidth
+    );
+    return { text, paperWidth, paidStampUrl: "/branding/paid-stamp.png" };
   }
 
   @Patch("settings")
@@ -111,10 +189,19 @@ export class SystemController {
       ["phone", "restaurant.phone"],
       ["accent", "restaurant.accent"],
       ["tipSplit", "tip.split"],
+      ["billShowLogo", "print.bill.showLogo"],
+      ["billShowName", "print.bill.showName"],
+      ["billShowTagline", "print.bill.showTagline"],
+      ["billShowAddress", "print.bill.showAddress"],
+      ["billShowPhone", "print.bill.showPhone"],
+      ["billTitle", "print.bill.title"],
       ["billShowOrderBy", "print.bill.showOrderBy"],
       ["billShowServedBy", "print.bill.showServedBy"],
       ["billShowCashier", "print.bill.showCashier"],
       ["billShowTip", "print.bill.showTip"],
+      ["billShowPaidStamp", "print.bill.showPaidStamp"],
+      ["billPaidStampText", "print.bill.paidStampText"],
+      ["billPaidStampBig", "print.bill.paidStampBig"],
       ["billFooter", "print.bill.footer"],
       ["kotShowOrderBy", "print.kot.showOrderBy"],
       ["kotFooter", "print.kot.footer"],

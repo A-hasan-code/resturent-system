@@ -1,8 +1,16 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { ExtraExpensePaidBy, Prisma } from "@prisma/client";
+import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "fs";
+import { extname, join } from "path";
 import { PrismaService } from "../prisma/prisma.service";
 import { toNumber } from "../common/units";
+import { dataDir } from "../config/env";
+import { SettingsService } from "../system/settings.service";
 import { CreatePurchaseDto, CreateSupplierDto, SupplierPaymentDto, UpdateSupplierDto } from "./dto";
+import { renderSupplierLedgerPdf } from "./supplier-pdf";
+
+const BILL_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
+const BILL_MAX = 5 * 1024 * 1024;
 
 const money2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -102,7 +110,14 @@ async function allocateUnappliedPayments(tx: Tx, supplierId: string) {
 
 @Injectable()
 export class PurchasesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly settings: SettingsService
+  ) {}
+
+  billsDir() {
+    return dataDir("purchase-bills");
+  }
 
   async listSuppliers() {
     const ids = (
@@ -232,6 +247,7 @@ export class PurchasesService {
           paidAmount,
           balance: money2(due - paidAmount),
           note: p.note,
+          hasBillImage: !!p.billImagePath,
           lines: p.lines.map((l) => ({
             id: l.id,
             item: l.storeItem.name,
@@ -400,6 +416,59 @@ export class PurchasesService {
     return this.ledger(id);
   }
 
+  async ledgerPdf(id: string) {
+    const ledger = await this.ledger(id);
+    const hotel = await this.settings.restaurant();
+    const pdf = await renderSupplierLedgerPdf(ledger, hotel);
+    const safe = ledger.name.replace(/[^\w\-]+/g, "_").replace(/_+/g, "_").slice(0, 40) || "supplier";
+    return { filename: `supplier-${safe}.pdf`, body: pdf };
+  }
+
+  async saveBillImage(id: string, file: { originalname: string; buffer: Buffer; mimetype: string; size: number }) {
+    const purchase = await this.prisma.purchase.findUnique({ where: { id }, select: { id: true, billImagePath: true } });
+    if (!purchase) throw new NotFoundException("Purchase not found");
+    if (!file?.buffer?.length) throw new BadRequestException("No image uploaded");
+    if (file.size > BILL_MAX) throw new BadRequestException("Bill image must be under 5 MB");
+    const ext = extname(file.originalname || "").toLowerCase() || mimeExt(file.mimetype);
+    if (!BILL_EXTS.has(ext)) throw new BadRequestException("Use PNG, JPG or WEBP");
+
+    const dir = this.billsDir();
+    mkdirSync(dir, { recursive: true });
+    this.removeBillFiles(purchase.id, purchase.billImagePath);
+    const name = `${purchase.id}${ext}`;
+    writeFileSync(join(dir, name), file.buffer);
+    await this.prisma.purchase.update({ where: { id }, data: { billImagePath: name } });
+    return { id, hasBillImage: true };
+  }
+
+  async billImage(id: string) {
+    const purchase = await this.prisma.purchase.findUnique({ where: { id }, select: { billImagePath: true } });
+    if (!purchase) throw new NotFoundException("Purchase not found");
+    if (!purchase.billImagePath) throw new NotFoundException("No bill image for this purchase");
+    const path = join(this.billsDir(), purchase.billImagePath);
+    if (!existsSync(path)) throw new NotFoundException("Bill image file missing");
+    const ext = extname(purchase.billImagePath).toLowerCase();
+    return {
+      path,
+      filename: purchase.billImagePath,
+      contentType: ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg",
+    };
+  }
+
+  private removeBillFiles(purchaseId: string, stored?: string | null) {
+    const dir = this.billsDir();
+    if (!existsSync(dir)) return;
+    for (const f of readdirSync(dir)) {
+      if (f === stored || f.startsWith(`${purchaseId}.`)) {
+        try {
+          unlinkSync(join(dir, f));
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
   async daily(date: string) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new BadRequestException("Date must be YYYY-MM-DD");
     const { start, end } = dayRange(date);
@@ -483,6 +552,7 @@ export class PurchasesService {
         paidAmount,
         outstanding: money2(due - paidAmount),
         lineCount: p.lines.length,
+        hasBillImage: !!p.billImagePath,
       };
     });
   }
@@ -505,6 +575,7 @@ export class PurchasesService {
       extraExpensePaidBy: p.extraExpensePaidBy,
       paidAmount,
       outstanding: money2(due - paidAmount),
+      hasBillImage: !!p.billImagePath,
       lines: p.lines.map((l) => ({
         item: l.storeItem.name,
         category: l.categoryName,
@@ -515,4 +586,11 @@ export class PurchasesService {
       })),
     };
   }
+}
+
+function mimeExt(mime: string) {
+  if (mime === "image/png") return ".png";
+  if (mime === "image/webp") return ".webp";
+  if (mime === "image/jpeg" || mime === "image/jpg") return ".jpg";
+  return "";
 }

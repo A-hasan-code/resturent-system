@@ -16,6 +16,8 @@ type PaymentRow = {
   orderNo: number;
   tableNo: string | null;
   orderTotal: number;
+  isCredit?: boolean;
+  creditCustomerName?: string | null;
   collectedBy: { id: string; name: string; roleCode: string };
   handedTo: { id: string; name: string; roleCode: string } | null;
   drawerName: string;
@@ -36,7 +38,15 @@ type Counter = {
   tipTotal: number;
   pendingHandoverCash: number;
   payments: PaymentRow[];
-  bills: { orderId: string; orderNo: number; tableNo: string | null; orderTotal: number; paidOnCounter: number }[];
+  bills: {
+    orderId: string;
+    orderNo: number;
+    tableNo: string | null;
+    orderTotal: number;
+    paidOnCounter: number;
+    isCredit?: boolean;
+    creditCustomerName?: string | null;
+  }[];
 };
 
 type Sheet = {
@@ -59,6 +69,8 @@ type Sheet = {
     paidAmount: number;
     balance: number;
     paymentStatus: string;
+    isCredit?: boolean;
+    creditCustomerName?: string | null;
     cashier: string | null;
   }[];
   paidBills: {
@@ -66,6 +78,8 @@ type Sheet = {
     tableNo: string | null;
     total: number;
     tipAmount: number;
+    isCredit?: boolean;
+    creditCustomerName?: string | null;
     cashier: string | null;
     createdAt: string;
   }[];
@@ -79,6 +93,10 @@ type Sheet = {
     paidSalesTotal: number;
     totalSale: number;
     cashPlusPending: number;
+    creditUnpaidAmount?: number;
+    creditUnpaidCount?: number;
+    creditPaidAmount?: number;
+    creditPaidCount?: number;
   };
 };
 
@@ -99,6 +117,24 @@ type HistoryRow = {
 
 const clock = (iso: string) =>
   new Date(iso).toLocaleTimeString("en-PK", { hour: "2-digit", minute: "2-digit" });
+
+function CreditMark({
+  isCredit,
+  name,
+  label,
+}: {
+  isCredit?: boolean;
+  name?: string | null;
+  label: string;
+}) {
+  if (!isCredit) return null;
+  return (
+    <span className="badge credit" title={name || label}>
+      {label}
+      {name ? ` · ${name}` : ""}
+    </span>
+  );
+}
 
 function CloseBars({
   c1,
@@ -251,6 +287,10 @@ export function CloseReportPage() {
       paidBillsCount: sheet?.totals.paidBillsCount ?? 0,
       totalSale: sheet?.totals.totalSale ?? 0,
       cashPlusPending: Math.round((expectedCash + (sheet?.totals.pendingAmount ?? 0)) * 100) / 100,
+      creditUnpaidAmount: sheet?.totals.creditUnpaidAmount ?? 0,
+      creditUnpaidCount: sheet?.totals.creditUnpaidCount ?? 0,
+      creditPaidAmount: sheet?.totals.creditPaidAmount ?? 0,
+      creditPaidCount: sheet?.totals.creditPaidCount ?? 0,
     };
   }, [liveCounters, sheet]);
 
@@ -309,17 +349,30 @@ export function CloseReportPage() {
 
   return (
     <div>
-      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: "0.75rem" }}>
+      <div className="page-head">
         <div>
-          <h1 style={{ margin: 0 }}>{t("close.title")}</h1>
-          <p className="muted" style={{ margin: "0.35rem 0 0" }}>
-            {t("close.hint")}
-          </p>
+          <h1>{t("close.title")}</h1>
+          <p className="page-head-meta">{t("close.hint")}</p>
+          {sheet && (
+            <p className="page-head-meta tiny">
+              <span>{t("close.dayWindow", { start: sheet.dayStart })}</span>
+              <span>{isToday ? t("close.todayBadge") : t("close.viewOnlyBadge")}</span>
+              <span>
+                {sheet.saved
+                  ? t("close.savedBy", {
+                      name: sheet.closedByName || "—",
+                      when: sheet.closedAt ? clock(sheet.closedAt) : "",
+                    })
+                  : t("close.notSaved")}
+              </span>
+            </p>
+          )}
         </div>
-        <div className="row" style={{ gap: "0.45rem", alignItems: "end" }}>
+        <div className="row page-head-actions">
           <div className="field" style={{ margin: 0 }}>
-            <label>{t("close.date")}</label>
+            <label htmlFor="close-date">{t("close.date")}</label>
             <DateField
+              id="close-date"
               value={date}
               max={sheet?.today}
               onChange={(v) => {
@@ -328,37 +381,15 @@ export function CloseReportPage() {
               }}
             />
           </div>
-          <button type="button" className="btn ghost sm" onClick={() => void load(sheet?.today)}>
+          <button type="button" className="btn ghost sm page-head-btn" onClick={() => void load(sheet?.today)}>
             {t("close.today")}
           </button>
         </div>
       </div>
 
-      {sheet && (
-        <p className="tiny muted" style={{ marginTop: "0.55rem" }}>
-          {t("close.dayWindow", { start: sheet.dayStart })}
-          {isToday ? ` · ${t("close.todayBadge")}` : ` · ${t("close.viewOnlyBadge")}`}
-          {sheet.saved
-            ? ` · ${t("close.savedBy", { name: sheet.closedByName || "—", when: sheet.closedAt ? clock(sheet.closedAt) : "" })}`
-            : ` · ${t("close.notSaved")}`}
-        </p>
-      )}
-
       {!isToday && sheet && (
-        <div
-          className="panel panel-pad"
-          style={{
-            marginTop: "0.75rem",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 12,
-            background: "color-mix(in srgb, var(--warn, #b08900) 8%, transparent)",
-          }}
-        >
-          <p className="muted" style={{ margin: 0 }}>
-            {t("close.pastReadOnly")}
-          </p>
+        <div className="panel panel-pad alert-stale banner-row">
+          <p style={{ margin: 0 }}>{t("close.pastReadOnly")}</p>
           <button type="button" className="btn ok sm" onClick={() => void load(sheet.today)}>
             {t("close.today")}
           </button>
@@ -366,26 +397,15 @@ export function CloseReportPage() {
       )}
 
       {isToday && canStartEdit && !editing && (
-        <div
-          className="panel panel-pad"
-          style={{
-            marginTop: "0.75rem",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 12,
-          }}
-        >
-          <p className="muted" style={{ margin: 0 }}>
-            {sheet?.saved ? t("close.todaySavedHint") : t("close.todayEnterHint")}
-          </p>
+        <div className="handover-confirm banner-row">
+          <p style={{ margin: 0 }}>{sheet?.saved ? t("close.todaySavedHint") : t("close.todayEnterHint")}</p>
           <button type="button" className="btn" onClick={startEdit}>
             {sheet?.saved ? t("close.editToday") : t("close.enterToday")}
           </button>
         </div>
       )}
 
-      <div className="stats" style={{ marginTop: "0.75rem" }}>
+      <div className="stats">
         <div className="panel stat">
           <span>{t("close.totalSale")}</span>
           <strong>{money(liveTotals.totalSale)}</strong>
@@ -409,9 +429,19 @@ export function CloseReportPage() {
           <strong>{money(liveTotals.pendingAmount)}</strong>
           <span className="tiny">{t("close.pendingN", { n: liveTotals.pendingCount })}</span>
         </div>
+        <div className={`panel stat ${liveTotals.creditUnpaidAmount > 0 ? "alert-low" : ""}`}>
+          <span>{t("close.creditUnpaid")}</span>
+          <strong>{money(liveTotals.creditUnpaidAmount)}</strong>
+          <span className="tiny">{t("close.creditUnpaidN", { n: liveTotals.creditUnpaidCount })}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("close.creditPaid")}</span>
+          <strong>{money(liveTotals.creditPaidAmount)}</strong>
+          <span className="tiny">{t("close.creditPaidN", { n: liveTotals.creditPaidCount })}</span>
+        </div>
       </div>
 
-      <div className="panel panel-pad" style={{ marginTop: "0.75rem" }}>
+      <div className="panel panel-pad" style={{ marginTop: "0.85rem" }}>
         <h3 style={{ marginTop: 0 }}>{t("close.chartTitle")}</h3>
         <CloseBars
           c1={c1?.expectedCash ?? 0}
@@ -422,7 +452,7 @@ export function CloseReportPage() {
       </div>
 
       <form onSubmit={save}>
-        <div className="grid-2" style={{ marginTop: "0.75rem", gap: "0.75rem" }}>
+        <div className="grid-2" style={{ marginTop: "0.85rem" }}>
           {liveCounters.map((c) => (
             <div key={c.kind} className="panel panel-pad">
               <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
@@ -475,7 +505,7 @@ export function CloseReportPage() {
               )}
 
               {c.pendingHandoverCash > 0 && (
-                <p className="tiny" style={{ color: "var(--warn, #b08900)" }}>
+                <p className="tiny muted" style={{ color: "var(--warn)" }}>
                   {t("close.pendingHandover", { amount: money(c.pendingHandoverCash) })}
                 </p>
               )}
@@ -484,128 +514,152 @@ export function CloseReportPage() {
               {!c.bills.length ? (
                 <div className="empty">{t("close.noPaid")}</div>
               ) : (
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{t("payments.bill")}</th>
-                      <th>{t("common.table")}</th>
-                      <th>{t("close.billTotal")}</th>
-                      <th>{t("close.paidHere")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {c.bills.map((b) => (
-                      <tr key={b.orderId}>
-                        <td>#{b.orderNo}</td>
-                        <td>{b.tableNo || "—"}</td>
-                        <td>{money(b.orderTotal)}</td>
-                        <td>
-                          <strong>{money(b.paidOnCounter)}</strong>
-                        </td>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("payments.bill")}</th>
+                        <th>{t("common.table")}</th>
+                        <th>{t("close.billTotal")}</th>
+                        <th>{t("close.paidHere")}</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {c.bills.map((b) => (
+                        <tr key={b.orderId}>
+                          <td>
+                            <div className="row" style={{ gap: "0.35rem", flexWrap: "wrap" }}>
+                              <span>#{b.orderNo}</span>
+                              <CreditMark
+                                isCredit={b.isCredit}
+                                name={b.creditCustomerName}
+                                label={t("close.credit")}
+                              />
+                            </div>
+                          </td>
+                          <td>{b.tableNo || "—"}</td>
+                          <td>{money(b.orderTotal)}</td>
+                          <td>
+                            <strong>{money(b.paidOnCounter)}</strong>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
 
               <h4 style={{ margin: "0.85rem 0 0.4rem" }}>{t("close.paymentRows")}</h4>
               {!c.payments.length ? (
                 <div className="empty">{t("close.noPayments")}</div>
               ) : (
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{t("common.time")}</th>
-                      <th>{t("payments.bill")}</th>
-                      <th>{t("common.amount")}</th>
-                      <th>{t("close.drawer")}</th>
-                      <th>{t("close.handover")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {c.payments.map((p) => (
-                      <tr key={p.id}>
-                        <td>{clock(p.createdAt)}</td>
-                        <td>#{p.orderNo}</td>
-                        <td>
-                          <strong>{money(p.amount)}</strong>
-                        </td>
-                        <td className="tiny">{p.drawerName}</td>
-                        <td className="tiny muted">
-                          {p.handedTo
-                            ? p.confirmedAt
-                              ? t("close.handoverOk")
-                              : t("close.handoverPending")
-                            : t("close.direct")}
-                        </td>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("common.time")}</th>
+                        <th>{t("payments.bill")}</th>
+                        <th>{t("common.amount")}</th>
+                        <th>{t("close.drawer")}</th>
+                        <th>{t("close.handover")}</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {c.payments.map((p) => (
+                        <tr key={p.id}>
+                          <td>{clock(p.createdAt)}</td>
+                          <td>
+                            <div className="row" style={{ gap: "0.35rem", flexWrap: "wrap" }}>
+                              <span>#{p.orderNo}</span>
+                              <CreditMark
+                                isCredit={p.isCredit}
+                                name={p.creditCustomerName}
+                                label={t("close.credit")}
+                              />
+                            </div>
+                          </td>
+                          <td>
+                            <strong>{money(p.amount)}</strong>
+                          </td>
+                          <td className="tiny">{p.drawerName}</td>
+                          <td className="tiny muted">
+                            {p.handedTo
+                              ? p.confirmedAt
+                                ? t("close.handoverOk")
+                                : t("close.handoverPending")
+                              : t("close.direct")}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           ))}
         </div>
 
-        <div className="panel panel-pad" style={{ marginTop: "0.75rem" }}>
+        <div className="panel panel-pad" style={{ marginTop: "0.85rem" }}>
           <h3 style={{ marginTop: 0 }}>{t("close.combinedTitle")}</h3>
-          <table>
-            <tbody>
-              <tr>
-                <td>{t("close.counter1")}</td>
-                <td>
-                  <strong>{money(c1?.expectedCash ?? 0)}</strong>
-                  <span className="tiny muted"> → {money(c1?.collectedCash ?? 0)}</span>
-                </td>
-              </tr>
-              <tr>
-                <td>{t("close.counter2")}</td>
-                <td>
-                  <strong>{money(c2?.expectedCash ?? 0)}</strong>
-                  <span className="tiny muted"> → {money(c2?.collectedCash ?? 0)}</span>
-                </td>
-              </tr>
-              <tr>
-                <td>{t("close.bothCash")}</td>
-                <td>
-                  <strong>{money(liveTotals.expectedCash)}</strong>
-                </td>
-              </tr>
-              <tr>
-                <td>{t("close.collectedCash")}</td>
-                <td>
-                  <strong>{money(liveTotals.collectedCash)}</strong>
-                </td>
-              </tr>
-              <tr>
-                <td>{t("close.missCash")}</td>
-                <td>
-                  <strong style={{ color: liveTotals.missCash ? "#b42318" : undefined }}>
-                    {money(liveTotals.missCash)}
-                  </strong>
-                </td>
-              </tr>
-              <tr>
-                <td>{t("close.pendingBills")}</td>
-                <td>
-                  <strong>{money(liveTotals.pendingAmount)}</strong>
-                  <span className="tiny muted"> ({liveTotals.pendingCount})</span>
-                </td>
-              </tr>
-              <tr>
-                <td>{t("close.totalSale")}</td>
-                <td>
-                  <strong>{money(liveTotals.totalSale)}</strong>
-                </td>
-              </tr>
-              <tr>
-                <td>{t("close.cashPlusPending")}</td>
-                <td>
-                  <strong>{money(liveTotals.cashPlusPending)}</strong>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <div className="table-wrap">
+            <table>
+              <tbody>
+                <tr>
+                  <td>{t("close.counter1")}</td>
+                  <td>
+                    <strong>{money(c1?.expectedCash ?? 0)}</strong>
+                    <span className="tiny muted"> → {money(c1?.collectedCash ?? 0)}</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td>{t("close.counter2")}</td>
+                  <td>
+                    <strong>{money(c2?.expectedCash ?? 0)}</strong>
+                    <span className="tiny muted"> → {money(c2?.collectedCash ?? 0)}</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td>{t("close.bothCash")}</td>
+                  <td>
+                    <strong>{money(liveTotals.expectedCash)}</strong>
+                  </td>
+                </tr>
+                <tr>
+                  <td>{t("close.collectedCash")}</td>
+                  <td>
+                    <strong>{money(liveTotals.collectedCash)}</strong>
+                  </td>
+                </tr>
+                <tr>
+                  <td>{t("close.missCash")}</td>
+                  <td>
+                    <strong style={{ color: liveTotals.missCash ? "var(--danger)" : undefined }}>
+                      {money(liveTotals.missCash)}
+                    </strong>
+                  </td>
+                </tr>
+                <tr>
+                  <td>{t("close.pendingBills")}</td>
+                  <td>
+                    <strong>{money(liveTotals.pendingAmount)}</strong>
+                    <span className="tiny muted"> ({liveTotals.pendingCount})</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td>{t("close.totalSale")}</td>
+                  <td>
+                    <strong>{money(liveTotals.totalSale)}</strong>
+                  </td>
+                </tr>
+                <tr>
+                  <td>{t("close.cashPlusPending")}</td>
+                  <td>
+                    <strong>{money(liveTotals.cashPlusPending)}</strong>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
 
           {editable && (
             <>
@@ -631,32 +685,34 @@ export function CloseReportPage() {
         </div>
       </form>
 
-      <div className="grid-2" style={{ marginTop: "0.75rem", gap: "0.75rem" }}>
+      <div className="grid-2" style={{ marginTop: "0.85rem" }}>
         <div className="panel panel-pad">
           <h3 style={{ marginTop: 0 }}>{t("close.itemsSold")}</h3>
           {!sheet?.soldItems.length ? (
             <div className="empty">{t("close.noItems")}</div>
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("common.item")}</th>
-                  <th>{t("common.qty")}</th>
-                  <th>{t("store.amount")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sheet.soldItems.map((i) => (
-                  <tr key={i.name}>
-                    <td>{i.name}</td>
-                    <td>{i.qty}</td>
-                    <td>
-                      <strong>{money(i.amount)}</strong>
-                    </td>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("common.item")}</th>
+                    <th>{t("common.qty")}</th>
+                    <th>{t("store.amount")}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {sheet.soldItems.map((i) => (
+                    <tr key={i.name}>
+                      <td>{i.name}</td>
+                      <td>{i.qty}</td>
+                      <td>
+                        <strong>{money(i.amount)}</strong>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
 
@@ -665,118 +721,144 @@ export function CloseReportPage() {
           {!sheet?.pendingBills.length ? (
             <div className="empty">{t("close.noPending")}</div>
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("payments.bill")}</th>
-                  <th>{t("common.table")}</th>
-                  <th>{t("close.balance")}</th>
-                  <th>{t("common.status")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sheet.pendingBills.map((b) => (
-                  <tr key={b.orderNo}>
-                    <td>#{b.orderNo}</td>
-                    <td>{b.tableNo || "—"}</td>
-                    <td>
-                      <strong>{money(b.balance)}</strong>
-                    </td>
-                    <td className="tiny">{b.paymentStatus}</td>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("payments.bill")}</th>
+                    <th>{t("common.table")}</th>
+                    <th>{t("close.balance")}</th>
+                    <th>{t("common.status")}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {sheet.pendingBills.map((b) => (
+                    <tr key={b.orderNo}>
+                      <td>
+                        <div className="row" style={{ gap: "0.35rem", flexWrap: "wrap" }}>
+                          <span>#{b.orderNo}</span>
+                          <CreditMark
+                            isCredit={b.isCredit}
+                            name={b.creditCustomerName}
+                            label={t("close.credit")}
+                          />
+                        </div>
+                      </td>
+                      <td>{b.tableNo || "—"}</td>
+                      <td>
+                        <strong>{money(b.balance)}</strong>
+                      </td>
+                      <td className="tiny">
+                        {b.isCredit ? t("close.credit") : b.paymentStatus}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </div>
 
-      <div className="panel panel-pad" style={{ marginTop: "0.75rem" }}>
+      <div className="panel panel-pad" style={{ marginTop: "0.85rem" }}>
         <h3 style={{ marginTop: 0 }}>{t("close.allPaidBills")}</h3>
         {!sheet?.paidBills.length ? (
           <div className="empty">{t("close.noPaid")}</div>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>{t("common.time")}</th>
-                <th>{t("payments.bill")}</th>
-                <th>{t("common.table")}</th>
-                <th>{t("audit.sales")}</th>
-                <th>{t("close.tips")}</th>
-                <th>{t("close.cashier")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sheet.paidBills.map((b) => (
-                <tr key={b.orderNo}>
-                  <td>{clock(b.createdAt)}</td>
-                  <td>#{b.orderNo}</td>
-                  <td>{b.tableNo || "—"}</td>
-                  <td>
-                    <strong>{money(b.total)}</strong>
-                  </td>
-                  <td>{money(b.tipAmount)}</td>
-                  <td className="tiny muted">{b.cashier || "—"}</td>
+          <div className="table-wrap wide">
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("common.time")}</th>
+                  <th>{t("payments.bill")}</th>
+                  <th>{t("common.table")}</th>
+                  <th>{t("audit.sales")}</th>
+                  <th>{t("close.tips")}</th>
+                  <th>{t("close.cashier")}</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {sheet.paidBills.map((b) => (
+                  <tr key={b.orderNo}>
+                    <td>{clock(b.createdAt)}</td>
+                    <td>
+                      <div className="row" style={{ gap: "0.35rem", flexWrap: "wrap" }}>
+                        <span>#{b.orderNo}</span>
+                        <CreditMark
+                          isCredit={b.isCredit}
+                          name={b.creditCustomerName}
+                          label={t("close.credit")}
+                        />
+                      </div>
+                    </td>
+                    <td>{b.tableNo || "—"}</td>
+                    <td>
+                      <strong>{money(b.total)}</strong>
+                    </td>
+                    <td>{money(b.tipAmount)}</td>
+                    <td className="tiny muted">{b.cashier || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 
-      <div className="panel panel-pad" style={{ marginTop: "0.75rem" }}>
+      <div className="panel panel-pad" style={{ marginTop: "0.85rem" }}>
         <h3 style={{ marginTop: 0 }}>{t("close.history")}</h3>
         {!history.length ? (
           <div className="empty">{t("close.noHistory")}</div>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>{t("close.date")}</th>
-                <th>{t("close.totalSale")}</th>
-                <th>{t("close.collectedCash")}</th>
-                <th>{t("close.missCash")}</th>
-                <th>{t("close.pendingBills")}</th>
-                <th>{t("close.closedBy")}</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {history.map((h) => {
-                const todayRow = h.businessDate === sheet?.today;
-                return (
-                  <tr key={h.id}>
-                    <td>
-                      <strong>{h.businessDate}</strong>
-                      {todayRow && (
-                        <div className="tiny" style={{ color: "var(--ok)" }}>
-                          {t("close.todayBadge")}
-                        </div>
-                      )}
-                    </td>
-                    <td>{money(h.totalSale)}</td>
-                    <td>{money(h.collectedCash)}</td>
-                    <td>{money(h.missCash)}</td>
-                    <td>{money(h.pendingAmount)}</td>
-                    <td className="tiny muted">{h.closedByName || "—"}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className={`btn sm ${todayRow ? "ok" : "ghost"}`}
-                        onClick={() => {
-                          setDate(h.businessDate);
-                          void load(h.businessDate);
-                        }}
-                      >
-                        {todayRow ? t("close.today") : t("close.open")}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div className="table-wrap wide">
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("close.date")}</th>
+                  <th>{t("close.totalSale")}</th>
+                  <th>{t("close.collectedCash")}</th>
+                  <th>{t("close.missCash")}</th>
+                  <th>{t("close.pendingBills")}</th>
+                  <th>{t("close.closedBy")}</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((h) => {
+                  const todayRow = h.businessDate === sheet?.today;
+                  return (
+                    <tr key={h.id}>
+                      <td>
+                        <strong>{h.businessDate}</strong>
+                        {todayRow && (
+                          <div className="tiny" style={{ color: "var(--ok)" }}>
+                            {t("close.todayBadge")}
+                          </div>
+                        )}
+                      </td>
+                      <td>{money(h.totalSale)}</td>
+                      <td>{money(h.collectedCash)}</td>
+                      <td>{money(h.missCash)}</td>
+                      <td>{money(h.pendingAmount)}</td>
+                      <td className="tiny muted">{h.closedByName || "—"}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className={`btn sm ${todayRow ? "ok" : "ghost"}`}
+                          onClick={() => {
+                            setDate(h.businessDate);
+                            void load(h.businessDate);
+                          }}
+                        >
+                          {todayRow ? t("close.today") : t("close.open")}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

@@ -35,8 +35,8 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
       info: {
         Title: `Sales report ${report.from} to ${report.to}`,
         Author: hotel.name,
-        Subject: "Hotel System sales and audit report",
-        Creator: "Hotel System",
+        Subject: "PixalBotics Restaurant sales and audit report",
+        Creator: "PixalBotics Restaurant",
       },
     });
     const chunks: Buffer[] = [];
@@ -50,16 +50,21 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
 
     cover(doc, hotel, report, contentW);
     kpiRow(doc, contentW, [
-      { label: "Food sales", value: money(s.salesTotal), note: `${s.billsPaid} paid bills` },
-      { label: "Tips", value: money(s.tipsTotal), note: "Guest tips (separate)" },
-      { label: "Payments in", value: money(s.paymentsIn), note: `${s.paymentCount} receipts` },
-      { label: "Orders", value: String(s.orders), note: `${s.cancelled} cancelled` },
+      { label: "Range sales", value: money(s.salesTotal), note: `${s.billsPaid} paid bills` },
+      { label: "Today", value: money(s.salesToday), note: "Current business day" },
+      { label: "This month", value: money(s.salesMonth), note: "Month to date" },
+      { label: "This year", value: money(s.salesYear), note: "Year to date" },
     ]);
     kpiRow(doc, contentW, [
+      { label: "Tips", value: money(s.tipsTotal), note: "Guest tips (separate)" },
+      { label: "Payments in", value: money(s.paymentsIn), note: `${s.paymentCount} receipts` },
       { label: "Purchases out", value: money(s.purchasesOut), note: `${s.purchaseCount} stock-ins` },
       { label: "Cash left", value: money(cashLeft), note: "Payments − purchases" },
-      { label: "Food cost", value: money(s.foodCost), note: "Recipe cost on paid bills" },
+    ]);
+    kpiRow(doc, contentW, [
+      { label: "Orders", value: String(s.orders), note: `${s.cancelled} cancelled` },
       { label: "Unpaid amount", value: money(s.unpaidAmount), note: `${s.unpaidCount} open bills` },
+      { label: "Food cost", value: money(s.foodCost), note: "Recipe cost on paid bills" },
     ]);
 
     sectionTitle(doc, "1. Cash flow by day", "Payments received versus stock purchases");
@@ -91,22 +96,22 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
     );
 
     ensureSpace(doc, 120);
-    sectionTitle(doc, "4. Daily summary", "Orders and money movement for each day");
+    sectionTitle(doc, "4. Daily sales", "Food sales for each day in the selected range");
     table(
       doc,
       contentW,
-      ["Date", "Sales", "Stock used", "Profit", "Payments", "Purchases"],
+      ["Date", "Sales", "Tips", "Bills", "Payments", "Purchases"],
       report.days
-        .filter((d) => d.orders || d.paymentsIn || d.purchasesOut || d.sales || d.stockUsed)
+        .filter((d) => d.orders || d.paymentsIn || d.purchasesOut || d.sales)
         .map((d) => [
           dayLabel(d.date),
           money(d.sales),
-          money(d.stockUsed),
-          money(d.profit),
+          money(d.tips),
+          String(d.billsPaid),
           money(d.paymentsIn),
           money(d.purchasesOut),
         ]),
-      [0.16, 0.16, 0.17, 0.17, 0.17, 0.17]
+      [0.16, 0.16, 0.14, 0.12, 0.21, 0.21]
     );
 
     ensureSpace(doc, 120);

@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
-import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "fs";
 import { extname, join } from "path";
 import { PrismaService } from "../prisma/prisma.service";
 import { dataDir } from "../config/env";
@@ -45,11 +45,31 @@ export class SettingsService {
     return dataDir("branding");
   }
 
+  /** Absolute path to the uploaded logo file, if present. */
+  logoFilePath(): string | null {
+    const dir = this.brandingDir();
+    if (!existsSync(dir)) return null;
+    const file = readdirSync(dir).find((f) => f.startsWith("logo."));
+    return file ? join(dir, file) : null;
+  }
+
+  /** Ensure bundled PAID stamp is available under /branding and return its path. */
+  paidStampFilePath(): string | null {
+    const dir = this.brandingDir();
+    mkdirSync(dir, { recursive: true });
+    const dest = join(dir, "paid-stamp.png");
+    if (!existsSync(dest)) {
+      const bundled = bundledPaidStampPath();
+      if (bundled) copyFileSync(bundled, dest);
+    }
+    return existsSync(dest) ? dest : bundledPaidStampPath();
+  }
+
   async restaurant() {
     const s = await this.getMany("restaurant.");
     const logo = s["restaurant.logo"] || "";
     return {
-      name: s["restaurant.name"] || "Hotel System",
+      name: s["restaurant.name"] || "PixalBotics Restaurant",
       tagline: s["restaurant.tagline"] || "",
       address: s["restaurant.address"] || "",
       phone: s["restaurant.phone"] || "",
@@ -110,5 +130,24 @@ function mimeExt(mime: string) {
   return "";
 }
 
+function bundledPaidStampPath(): string | null {
+  const candidates = [
+    join(__dirname, "..", "..", "assets", "paid-stamp.png"), // dist/system → apps/api/assets
+    join(__dirname, "..", "assets", "paid-stamp.png"),
+    join(process.cwd(), "assets", "paid-stamp.png"),
+    join(process.cwd(), "apps", "api", "assets", "paid-stamp.png"),
+  ];
+  return candidates.find((p) => existsSync(p)) ?? null;
+}
+
 // Ensure folder exists when the module loads (installers / first run).
 mkdirSync(dataDir("branding"), { recursive: true });
+try {
+  const dest = join(dataDir("branding"), "paid-stamp.png");
+  if (!existsSync(dest)) {
+    const bundled = bundledPaidStampPath();
+    if (bundled) copyFileSync(bundled, dest);
+  }
+} catch {
+  /* ignore first-run copy errors */
+}

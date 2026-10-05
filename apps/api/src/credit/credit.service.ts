@@ -139,11 +139,17 @@ export class CreditService {
     }
   }
 
-  /** One cash settlement for every open invoice. Food sale stays on each meal's business day. */
-  async settle(user: AuthUser, id: string) {
+  /**
+   * Cash against the credit account. Amount is applied oldest open invoice first.
+   * Partial amounts leave PARTIAL invoices; remaining balance is returned on the slip.
+   */
+  async settle(user: AuthUser, id: string, amount: number) {
     if (!user.permissions.includes("cash.keep")) {
       throw new BadRequestException("Only a cashier with a drawer can clear a credit account");
     }
+    const payIn = Math.round(Number(amount) * 100) / 100;
+    if (!(payIn > 0)) throw new BadRequestException("Enter an amount to pay");
+
     const customer = await this.ensure(id);
     const orders = await this.prisma.order.findMany({
       where: { creditCustomerId: id, ...openCredit },
@@ -151,6 +157,13 @@ export class CreditService {
       orderBy: { createdAt: "asc" },
     });
     if (!orders.length) throw new BadRequestException("Nothing left to pay");
+
+    const outstanding = orders.reduce(
+      (sum, o) => sum + Math.max(0, toNumber(o.total) - toNumber(o.paidAmount)),
+      0
+    );
+    if (outstanding <= 0) throw new BadRequestException("Nothing left to pay");
+    let left = Math.min(payIn, outstanding);
 
     const day = await this.settings.dayStart();
     const restaurant = await this.settings.restaurant();
@@ -164,20 +177,43 @@ export class CreditService {
           orderNo: number;
           tableNo: string | null;
           total: number;
+          paid: number;
+          dueAfter: number;
           items: { name: string; quantity: number; unit: string; amount: number }[];
         }[];
       }
     >();
     let total = 0;
+    const touched: {
+      id: string;
+      orderNo: number;
+      tableNo: string | null;
+      status: string;
+      paymentStatus: string;
+      waiterId: string | null;
+    }[] = [];
 
     await this.prisma.$transaction(async (tx) => {
       for (const order of orders) {
-        const due = Math.max(0, toNumber(order.total) - toNumber(order.paidAmount));
+        if (left <= 0) break;
+        const billTotal = toNumber(order.total);
+        const already = toNumber(order.paidAmount);
+        const due = Math.max(0, billTotal - already);
         if (due <= 0) continue;
+
+        const pay = Math.min(due, left);
+        const paidAmount = Math.round((already + pay) * 100) / 100;
+        const paymentStatus = paidAmount >= billTotal - 0.001 ? "PAID" : "PARTIAL";
+        const status =
+          paymentStatus === "PAID" &&
+          (order.status === "READY" || order.status === "PENDING" || order.status === "PREPARING")
+            ? "COMPLETED"
+            : order.status;
+
         await tx.payment.create({
           data: {
             orderId: order.id,
-            amount: due,
+            amount: pay,
             tipAmount: 0,
             collectedById: user.id,
           },
@@ -185,21 +221,25 @@ export class CreditService {
         await tx.order.update({
           where: { id: order.id },
           data: {
-            paidAmount: toNumber(order.total),
-            paymentStatus: "PAID",
+            paidAmount,
+            paymentStatus,
             cashierId: order.cashierId ?? user.id,
-            status: order.status === "READY" || order.status === "PENDING" || order.status === "PREPARING" ? "COMPLETED" : order.status,
+            status,
           },
         });
-        const amount = toNumber(order.total);
-        total += amount;
+
+        left = Math.round((left - pay) * 100) / 100;
+        total = Math.round((total + pay) * 100) / 100;
+        const dueAfter = Math.max(0, Math.round((billTotal - paidAmount) * 100) / 100);
         const date = businessDateOf(order.createdAt, day.h, day.m);
         const bucket = days.get(date) ?? { date, total: 0, invoices: [] };
-        bucket.total += amount;
+        bucket.total = Math.round((bucket.total + pay) * 100) / 100;
         bucket.invoices.push({
           orderNo: order.orderNo,
           tableNo: order.tableNo,
-          total: amount,
+          total: billTotal,
+          paid: pay,
+          dueAfter,
           items: order.items.map((item) => ({
             name: item.name,
             quantity: toNumber(item.quantity),
@@ -208,20 +248,29 @@ export class CreditService {
           })),
         });
         days.set(date, bucket);
+        touched.push({
+          id: order.id,
+          orderNo: order.orderNo,
+          tableNo: order.tableNo,
+          status,
+          paymentStatus,
+          waiterId: order.waiterId,
+        });
       }
     });
 
     const dayList = [...days.values()];
-    if (!dayList.length) throw new BadRequestException("Nothing left to pay");
+    if (!dayList.length || total <= 0) throw new BadRequestException("Nothing left to pay");
+    const remaining = Math.round((outstanding - total) * 100) / 100;
     this.realtime.paymentsChanged();
-    for (const order of orders) {
+    for (const order of touched) {
       this.realtime.orderChanged(
         {
           id: order.id,
           orderNo: order.orderNo,
           tableNo: order.tableNo,
-          status: "COMPLETED",
-          paymentStatus: "PAID",
+          status: order.status,
+          paymentStatus: order.paymentStatus,
           waiterId: order.waiterId,
         },
         "paid"
@@ -245,6 +294,9 @@ export class CreditService {
       paidAt: paidAt.toISOString(),
       days: dayList,
       total,
+      outstandingBefore: outstanding,
+      remaining,
+      cleared: remaining <= 0,
     };
   }
 

@@ -16,9 +16,23 @@ function ascii(s: string) {
   return out.replace(/[^\x20-\x7E\n]/g, "?");
 }
 
-/** 80mm paper ≈ 48 columns (Font A), 58mm ≈ 32. */
+/**
+ * Thermal paper column counts (Font A):
+ * 58mm ≈ 32, 72mm ≈ 42, 80mm ≈ 48, 112mm ≈ 64.
+ */
 export function columnsFor(paperWidth: number) {
-  return paperWidth <= 58 ? 32 : 48;
+  if (paperWidth <= 58) return 32;
+  if (paperWidth <= 72) return 42;
+  if (paperWidth <= 80) return 48;
+  return 64;
+}
+
+/** Dot width used when centering logos / stamps on the roll. */
+export function paperDotsFor(paperWidth: number) {
+  if (paperWidth <= 58) return 384;
+  if (paperWidth <= 72) return 448;
+  if (paperWidth <= 80) return 512;
+  return 640;
 }
 
 /**
@@ -46,6 +60,11 @@ export class EscPos {
 
   bold(on = true) {
     return this.raw(ESC, 0x45, on ? 1 : 0);
+  }
+
+  /** White-on-black (GS B) — used for the table badge like the sample slip. */
+  inverse(on = true) {
+    return this.raw(GS, 0x42, on ? 1 : 0);
   }
 
   /** Double width/height text; halves usable columns while wide. */
@@ -89,6 +108,38 @@ export class EscPos {
     return this;
   }
 
+  /** Fixed columns on one line (right-align numeric cols). Widths should sum to cols (or cols - gaps). */
+  columns(parts: string[], widths: number[]) {
+    const w = this.width();
+    const gaps = Math.max(0, parts.length - 1);
+    const usable = widths.reduce((a, b) => a + b, 0);
+    // If widths + gaps fit, join with single spaces; else pack tight.
+    const useGap = usable + gaps <= w;
+    let line = "";
+    parts.forEach((p, i) => {
+      const width = widths[i] ?? 8;
+      const s = ascii(p).slice(0, width);
+      const cell = i > 0 ? s.padStart(width) : s.padEnd(width);
+      line += (i === 0 || !useGap ? "" : " ") + cell;
+    });
+    if (line.length < w) line = line.padEnd(w);
+    return this.line(line.slice(0, w));
+  }
+
+  /** A simple bordered one-line box (Cash Received style). */
+  boxLine(label: string, value: string) {
+    const w = this.width();
+    const inner = w - 2;
+    const text = `${label} ${value}`.slice(0, inner);
+    const pad = Math.max(0, inner - text.length);
+    const left = Math.floor(pad / 2);
+    const right = pad - left;
+    this.line(`+${"-".repeat(inner)}+`);
+    this.line(`|${" ".repeat(left)}${text}${" ".repeat(right)}|`);
+    this.line(`+${"-".repeat(inner)}+`);
+    return this;
+  }
+
   wrapped(s: string, indent = 0) {
     for (const p of wrap(s, this.width() - indent)) this.line(" ".repeat(indent) + p);
     return this;
@@ -105,6 +156,18 @@ export class EscPos {
 
   beep() {
     return this.raw(ESC, 0x42, 0x02, 0x02);
+  }
+
+  /** GS v 0 raster bitmap (monochrome). Also mirrors a label in plain text. */
+  raster(img: { widthBytes: number; height: number; data: Buffer }, label = "[LOGO]") {
+    const xL = img.widthBytes & 0xff;
+    const xH = (img.widthBytes >> 8) & 0xff;
+    const yL = img.height & 0xff;
+    const yH = (img.height >> 8) & 0xff;
+    this.raw(GS, 0x76, 0x30, 0x00, xL, xH, yL, yH);
+    this.chunks.push(Buffer.from(img.data));
+    this.textLines.push(label);
+    return this;
   }
 
   buffer() {

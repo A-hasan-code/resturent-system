@@ -296,6 +296,7 @@ export class OrdersService {
         subtotal: sum,
         total: sum,
         costTotal: costSum,
+        discountAmount: Math.min(toNumber(order.discountAmount), Math.max(0, sum - toNumber(order.paidAmount))),
         billRequestedAt: null,
         status: order.status === "READY" || order.status === "COMPLETED" ? "PENDING" : order.status,
         paymentStatus: toNumber(order.paidAmount) > 0 ? "PARTIAL" : order.paymentStatus,
@@ -388,12 +389,17 @@ export class OrdersService {
     const remaining = await this.prisma.orderItem.count({ where: { orderId: id } });
     if (!remaining) throw new BadRequestException("Order must keep at least one item — cancel instead");
 
+    const nextTotal = Math.max(0, toNumber(order.total) + subDelta);
     const updated = await this.prisma.order.update({
       where: { id },
       data: {
         subtotal: { increment: subDelta },
         total: { increment: subDelta },
         costTotal: { increment: costDelta },
+        discountAmount: Math.min(
+          toNumber(order.discountAmount),
+          Math.max(0, nextTotal - toNumber(order.paidAmount)),
+        ),
         ...billMeta,
       },
       include: orderInclude,
@@ -405,10 +411,17 @@ export class OrdersService {
   async requestBill(user: AuthUser, id: string) {
     const existing = await this.prisma.order.findUnique({
       where: { id },
-      include: { waiter: { select: { id: true, name: true } } },
+      include: {
+        waiter: { select: { id: true, name: true } },
+        assignedCashier: { select: { id: true, name: true } },
+      },
     });
     if (!existing) throw new NotFoundException("Order not found");
     this.assertCanModify(user, existing, true);
+    if (existing.paymentStatus === "PAID") throw new BadRequestException("Bill is already paid");
+    if (!existing.assignedCashierId) {
+      throw new BadRequestException("Assign a cashier first, then request the bill");
+    }
     const o = await this.prisma.order.update({
       where: { id },
       data: { billRequestedAt: new Date() },
@@ -443,15 +456,29 @@ export class OrdersService {
       throw new BadRequestException("This bill is on a credit account. Clear it from Credit Customers");
     }
 
-    const total = toNumber(order.total);
-    const due = total - toNumber(order.paidAmount);
-    const pay = Math.min(dto.amount ?? due, due);
-    const tip = Math.max(0, Math.round((dto.tip ?? 0) * 100) / 100);
-    if (pay <= 0 && tip <= 0) throw new BadRequestException("Nothing left to pay");
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const gross = toNumber(order.total);
+    const prevPaid = toNumber(order.paidAmount);
+    const prevTendered = toNumber(order.tenderedAmount);
+    const maxDiscount = Math.max(0, round2(gross - prevPaid));
+    const discount =
+      dto.discount !== undefined
+        ? Math.min(maxDiscount, Math.max(0, round2(dto.discount)))
+        : Math.min(maxDiscount, Math.max(0, round2(toNumber(order.discountAmount))));
+    const net = Math.max(0, round2(gross - discount));
+    const due = Math.max(0, round2(net - prevPaid));
+    const tendered = Math.max(0, round2(dto.amount ?? due));
+    const tip = Math.max(0, round2(dto.tip ?? 0));
+    const pay = Math.min(tendered, due);
+
+    if (due > 0 && pay <= 0 && tip <= 0) throw new BadRequestException("Enter the amount received");
     if (pay <= 0 && tip > 0 && due > 0) throw new BadRequestException("Pay the bill before collecting tip only");
-    const paidAmount = toNumber(order.paidAmount) + pay;
-    const paymentStatus: PaymentStatus = paidAmount >= total ? "PAID" : pay > 0 ? "PARTIAL" : order.paymentStatus;
-    const tipAmount = toNumber(order.tipAmount) + tip;
+
+    const paidAmount = round2(prevPaid + pay);
+    const fullyPaid = paidAmount + 0.001 >= net || due <= 0;
+    const paymentStatus: PaymentStatus = fullyPaid ? "PAID" : pay > 0 ? "PARTIAL" : order.paymentStatus;
+    const tipAmount = round2(toNumber(order.tipAmount) + tip);
+    const tenderedAmount = round2(prevTendered + tendered);
 
     let servedByName = order.servedByName;
     if (dto.servedByName !== undefined) {
@@ -459,7 +486,8 @@ export class OrdersService {
     }
 
     let handedTo: { id: string; name: string } | null = null;
-    if (!user.permissions.includes("cash.keep")) {
+    const needsCashHandover = !user.permissions.includes("cash.keep") && (pay > 0 || tip > 0);
+    if (needsCashHandover) {
       if (!dto.handedToId) throw new BadRequestException("Select the cashier you handed the cash to");
       handedTo = await this.prisma.user.findFirst({
         where: {
@@ -473,24 +501,30 @@ export class OrdersService {
     }
 
     const [updated, payment] = await this.prisma.$transaction(async (tx) => {
-      const payment = await tx.payment.create({
-        data: {
-          orderId: id,
-          amount: pay,
-          tipAmount: tip,
-          collectedById: user.id,
-          handedToId: handedTo?.id ?? null,
-        },
-      });
+      const payment =
+        pay > 0 || tip > 0
+          ? await tx.payment.create({
+              data: {
+                orderId: id,
+                amount: pay,
+                tenderedAmount: tendered,
+                tipAmount: tip,
+                collectedById: user.id,
+                handedToId: handedTo?.id ?? null,
+              },
+            })
+          : null;
       const updated = await tx.order.update({
         where: { id },
         data: {
+          discountAmount: discount,
           paidAmount,
+          tenderedAmount,
           tipAmount,
           paymentStatus,
           servedByName,
           cashierId: order.cashierId ?? handedTo?.id ?? user.id,
-          status: paymentStatus === "PAID" && order.status === "READY" ? "COMPLETED" : order.status,
+          status: fullyPaid && order.status === "READY" ? "COMPLETED" : order.status,
         },
         include: orderInclude,
       });
@@ -506,7 +540,7 @@ export class OrdersService {
 
     this.realtime.orderChanged(this.event(updated), "paid");
     this.realtime.paymentsChanged();
-    if (handedTo) {
+    if (handedTo && payment) {
       this.realtime.cashHandover(handedTo.id, {
         id: payment.id,
         amount: pay + tip,
@@ -588,7 +622,8 @@ export class OrdersService {
   ) {
     if (user.permissions.includes("users.manage") || user.permissions.includes("order.edit")) return;
     if (!order.waiterId || order.waiterId === user.id) return;
-    if (allowBillRequest && user.permissions.includes("bill.request") && order.waiterId === user.id) return;
+    // Floor staff with bill.request may ping the assigned cashier on any open table.
+    if (allowBillRequest && user.permissions.includes("bill.request")) return;
     const who = order.waiter?.name ?? "another staff member";
     throw new BadRequestException(`Table already booked by ${who}`);
   }
@@ -820,19 +855,31 @@ export class OrdersService {
     return {
       id: o.id,
       orderNo: o.orderNo,
+      billNo: o.orderNo,
       tableNo: o.tableNo,
       tableId: o.tableId,
+      tableName: o.table?.name ?? null,
       partitionName: o.table?.partition?.name ?? null,
       notes: o.notes,
       status: o.status,
       paymentStatus: o.paymentStatus,
       subtotal: toNumber(o.subtotal),
       total: toNumber(o.total),
+      discountAmount: toNumber(o.discountAmount),
       paidAmount: toNumber(o.paidAmount),
+      tenderedAmount: toNumber(o.tenderedAmount),
       tipAmount,
-      grandTotal: toNumber(o.total) + tipAmount,
+      netTotal: Math.max(0, toNumber(o.total) - toNumber(o.discountAmount)),
+      changeAmount: Math.max(
+        0,
+        toNumber(o.tenderedAmount) - toNumber(o.paidAmount) - tipAmount,
+      ),
+      grandTotal: Math.max(0, toNumber(o.total) - toNumber(o.discountAmount)) + tipAmount,
       ...(showCost
-        ? { costTotal: toNumber(o.costTotal), profit: toNumber(o.total) - toNumber(o.costTotal) }
+        ? {
+            costTotal: toNumber(o.costTotal),
+            profit: Math.max(0, toNumber(o.total) - toNumber(o.discountAmount)) - toNumber(o.costTotal),
+          }
         : {}),
       cashier: o.cashier?.name ?? null,
       waiter: this.staffLabel(o.waiter),
@@ -871,7 +918,9 @@ export class OrdersService {
       payments: o.payments.map((p) => ({
         id: p.id,
         amount: toNumber(p.amount),
+        tenderedAmount: toNumber(p.tenderedAmount),
         tipAmount: toNumber(p.tipAmount),
+        changeAmount: Math.max(0, toNumber(p.tenderedAmount) - toNumber(p.amount) - toNumber(p.tipAmount)),
         collectedBy: p.collectedBy.name,
         handedTo: p.handedTo?.name ?? null,
         confirmedAt: p.confirmedAt,

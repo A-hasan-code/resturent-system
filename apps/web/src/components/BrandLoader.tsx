@@ -1,4 +1,5 @@
 import { useEffect, useId } from "react";
+import { acquireScrollLock, releaseScrollLock } from "../scroll-lock";
 
 /** Branded Pixalbotics loader used for connection, page waits, and modal waits. */
 export function BrandLoader({
@@ -25,7 +26,7 @@ export function BrandLoader({
         <span className="px-letter">P</span>
       </div>
       <div className="px-loader-copy">
-        <strong>Pixalbotics</strong>
+        <strong>PixalBotics</strong>
         {label ? <span>{label}</span> : null}
       </div>
     </div>
@@ -35,8 +36,8 @@ export function BrandLoader({
 /** Full-screen branded wait (login bootstrap, rare blocking work). */
 export function BrandSplash({ label }: { label?: string }) {
   useEffect(() => {
-    document.body.classList.add("px-splash-open");
-    return () => document.body.classList.remove("px-splash-open");
+    acquireScrollLock();
+    return () => releaseScrollLock();
   }, []);
   return (
     <div className="px-splash">
