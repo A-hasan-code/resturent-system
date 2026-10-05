@@ -7,6 +7,7 @@ export type ThermalPreviewData = {
   logoUrl?: string | null;
   paidStampUrl?: string | null;
   unpaidStampUrl?: string | null;
+  cancelledStampUrl?: string | null;
 };
 
 function brandingUrl(path: string | null | undefined) {
@@ -21,7 +22,8 @@ type Segment =
   | { kind: "text"; value: string }
   | { kind: "logo" }
   | { kind: "paid" }
-  | { kind: "unpaid" };
+  | { kind: "unpaid" }
+  | { kind: "cancelled" };
 
 /** Same characters the thermal printer gets — images stand in for raster markers. */
 export function ThermalPreview({
@@ -30,6 +32,7 @@ export function ThermalPreview({
   logoUrl,
   paidStampUrl,
   unpaidStampUrl,
+  cancelledStampUrl,
 }: ThermalPreviewData) {
   const mm =
     paperWidth <= 58 ? 58 : paperWidth <= 72 ? 72 : paperWidth <= 80 ? 80 : 112;
@@ -37,6 +40,7 @@ export function ThermalPreview({
   const logo = brandingUrl(logoUrl);
   const paid = brandingUrl(paidStampUrl || "/branding/paid-stamp.png");
   const unpaid = brandingUrl(unpaidStampUrl || "/branding/unpaid-stamp.png");
+  const cancelled = brandingUrl(cancelledStampUrl || "/branding/cancelled-stamp.png");
 
   return (
     <div className="receipt-wrap">
@@ -71,6 +75,17 @@ export function ThermalPreview({
               </div>
             ) : null;
           }
+          if (seg.kind === "cancelled") {
+            return cancelled ? (
+              <div key={i} className="thermal-slip-img thermal-slip-stamp">
+                <img src={cancelled} alt="CANCELLED" />
+              </div>
+            ) : (
+              <pre key={i} className="thermal-slip-text">
+                *** CANCELLED ***
+              </pre>
+            );
+          }
           return (
             <pre key={i} className="thermal-slip-text">
               {seg.value}
@@ -102,6 +117,9 @@ function splitThermalText(text: string): Segment[] {
     } else if (line === "[UNPAID STAMP]") {
       flush();
       out.push({ kind: "unpaid" });
+    } else if (line === "[CANCELLED STAMP]") {
+      flush();
+      out.push({ kind: "cancelled" });
     } else {
       buf.push(line);
     }

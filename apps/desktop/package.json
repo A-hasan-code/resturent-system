@@ -1,7 +1,7 @@
 {
   "name": "@hotel/desktop",
   "productName": "PixalBotics Restaurant",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "private": true,
   "description": "PixalBotics Restaurant desktop app — finds the restaurant server on the LAN automatically",
   "author": "PixalBotics",

@@ -703,6 +703,11 @@ a.btn {
   grid-template-columns: 1fr 1fr;
   gap: 0.85rem;
   margin-bottom: 1rem;
+  align-items: start;
+}
+
+.dash-grid-solo {
+  grid-template-columns: 1fr;
 }
 
 .dash-section-title {
@@ -716,7 +721,38 @@ a.btn {
 
 .dash-h2 {
   margin: 0;
-  font-size: 1.1rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.dash-panel {
+  min-width: 0;
+}
+
+.dash-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 0.7rem;
+}
+
+.dash-panel-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-shrink: 0;
+}
+
+.dash-panel-link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.dash-panel-link:hover {
+  text-decoration: underline;
 }
 
 .dash-sub {
@@ -777,29 +813,153 @@ a.btn {
   background: color-mix(in srgb, var(--panel) 92%, #f3f6f8);
 }
 
+.dash-table {
+  width: 100%;
+}
+
+.dash-table th {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+
+.dash-table td,
+.dash-table th {
+  padding: 0.45rem 0.35rem;
+}
+
+.dash-num {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .dash-order-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 0.55rem;
+  gap: 0.5rem;
 }
 
 .dash-order-list li {
-  padding: 0.55rem 0.65rem;
+  padding: 0.65rem 0.75rem;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 96%, #f4f7f9);
+  display: grid;
+  gap: 0.35rem;
 }
 
 .dash-order-list li.is-stale {
-  border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
-  background: color-mix(in srgb, var(--danger) 6%, #fff);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+  background: color-mix(in srgb, var(--warn) 8%, #fff);
 }
 
 .dash-order-list li.is-new {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
   background: color-mix(in srgb, var(--accent) 6%, #fff);
+}
+
+.dash-order-list li.is-cancelled {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--line));
+  background: color-mix(in srgb, var(--danger) 4%, #fff);
+}
+
+.dash-order-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.dash-order-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.dash-order-title strong {
+  font-size: 0.98rem;
+}
+
+.dash-order-table {
+  color: var(--muted);
+  font-size: 0.86rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dash-order-wait {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-order-items {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.dash-order-more {
+  color: var(--ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dash-order-reason {
+  font-size: 0.78rem;
+  color: var(--danger);
+}
+
+.dash-order-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.1rem;
+}
+
+.dash-order-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.dash-order-total {
+  font-size: 0.9rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.badge.delayed {
+  background: #fff1d6;
+  color: #8a5a00;
+}
+
+.empty-compact {
+  padding: 0.85rem 0.5rem;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg) 70%, var(--panel));
+}
+
+.dash-shortcut-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.dash-shortcuts {
+  margin-top: 0.15rem;
 }
 
 .stats {
@@ -1308,6 +1468,15 @@ td .row {
 .badge.ready {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+.badge.cancelled {
+  background: #fde8e6;
+  color: var(--danger);
+}
+
+.bill-cancelled-row td {
+  background: rgba(220, 80, 60, 0.06);
 }
 
 .badge.credit {

@@ -5,6 +5,7 @@ import { toNumber } from "../common/units";
 import { AuthUser } from "../common/decorators";
 import { TipService } from "../system/tip.service";
 import { ExpensesService } from "../expenses/expenses.service";
+import { OPEN_UNPAID_CASH } from "../orders/order-scopes";
 
 const STALE_MINUTES = 10;
 
@@ -19,6 +20,9 @@ type DashOrder = {
   waitMinutes: number;
   stale: boolean;
   items: { name: string; quantity: number; sellUnit: string }[];
+  cancelReason?: string | null;
+  cancelledAt?: Date | null;
+  cancelledBy?: string | null;
 };
 
 function isoDay(d: Date) {
@@ -95,6 +99,7 @@ export class DashboardService {
       unpaidCount,
       unpaidAgg,
       paidCount,
+      paidTodayCount,
       revenueTodayAgg,
       revenueAllAgg,
       ordersTodayAgg,
@@ -115,25 +120,35 @@ export class DashboardService {
       waiterOrderCounts,
       creditOpenAgg,
       creditPaidTodayAgg,
+      cancelledToday,
+      cancelledCount,
+      cancelledList,
     ] = await Promise.all([
       this.prisma.order.count({ where: { status: "PENDING" } }),
       this.prisma.order.count({ where: { status: "PREPARING" } }),
       this.prisma.order.count({ where: { status: "READY" } }),
       this.prisma.order.count({ where: { status: "COMPLETED" } }),
-      this.prisma.order.count({
-        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] }, creditCustomerId: null },
-      }),
+      this.prisma.order.count({ where: OPEN_UNPAID_CASH }),
       this.prisma.order.aggregate({
-        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] }, creditCustomerId: null },
+        where: OPEN_UNPAID_CASH,
         _sum: { total: true, discountAmount: true, paidAmount: true },
       }),
-      this.prisma.order.count({ where: { paymentStatus: "PAID" } }),
+      this.prisma.order.count({
+        where: { paymentStatus: "PAID", status: { not: "CANCELLED" } },
+      }),
+      this.prisma.order.count({
+        where: {
+          paymentStatus: "PAID",
+          status: { not: "CANCELLED" },
+          updatedAt: { gte: start },
+        },
+      }),
       this.prisma.order.aggregate({
-        where: { paymentStatus: "PAID", updatedAt: { gte: start } },
+        where: { paymentStatus: "PAID", status: { not: "CANCELLED" }, updatedAt: { gte: start } },
         _sum: { total: true, discountAmount: true, costTotal: true, tipAmount: true },
       }),
       this.prisma.order.aggregate({
-        where: { paymentStatus: "PAID" },
+        where: { paymentStatus: "PAID", status: { not: "CANCELLED" } },
         _sum: { total: true, discountAmount: true, costTotal: true },
       }),
       this.prisma.order.aggregate({
@@ -162,7 +177,7 @@ export class DashboardService {
         take: 15,
       }),
       this.prisma.order.findMany({
-        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] }, creditCustomerId: null },
+        where: OPEN_UNPAID_CASH,
         include: { items: true },
         orderBy: { createdAt: "asc" },
         take: 12,
@@ -222,9 +237,34 @@ export class DashboardService {
         _sum: { amount: true },
         _count: true,
       }),
+      this.prisma.order.count({
+        where: {
+          status: "CANCELLED",
+          OR: [{ cancelledAt: { gte: start } }, { updatedAt: { gte: start } }],
+        },
+      }),
+      this.prisma.order.count({ where: { status: "CANCELLED" } }),
+      this.prisma.order.findMany({
+        where: {
+          status: "CANCELLED",
+          OR: [{ cancelledAt: { gte: start } }, { updatedAt: { gte: start } }],
+        },
+        include: {
+          items: true,
+          cancelledBy: { select: { name: true } },
+        },
+        orderBy: [{ cancelledAt: "desc" }, { updatedAt: "desc" }],
+        take: 12,
+      }),
     ]);
 
-    const mapOrder = (o: (typeof kitchenActive)[0]): DashOrder => {
+    const mapOrder = (
+      o: (typeof kitchenActive)[0] & {
+        cancelReason?: string | null;
+        cancelledAt?: Date | null;
+        cancelledBy?: { name: string } | null;
+      },
+    ): DashOrder => {
       const waitMinutes = Math.max(
         0,
         Math.floor((Date.now() - new Date(o.createdAt).getTime()) / 60000)
@@ -246,6 +286,9 @@ export class DashboardService {
           quantity: toNumber(i.quantity),
           sellUnit: i.sellUnit,
         })),
+        cancelReason: o.cancelReason ?? null,
+        cancelledAt: o.cancelledAt ?? null,
+        cancelledBy: o.cancelledBy?.name ?? null,
       };
     };
 
@@ -253,6 +296,7 @@ export class DashboardService {
     const newOrders = kitchenQueue.filter((o) => o.status === "PENDING");
     const staleOrders = staleOrdersRaw.map(mapOrder);
     const unpaidOrders = unpaidList.map(mapOrder);
+    const cancelledOrders = cancelledList.map(mapOrder);
 
     const lowStock = lowRaw
       .filter((i) => toNumber(i.quantityOnHand) <= toNumber(i.reorderLevel))
@@ -375,11 +419,15 @@ export class DashboardService {
       totalOrders: totalOrdersAll,
       unpaidCount,
       unpaidAmount,
+      cancelledToday: cancelledToday ?? 0,
+      cancelledCount: cancelledCount ?? 0,
+      cancelledOrders,
       creditOutstanding,
       creditOutstandingCount,
       creditPaidToday,
       creditPaidTodayCount,
       paidCount,
+      paidTodayCount: paidTodayCount ?? 0,
       ordersToday,
       orderAmountToday: salesToday,
       salesToday,

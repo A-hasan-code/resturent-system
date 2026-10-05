@@ -102,10 +102,13 @@ export function KitchenPage() {
 
   useSocketEvent("orders.changed", () => void load());
   useSocketEvent<{ orderNo: number; tableNo: string | null; reason: string }>("kitchen.new", (o) => {
-    toast.push(
-      `${o.reason === "items-added" ? t("kitchen.itemsAdded") : t("kitchen.newOrder")}: ${o.tableNo || t("common.walkIn")} · #${o.orderNo}`,
-      "info"
-    );
+    const kind =
+      o.reason === "items-added"
+        ? t("kitchen.itemsAdded")
+        : o.reason === "cancelled"
+          ? t("kitchen.orderCancelled")
+          : t("kitchen.newOrder");
+    toast.push(`${kind}: ${o.tableNo || t("common.walkIn")} · #${o.orderNo}`, "info");
     alertBeep();
   });
 

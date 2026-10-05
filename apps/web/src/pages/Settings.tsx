@@ -6,6 +6,7 @@ import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
 import { useConfirm } from "../components/ConfirmModal";
 import { BillPreview, type BillOrder } from "../components/BillPreview";
+import { ThermalPreview } from "../components/ThermalPreview";
 import { Pagination, paginate } from "../components/Pagination";
 import { useSocketEvent } from "../socket";
 import { serverOrigin } from "../server";

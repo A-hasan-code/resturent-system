@@ -14,6 +14,7 @@ import { PayModal } from "../components/PayModal";
 import { CashHandovers } from "../components/CashHandovers";
 import { CashRecord } from "../components/CashRecord";
 import { useI18n, useT } from "../i18n";
+import { usePrompt } from "../components/ConfirmModal";
 import { EditBillForm, serverNames, withCurrent, type EditBillMeta, type EditBillPerson, type EditBillTable } from "../components/EditBillForm";
 
 type OrderPayment = {
@@ -37,6 +38,10 @@ type Order = BillOrder & {
   servedBy?: string | null;
   servedByName?: string | null;
   billRequestedAt?: string | null;
+  cancelReason?: string | null;
+  cancelledAt?: string | null;
+  cancelledBy?: { id?: string; name: string; roleCode?: string; roleName?: string } | null;
+  updatedAt?: string | null;
   payments?: OrderPayment[];
 };
 
@@ -56,8 +61,6 @@ function billTime(iso?: string | null) {
   return `${h}:${pad(m)}:${pad(s)}${ampm}`;
 }
 
-const ITEMS_PREVIEW = 2;
-
 type Stats = {
   pendingKitchen: number;
   preparing: number;
@@ -70,7 +73,61 @@ type Stats = {
   revenueToday: number;
   revenueAll: number;
   ordersToday: number;
+  cancelledToday?: number;
+  cancelledCount?: number;
 };
+
+/** Filter-independent billing tallies — unpaid never includes cancelled. */
+type BillingTally = {
+  unpaidCount: number;
+  unpaidAmount: number;
+  paidCount: number;
+  cancelledCount: number;
+  cancelledToday: number;
+  cancelledAmount: number;
+};
+
+const emptyTally: BillingTally = {
+  unpaidCount: 0,
+  unpaidAmount: 0,
+  paidCount: 0,
+  cancelledCount: 0,
+  cancelledToday: 0,
+  cancelledAmount: 0,
+};
+
+function dueOf(o: Order) {
+  const net = Math.max(0, o.total - (o.discountAmount ?? 0));
+  return Math.max(0, net - (o.paidAmount ?? 0));
+}
+
+function isCancelled(o: Order) {
+  return o.status === "CANCELLED" || o.paymentStatus === "VOID";
+}
+
+function startOfToday() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function buildTally(unpaid: Order[], paid: Order[], cancelled: Order[]): BillingTally {
+  const unpaidOpen = unpaid.filter((o) => !isCancelled(o));
+  const paidOpen = paid.filter((o) => !isCancelled(o));
+  const today = startOfToday();
+  const cancelledToday = cancelled.filter((o) => {
+    const when = o.cancelledAt || o.createdAt || o.updatedAt;
+    return when ? new Date(when).getTime() >= today : false;
+  }).length;
+  return {
+    unpaidCount: unpaidOpen.length,
+    unpaidAmount: unpaidOpen.reduce((s, o) => s + dueOf(o), 0),
+    paidCount: paidOpen.length,
+    cancelledCount: cancelled.length,
+    cancelledToday,
+    cancelledAmount: cancelled.reduce((s, o) => s + Math.max(0, o.total - (o.discountAmount ?? 0)), 0),
+  };
+}
 
 const PAGE_SIZE = 10;
 
@@ -79,9 +136,11 @@ export function BillsPage() {
   const toast = useToast();
   const t = useT();
   const { ts } = useI18n();
-  const [filter, setFilter] = useState<"UNPAID" | "PAID" | "ALL">("UNPAID");
+  const askPrompt = usePrompt();
+  const [filter, setFilter] = useState<"UNPAID" | "PAID" | "CANCELLED" | "ALL">("UNPAID");
   const [orders, setOrders] = useState<Order[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [tally, setTally] = useState<BillingTally>(emptyTally);
   const [selected, setSelected] = useState<Order | null>(null);
   const [paying, setPaying] = useState<Order | null>(null);
   const [view, setView] = useState<"bills" | "cash">("bills");
@@ -94,6 +153,7 @@ export function BillsPage() {
   const [editStaff, setEditStaff] = useState<EditBillPerson[]>([]);
   const [editing, setEditing] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [thermal, setThermal] = useState<{
     text: string;
     paperWidth?: number;
@@ -104,13 +164,22 @@ export function BillsPage() {
 
   async function load() {
     try {
-      const query = filter === "ALL" ? "?view=billing" : `?view=billing&paymentStatus=${filter}`;
-      const [list, dash] = await Promise.all([
+      const query =
+        filter === "ALL"
+          ? "?view=billing"
+          : filter === "CANCELLED"
+            ? "?view=billing&status=CANCELLED"
+            : `?view=billing&paymentStatus=${filter}`;
+      const [list, dash, unpaidRows, paidRows, cancelledRows] = await Promise.all([
         api<Order[]>(`/orders${query}`),
         api<Stats>("/dashboard"),
+        api<Order[]>("/orders?view=billing&paymentStatus=UNPAID"),
+        api<Order[]>("/orders?view=billing&paymentStatus=PAID"),
+        api<Order[]>("/orders?view=billing&status=CANCELLED"),
       ]);
       setOrders(list);
       setStats(dash);
+      setTally(buildTally(unpaidRows, paidRows, cancelledRows));
     } catch (e) {
       toast.push(e instanceof Error ? e.message : t("bills.loadFailed"), "err");
     }
@@ -123,17 +192,24 @@ export function BillsPage() {
   useSocketEvent("orders.changed", () => void load());
 
   const shown = useMemo(() => {
-    const filtered = orders.filter((o) =>
-      matchesSearch(
-        q,
-        o.orderNo,
-        o.tableNo,
-        o.paymentStatus,
-        o.status,
-        o.assignedCashier?.name,
-        ...o.items.map((i) => i.name)
-      )
-    );
+    const filtered = orders
+      .filter((o) => {
+        if (filter === "CANCELLED") return isCancelled(o);
+        if (filter === "ALL") return true;
+        return !isCancelled(o);
+      })
+      .filter((o) =>
+        matchesSearch(
+          q,
+          o.orderNo,
+          o.tableNo,
+          o.paymentStatus,
+          o.status,
+          o.cancelReason,
+          o.assignedCashier?.name,
+          ...o.items.map((i) => i.name)
+        )
+      );
     // Bill requests first so the assigned cashier sees them immediately.
     return filtered.sort((a, b) => {
       const ar = a.billRequestedAt && a.paymentStatus !== "PAID" ? 1 : 0;
@@ -141,7 +217,7 @@ export function BillsPage() {
       if (ar !== br) return br - ar;
       return new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime();
     });
-  }, [orders, q]);
+  }, [orders, q, filter]);
 
   function openBill(o: Order) {
     setSelected(o);
@@ -239,6 +315,64 @@ export function BillsPage() {
     }
   }
 
+  async function cancelOrder() {
+    if (!selected || !can("order.edit")) return;
+    if (selected.paymentStatus === "PAID" || selected.status === "CANCELLED") return;
+    const reason = await askPrompt({
+      title: t("bills.cancelConfirmTitle"),
+      body: t("bills.cancelConfirmBody", { n: selected.orderNo }),
+      confirmLabel: t("bills.cancelConfirm"),
+      danger: true,
+      inputLabel: t("bills.cancelReason"),
+      inputPlaceholder: t("bills.cancelReasonPh"),
+      inputRequired: true,
+      inputMaxLength: 200,
+    });
+    if (!reason) return;
+    setCancelling(true);
+    try {
+      const res = await api<Order & { printQueued?: number; printError?: string | null }>(
+        `/orders/${selected.id}/cancel`,
+        {
+          method: "POST",
+          body: JSON.stringify({ reason }),
+        },
+      );
+      if ((res.printQueued ?? 0) > 0) {
+        toast.push(t("bills.cancelled", { n: res.orderNo }), "ok");
+      } else {
+        toast.push(
+          res.printError
+            ? `${t("bills.cancelledNoPrint", { n: res.orderNo })} — ${res.printError}`
+            : t("bills.cancelledNoPrint", { n: res.orderNo }),
+          "err",
+        );
+      }
+      setSelected(null);
+      setEditing(false);
+      void load();
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("bills.cancelFailed"), "err");
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  async function printCancelSlip(orderId: string) {
+    try {
+      const res = await api<{ queued: number; jobs: { error: string | null }[] }>(
+        `/orders/${orderId}/print-cancel-kot`,
+        { method: "POST", body: "{}" },
+      );
+      if (!res.queued) throw new Error(t("common.printFailed"));
+      const failed = res.jobs.find((j) => j.error);
+      if (failed?.error) throw new Error(failed.error);
+      toast.push(t("bills.cancelSlipSent"), "ok");
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("common.printFailed"), "err");
+    }
+  }
+
   useEffect(() => {
     setPage(1);
   }, [filter, q]);
@@ -298,6 +432,8 @@ export function BillsPage() {
                     .join("; "),
                   KitchenStatus: o.status,
                   Payment: o.paymentStatus,
+                  CancelReason: o.cancelReason || "",
+                  CancelledBy: o.cancelledBy?.name || "",
                   Total: o.total,
                   Date: o.createdAt
                     ? new Date(o.createdAt).toLocaleString("en-PK")
@@ -309,14 +445,27 @@ export function BillsPage() {
           >
             {t("common.excel")}
           </button>
-          {(["UNPAID", "PAID", "ALL"] as const).map((f) => (
+          {(
+            [
+              { key: "UNPAID" as const, n: tally.unpaidCount },
+              { key: "PAID" as const, n: tally.paidCount },
+              { key: "CANCELLED" as const, n: tally.cancelledCount },
+              {
+                key: "ALL" as const,
+                n: tally.unpaidCount + tally.paidCount + tally.cancelledCount,
+              },
+            ] as const
+          ).map((f) => (
             <button
-              key={f}
+              key={f.key}
               type="button"
-              className={`btn ${filter === f ? "" : "ghost"} sm`}
-              onClick={() => setFilter(f)}
+              className={`btn ${filter === f.key ? "" : "ghost"} sm`}
+              onClick={() => setFilter(f.key)}
             >
-              {ts(f)}
+              {ts(f.key)}
+              <span className="tiny" style={{ marginLeft: "0.35rem", opacity: 0.8 }}>
+                ({f.n})
+              </span>
             </button>
           ))}
         </div>
@@ -344,15 +493,25 @@ export function BillsPage() {
         <div className="panel stat">
           <span>{t("bills.unpaidBills")}</span>
           <strong>
-            {stats?.unpaidCount ?? "—"}
+            {tally.unpaidCount}
             <span className="tiny muted" style={{ display: "block", fontWeight: 500 }}>
-              {stats ? money(stats.unpaidAmount) : ""}
+              {money(tally.unpaidAmount)}
             </span>
           </strong>
         </div>
         <div className="panel stat">
           <span>{t("bills.ordersToday")}</span>
           <strong>{stats?.ordersToday ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("bills.cancelledToday")}</span>
+          <strong style={{ color: tally.cancelledToday || tally.cancelledCount ? "var(--danger)" : undefined }}>
+            {tally.cancelledToday}
+            <span className="tiny muted" style={{ display: "block", fontWeight: 500 }}>
+              {t("bills.cancelledAll", { n: tally.cancelledCount })}
+              {tally.cancelledCount > 0 ? ` · ${money(tally.cancelledAmount)}` : ""}
+            </span>
+          </strong>
         </div>
         {!seesRevenue && (
           <div className="panel stat">
@@ -378,7 +537,7 @@ export function BillsPage() {
         <div className="panel stat">
           <span>{t("bills.completedPaid")}</span>
           <strong>
-            {stats?.completed ?? "—"} / {stats?.paidCount ?? "—"}
+            {stats?.completed ?? "—"} / {tally.paidCount}
           </strong>
         </div>
       </div>
@@ -406,6 +565,7 @@ export function BillsPage() {
                 <th>{t("bills.assignedCashier")}</th>
                 <th>{t("common.items")}</th>
                 <th>{t("bills.kitchen")}</th>
+                <th>{t("bills.cancelReasonCol")}</th>
                 <th>{t("common.total")}</th>
                 <th>{t("bills.tip")}</th>
                 <th>{t("bills.pay")}</th>
@@ -417,11 +577,16 @@ export function BillsPage() {
                 const itemsText = o.items
                   .map((i) => `${i.quantity} ${unitLabel(i.sellUnit)} ${i.name}`)
                   .join(", ");
+                const cancelled = o.status === "CANCELLED";
                 return (
                 <tr
                   key={o.id}
                   className={
-                    o.billRequestedAt && o.paymentStatus !== "PAID" ? "bill-requested-row" : undefined
+                    cancelled
+                      ? "bill-cancelled-row"
+                      : o.billRequestedAt && o.paymentStatus !== "PAID"
+                        ? "bill-requested-row"
+                        : undefined
                   }
                 >
                   <td>{o.orderNo}</td>
@@ -451,23 +616,39 @@ export function BillsPage() {
                   <td>
                     <span
                       className={`badge ${
-                        o.status === "PENDING" || o.status === "PREPARING"
-                          ? "pending"
-                          : "ready"
+                        cancelled
+                          ? "cancelled"
+                          : o.status === "PENDING" || o.status === "PREPARING"
+                            ? "pending"
+                            : "ready"
                       }`}
                     >
                       {ts(o.status)}
                     </span>
+                  </td>
+                  <td className="tiny">
+                    {cancelled ? (
+                      <>
+                        <div>{o.cancelReason || "—"}</div>
+                        {o.cancelledBy?.name && (
+                          <div className="muted">
+                            {t("bills.cancelledBy", { name: o.cancelledBy.name })}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      "—"
+                    )}
                   </td>
                   <td>{money(o.total)}</td>
                   <td>{(o.tipAmount ?? 0) > 0 ? money(o.tipAmount ?? 0) : "—"}</td>
                   <td>
                     <span
                       className={`badge ${
-                        o.paymentStatus === "PAID" ? "paid" : "unpaid"
+                        cancelled ? "cancelled" : o.paymentStatus === "PAID" ? "paid" : "unpaid"
                       }`}
                     >
-                      {ts(o.paymentStatus)}
+                      {cancelled ? ts("CANCELLED") : ts(o.paymentStatus)}
                     </span>
                   </td>
                   <td className="row">
@@ -478,7 +659,16 @@ export function BillsPage() {
                     >
                       {t("bills.open")}
                     </button>
-                    {can("order.pay") && o.paymentStatus !== "PAID" && (
+                    {cancelled && (can("order.edit") || can("print.kot")) && (
+                      <button
+                        type="button"
+                        className="btn danger sm"
+                        onClick={() => void printCancelSlip(o.id)}
+                      >
+                        {t("bills.printCancelSlip")}
+                      </button>
+                    )}
+                    {can("order.pay") && o.paymentStatus !== "PAID" && !cancelled && (
                       <button type="button" className="btn ok sm" onClick={() => setPaying(o)}>
                         {t("bills.pay")}
                       </button>
@@ -517,6 +707,17 @@ export function BillsPage() {
                 <div className="pay-summary no-print" style={{ marginBottom: "0.75rem" }}>
                   <span>{t("bills.assignedCashier")}</span>
                   <strong>{selected.assignedCashier.name}</strong>
+                </div>
+              )}
+              {selected.status === "CANCELLED" && (
+                <div className="pay-summary no-print" style={{ marginBottom: "0.75rem" }}>
+                  <span>{t("bills.cancelReason")}</span>
+                  <strong style={{ color: "var(--danger)" }}>
+                    {selected.cancelReason || "—"}
+                    {selected.cancelledBy?.name
+                      ? ` · ${t("bills.cancelledBy", { name: selected.cancelledBy.name })}`
+                      : ""}
+                  </strong>
                 </div>
               )}
               {can("order.edit") && selected.paymentStatus !== "PAID" && editing && editMeta ? (
@@ -620,7 +821,7 @@ export function BillsPage() {
               )}
             </div>
             <div className="form-footer no-print">
-              {can("order.edit") && selected.paymentStatus !== "PAID" && (
+              {can("order.edit") && selected.paymentStatus !== "PAID" && selected.status !== "CANCELLED" && (
                 editing ? (
                   <>
                     <button type="button" className="btn" disabled={savingEdit} onClick={() => void saveEdit()}>
@@ -631,22 +832,43 @@ export function BillsPage() {
                     </button>
                   </>
                 ) : (
-                  <button type="button" className="btn ghost" onClick={() => void startBillEdit(selected)}>
-                    {t("bills.editOrder")}
-                  </button>
+                  <>
+                    <button type="button" className="btn ghost" onClick={() => void startBillEdit(selected)}>
+                      {t("bills.editOrder")}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn danger"
+                      disabled={cancelling || (selected.paidAmount ?? 0) > 0}
+                      onClick={() => void cancelOrder()}
+                      title={(selected.paidAmount ?? 0) > 0 ? t("bills.cancelFailed") : undefined}
+                    >
+                      {cancelling ? t("common.saving") : t("bills.cancelOrder")}
+                    </button>
+                  </>
                 )
               )}
-              {can("print.bill") && !editing && (
+              {selected.status === "CANCELLED" &&
+                (can("order.edit") || can("print.kot")) &&
+                !editing && (
+                <button type="button" className="btn danger" onClick={() => void printCancelSlip(selected.id)}>
+                  {t("bills.printCancelSlip")}
+                </button>
+              )}
+              {can("print.bill") && selected.status !== "CANCELLED" && !editing && (
                 <button type="button" className="btn" onClick={() => void printOnServer(selected.id)}>
                   {t("common.printOnPrinter")}
                 </button>
               )}
-              {!editing && (
+              {selected.status !== "CANCELLED" && !editing && (
                 <button type="button" className="btn ghost" onClick={printBill}>
                   {t("common.browserPrint")}
                 </button>
               )}
-              {can("order.pay") && selected.paymentStatus !== "PAID" && !editing && (
+              {can("order.pay") &&
+                selected.paymentStatus !== "PAID" &&
+                selected.status !== "CANCELLED" &&
+                !editing && (
                 <button type="button" className="btn ok" onClick={() => setPaying(selected)}>
                   {t("bills.takePayment")}
                 </button>

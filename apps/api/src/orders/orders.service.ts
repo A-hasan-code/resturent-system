@@ -7,7 +7,16 @@ import { AuthUser } from "../common/decorators";
 import { PrintService } from "../print/print.service";
 import { RealtimeService } from "../realtime/realtime.service";
 import { OPEN_ORDER_WHERE, tableLabel } from "../tables/tables.controller";
-import { AddItemsDto, CreateOrderDto, EditOrderDto, OrderLineDto, PayOrderDto, UpdateOrderDto, UpdateStatusDto } from "./dto";
+import {
+  AddItemsDto,
+  CancelOrderDto,
+  CreateOrderDto,
+  EditOrderDto,
+  OrderLineDto,
+  PayOrderDto,
+  UpdateOrderDto,
+  UpdateStatusDto,
+} from "./dto";
 import { TipService } from "../system/tip.service";
 import { SettingsService } from "../system/settings.service";
 
@@ -30,6 +39,7 @@ const orderInclude = {
   cashier: { select: { name: true } },
   waiter: { select: staffSelect },
   assignedCashier: { select: staffSelect },
+  cancelledBy: { select: staffSelect },
   table: { include: { partition: { select: { id: true, name: true } } } },
   tipShares: {
     include: { user: { select: { id: true, name: true } } },
@@ -63,7 +73,8 @@ const paidBillsScope = (u: AuthUser): Prisma.OrderWhereInput =>
     ? {}
     : {
         OR: [
-          { paymentStatus: { not: "PAID" } },
+          { paymentStatus: { in: ["UNPAID", "PARTIAL"] } },
+          { status: "CANCELLED" },
           { payments: { some: { OR: [{ collectedById: u.id }, { handedToId: u.id }] } } },
         ],
       };
@@ -94,20 +105,26 @@ export class OrdersService {
   async list(user: AuthUser, paymentStatus?: string, status?: string, billing = false) {
     const cashierScope = this.cashierBillingScope(user, billing);
     const ownOnly = floorOwnOrdersOnly(user, billing);
+    const where: Prisma.OrderWhereInput = {
+      ...(paymentStatus ? { paymentStatus: paymentStatus as PaymentStatus } : {}),
+      ...(billing ? { creditCustomerId: null } : {}),
+      ...(ownOnly
+        ? { waiterId: user.id }
+        : seesAllOrders(user)
+          ? {
+              ...(billing ? paidBillsScope(user) : {}),
+              ...cashierScope,
+            }
+          : { waiterId: user.id }),
+    };
+    // Unpaid/Paid tabs hide cancelled. Cancelled tab filters by status. All includes everything.
+    // Cancelled orders use paymentStatus=VOID so they never match UNPAID/PARTIAL.
+    if (status) where.status = status as OrderStatus;
+    else if (paymentStatus === "UNPAID" || paymentStatus === "PARTIAL" || paymentStatus === "PAID") {
+      where.status = { not: "CANCELLED" };
+    }
     const orders = await this.prisma.order.findMany({
-      where: {
-        ...(paymentStatus ? { paymentStatus: paymentStatus as PaymentStatus } : {}),
-        ...(status ? { status: status as OrderStatus } : {}),
-        ...(billing ? { creditCustomerId: null } : {}),
-        ...(ownOnly
-          ? { waiterId: user.id }
-          : seesAllOrders(user)
-            ? {
-                ...(billing ? paidBillsScope(user) : {}),
-                ...cashierScope,
-              }
-            : { waiterId: user.id }),
-      },
+      where,
       include: orderInclude,
       orderBy: { createdAt: "desc" },
       take: 100,
@@ -312,6 +329,94 @@ export class OrdersService {
     return this.toDto(full, canSeeCost(user));
   }
 
+  /**
+   * Main cashier: cancel an unpaid order, restore stock, free the table,
+   * and print a CANCELLED kitchen slip so staff stop preparing.
+   */
+  async cancel(user: AuthUser, id: string, dto: CancelOrderDto) {
+    if (!user.permissions.includes("order.edit")) {
+      throw new ForbiddenException("Only the Main Cashier can cancel orders");
+    }
+    const reason = (dto.reason || "").trim();
+    if (reason.length < 2) throw new BadRequestException("Enter a cancel reason");
+    if (reason.length > 200) throw new BadRequestException("Cancel reason is too long");
+
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      include: {
+        items: { include: { menuItem: { select: { id: true } } } },
+      },
+    });
+    if (!order) throw new NotFoundException("Order not found");
+    if (order.status === "CANCELLED") throw new BadRequestException("Order is already cancelled");
+    if (order.paymentStatus === "PAID") throw new BadRequestException("Paid bills cannot be cancelled");
+    if (toNumber(order.paidAmount) > 0) {
+      throw new BadRequestException("Clear partial payment before cancelling");
+    }
+
+    await this.restoreStockForOrder(order.id, order.orderNo);
+
+    const updated = await this.prisma.order.update({
+      where: { id },
+      data: {
+        status: "CANCELLED",
+        // VOID so unpaid/partial queries never treat this as money due.
+        paymentStatus: "VOID",
+        billRequestedAt: null,
+        cancelReason: reason,
+        cancelledAt: new Date(),
+        cancelledById: user.id,
+      },
+      include: orderInclude,
+    });
+
+    let printQueued = 0;
+    let printError: string | null = null;
+    const hasKitchen = order.items.some((i) => i.lineKind !== "PER_HEAD");
+    if (hasKitchen) {
+      try {
+        const jobs = await this.print.enqueueKot(id, {
+          cancelled: true,
+          cancelReason: reason,
+          requestedById: user.id,
+        });
+        printQueued = jobs.length;
+        const failed = jobs.find((j) => j.status === "FAILED" || j.lastError);
+        if (failed?.lastError) printError = failed.lastError;
+        if (!printQueued) printError = printError || "No kitchen printer received the cancel slip";
+      } catch (e) {
+        printError = e instanceof Error ? e.message : "Cancel kitchen slip failed";
+        this.log.warn(`Cancel KOT for #${order.orderNo} failed: ${printError}`);
+      }
+    }
+
+    this.realtime.orderChanged(this.event(updated), "cancelled");
+    return { ...this.toDto(updated, canSeeCost(user)), printQueued, printError };
+  }
+
+  /** Reprint CANCELLED kitchen slip for an already-cancelled order. */
+  async printCancelKot(user: AuthUser, id: string) {
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      include: { items: true },
+    });
+    if (!order) throw new NotFoundException("Order not found");
+    if (order.status !== "CANCELLED") {
+      throw new BadRequestException("Only cancelled orders can print a cancel kitchen slip");
+    }
+    const hasKitchen = order.items.some((i) => i.lineKind !== "PER_HEAD");
+    if (!hasKitchen) throw new BadRequestException("No kitchen items on this order");
+    const jobs = await this.print.enqueueKot(id, {
+      cancelled: true,
+      cancelReason: order.cancelReason,
+      requestedById: user.id,
+    });
+    return {
+      queued: jobs.length,
+      jobs: jobs.map((j) => ({ id: j.id, status: j.status, error: j.lastError })),
+    };
+  }
+
   /** Main cashier: change quantities (0 = remove) on unpaid orders. */
   async editItems(user: AuthUser, id: string, dto: EditOrderDto) {
     if (!user.permissions.includes("order.edit")) {
@@ -454,8 +559,10 @@ export class OrdersService {
   async pay(user: AuthUser, id: string, dto: PayOrderDto) {
     const order = await this.prisma.order.findUnique({ where: { id } });
     if (!order) throw new NotFoundException("Order not found");
+    if (order.status === "CANCELLED" || order.paymentStatus === "VOID") {
+      throw new BadRequestException("Cancelled orders cannot be paid");
+    }
     if (order.paymentStatus === "PAID") throw new BadRequestException("Bill is already paid");
-    if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
     if (order.creditCustomerId) {
       throw new BadRequestException("This bill is on a credit account. Clear it from Credit Customers");
     }
@@ -832,6 +939,32 @@ export class OrdersService {
     }
   }
 
+  /** Put back ingredients deducted as SALE when the whole order is cancelled. */
+  private async restoreStockForOrder(orderId: string, orderNo: number) {
+    const moves = await this.prisma.stockMovement.findMany({
+      where: { orderId, type: "SALE" },
+    });
+    for (const m of moves) {
+      const qty = toNumber(m.quantity);
+      if (qty >= 0) continue; // SALE rows are negative
+      const restore = -qty;
+      await this.prisma.storeItem.update({
+        where: { id: m.storeItemId },
+        data: { quantityOnHand: { increment: restore } },
+      });
+      await this.prisma.stockMovement.create({
+        data: {
+          storeItemId: m.storeItemId,
+          type: "ADJUST",
+          quantity: restore,
+          ratePerUnit: m.ratePerUnit,
+          note: `Order #${orderNo} · cancelled`,
+          orderId,
+        },
+      });
+    }
+  }
+
   private async resolveCreditCustomer(user: AuthUser, id: string, takeaway = false) {
     if (!user.permissions.includes("order.pay")) {
       throw new ForbiddenException("Only a cashier can put a table on credit");
@@ -893,12 +1026,16 @@ export class OrdersService {
       assignedCashier: this.staffDto(o.assignedCashier),
       servedBy: o.servedByName,
       servedByName: o.servedByName,
+      cancelReason: o.cancelReason,
+      cancelledAt: o.cancelledAt,
+      cancelledBy: this.staffDto(o.cancelledBy),
       creditCustomer: o.creditCustomer
         ? { id: o.creditCustomer.id, name: o.creditCustomer.name, phone: o.creditCustomer.phone }
         : null,
       kotRounds: o.kotRounds,
       billRequestedAt: o.billRequestedAt,
       createdAt: o.createdAt,
+      updatedAt: o.updatedAt,
       tipShares: o.tipShares.map((s) => ({
         userId: s.userId,
         name: s.user.name,

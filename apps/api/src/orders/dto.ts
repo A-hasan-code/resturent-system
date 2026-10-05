@@ -8,6 +8,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  MaxLength,
   Min,
   ValidateIf,
   ValidateNested,
@@ -183,4 +184,10 @@ export class UpdateOrderDto {
 export class UpdateStatusDto {
   @IsEnum(OrderStatus)
   status!: OrderStatus;
+}
+
+export class CancelOrderDto {
+  @IsString()
+  @MaxLength(200)
+  reason!: string;
 }

@@ -16,6 +16,7 @@ import { IsBoolean, IsInt, IsOptional, IsString, MaxLength, Min } from "class-va
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
 import { RequirePerms } from "../common/decorators";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { toNumber } from "../common/units";
 
@@ -48,10 +49,10 @@ class UpdateTableDto {
 }
 
 /** Cash bills keep the table until paid. A credit meal frees the table once the guest has left (order completed). */
-export const OPEN_ORDER_WHERE = {
-  status: { not: "CANCELLED" as const },
-  paymentStatus: { not: "PAID" as const },
-  OR: [{ creditCustomerId: null }, { status: { not: "COMPLETED" as const } }],
+export const OPEN_ORDER_WHERE: Prisma.OrderWhereInput = {
+  status: { not: "CANCELLED" },
+  paymentStatus: { in: ["UNPAID", "PARTIAL"] },
+  OR: [{ creditCustomerId: null }, { status: { not: "COMPLETED" } }],
 };
 
 export function tableLabel(partitionName: string | null | undefined, tableName: string) {

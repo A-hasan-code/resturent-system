@@ -10,6 +10,7 @@ export type PayTarget = {
   id: string;
   orderNo: number;
   tableNo?: string | null;
+  status?: string;
   total: number;
   discountAmount?: number;
   paidAmount?: number;
@@ -79,6 +80,9 @@ export function PayModal({
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!order) return;
+    if (order.status === "CANCELLED" || order.paymentStatus === "VOID") {
+      return toast.push(t("bills.payCancelledBlocked"), "err");
+    }
     const value = Number(amount);
     const tipValue = Math.max(0, Number(tip) || 0);
     if (due > 0 && !(value > 0) && tipValue <= 0) return toast.push(t("pay.enterAmount"), "err");

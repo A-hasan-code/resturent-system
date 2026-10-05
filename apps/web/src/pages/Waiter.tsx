@@ -10,6 +10,7 @@ import { PayModal } from "../components/PayModal";
 import { PickServerModal } from "../components/PickServerModal";
 import { PickCashierModal } from "../components/PickCashierModal";
 import { EditBillForm, serverNames, withCurrent, type EditBillMeta, type EditBillPerson } from "../components/EditBillForm";
+import { usePrompt } from "../components/ConfirmModal";
 import { MessageKey, useI18n, useT } from "../i18n";
 
 type OrderSummary = {
@@ -141,6 +142,7 @@ export function WaiterPage() {
   const toast = useToast();
   const t = useT();
   const { ts } = useI18n();
+  const askPrompt = usePrompt();
   const [previewFirst, setPreviewFirst] = useKotPreviewPref(user);
   const [kot, setKot] = useState<KotTarget | null>(null);
   const closeKot = useCallback(() => setKot(null), []);
@@ -165,6 +167,7 @@ export function WaiterPage() {
   const [editMeta, setEditMeta] = useState<EditBillMeta | null>(null);
   const [editStaff, setEditStaff] = useState<EditBillPerson[]>([]);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [perHead, setPerHead] = useState<PerHeadCfg | null>(null);
   const [creditOn, setCreditOn] = useState(false);
   const [creditPick, setCreditPick] = useState<{ id: string; name: string; phone: string } | null>(null);
@@ -586,6 +589,49 @@ export function WaiterPage() {
     }
   }
 
+  async function cancelOrder() {
+    if (!order || !can("order.edit")) return;
+    if (order.paymentStatus === "PAID" || order.status === "CANCELLED") return;
+    const reason = await askPrompt({
+      title: t("bills.cancelConfirmTitle"),
+      body: t("bills.cancelConfirmBody", { n: order.orderNo }),
+      confirmLabel: t("bills.cancelConfirm"),
+      danger: true,
+      inputLabel: t("bills.cancelReason"),
+      inputPlaceholder: t("bills.cancelReasonPh"),
+      inputRequired: true,
+      inputMaxLength: 200,
+    });
+    if (!reason) return;
+    setCancelling(true);
+    try {
+      const res = await api<Order & { printQueued?: number; printError?: string | null }>(
+        `/orders/${order.id}/cancel`,
+        {
+          method: "POST",
+          body: JSON.stringify({ reason }),
+        },
+      );
+      if ((res.printQueued ?? 0) > 0) {
+        toast.push(t("bills.cancelled", { n: res.orderNo }), "ok");
+      } else {
+        toast.push(
+          res.printError
+            ? `${t("bills.cancelledNoPrint", { n: res.orderNo })} — ${res.printError}`
+            : t("bills.cancelledNoPrint", { n: res.orderNo }),
+          "err",
+        );
+      }
+      setEditing(false);
+      void loadTables();
+      back();
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("bills.cancelFailed"), "err");
+    } finally {
+      setCancelling(false);
+    }
+  }
+
   async function reprint(round?: number) {
     if (!order) return;
     if (previewFirst) {
@@ -867,7 +913,7 @@ export function WaiterPage() {
                 <h3 style={{ margin: 0 }}>
                   {rounds.length ? t("waiter.sentKitchen") : t("waiter.billCharges")}
                 </h3>
-                {can("order.edit") && order && order.paymentStatus !== "PAID" && (
+                {can("order.edit") && order && order.paymentStatus !== "PAID" && order.status !== "CANCELLED" && (
                   editing ? (
                     <div className="row" style={{ gap: "0.35rem" }}>
                       <button type="button" className="btn sm" disabled={savingEdit} onClick={() => void saveEdit()}>
@@ -878,13 +924,23 @@ export function WaiterPage() {
                       </button>
                     </div>
                   ) : (
-                    <button
-                      type="button"
-                      className="btn ghost sm"
-                      onClick={() => void startBillEdit()}
-                    >
-                      {t("bills.editOrder")}
-                    </button>
+                    <div className="row" style={{ gap: "0.35rem" }}>
+                      <button
+                        type="button"
+                        className="btn ghost sm"
+                        onClick={() => void startBillEdit()}
+                      >
+                        {t("bills.editOrder")}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn danger sm"
+                        disabled={cancelling || (order.paidAmount ?? 0) > 0}
+                        onClick={() => void cancelOrder()}
+                      >
+                        {cancelling ? t("common.saving") : t("bills.cancelOrder")}
+                      </button>
+                    </div>
                   )
                 )}
               </div>
@@ -1176,6 +1232,7 @@ export function WaiterPage() {
           )}
           {order &&
             order.paymentStatus !== "PAID" &&
+            order.status !== "CANCELLED" &&
             ((isCashierRole && can("print.bill")) || can("order.pay")) && (
             <div className="row" style={{ marginTop: "0.6rem" }}>
               {/* Bill thermal print = cashier counter only; supervisor uses Request bill. */}

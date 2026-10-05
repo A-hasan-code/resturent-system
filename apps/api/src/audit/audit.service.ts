@@ -298,7 +298,7 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
 
     for (const o of orders) {
       const day = bucket(o.createdAt);
-      if (o.status === "CANCELLED") {
+      if (o.status === "CANCELLED" || o.paymentStatus === "VOID") {
         cancelled += 1;
         if (day) day.cancelled += 1;
         continue;
@@ -328,7 +328,7 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
           day.stockUsed += cost;
           day.profit = Math.round((day.sales - day.stockUsed) * 100) / 100;
         }
-      } else {
+      } else if (o.paymentStatus === "UNPAID" || o.paymentStatus === "PARTIAL") {
         unpaidCount += 1;
         unpaidAmount += Math.max(0, total - toNumber(o.paidAmount));
       }

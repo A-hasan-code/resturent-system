@@ -8,9 +8,9 @@ import { AuthUser } from "../common/decorators";
 import { CreditCustomerDto } from "./dto";
 import { RealtimeService } from "../realtime/realtime.service";
 
-const openCredit = {
-  status: { not: "CANCELLED" as const },
-  paymentStatus: { not: "PAID" as const },
+const openCredit: Prisma.OrderWhereInput = {
+  status: { not: "CANCELLED" },
+  paymentStatus: { in: ["UNPAID", "PARTIAL"] },
 };
 
 function clean(value?: string | null) {

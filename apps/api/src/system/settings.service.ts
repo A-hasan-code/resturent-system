@@ -64,6 +64,11 @@ export class SettingsService {
     return installBundledAsset("unpaid-stamp.png");
   }
 
+  /** Bundled CANCELLED stamp for kitchen cancel slips. */
+  cancelledStampFilePath(): string | null {
+    return installBundledAsset("cancelled-stamp.png");
+  }
+
   async restaurant() {
     const s = await this.getMany("restaurant.");
     const logo = s["restaurant.logo"] || "";
@@ -160,6 +165,7 @@ function installBundledAsset(fileName: string): string | null {
 try {
   installBundledAsset("paid-stamp.png");
   installBundledAsset("unpaid-stamp.png");
+  installBundledAsset("cancelled-stamp.png");
 } catch {
   /* ignore first-run copy errors */
 }

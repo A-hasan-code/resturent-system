@@ -30,6 +30,12 @@ export type KotPayload = {
   footer?: string;
   /** Absolute path to branding logo file (PNG prints as raster). */
   logoPath?: string | null;
+  /** When true, slip is a kitchen cancel notice (stamp + CANCELLED banner). */
+  cancelled?: boolean;
+  /** Absolute path to CANCELLED stamp PNG. */
+  cancelledStampPath?: string | null;
+  /** Why the order was cancelled (printed on cancel slips). */
+  cancelReason?: string | null;
 };
 
 export type BillDesign = {
@@ -171,6 +177,8 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   const showPhone = p.showPhone !== false;
   const showAddress = p.showAddress !== false;
 
+  const cancelled = !!p.cancelled;
+
   e.align("center");
   if (showLogo && p.logoPath) {
     const img = logoRasterFromFile(p.logoPath, logoMaxDots(paperWidth), { centerOnPaperDots: dots, frame: true });
@@ -183,9 +191,21 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   if (showPhone && p.restaurant?.phone) e.line(p.restaurant.phone);
   if (showAddress && p.restaurant?.address) e.wrapped(p.restaurant.address);
   e.line("");
-  e.bold().line("KITCHEN ORDER").bold(false);
+  e.bold().line(cancelled ? "CANCELLED ORDER" : "KITCHEN ORDER").bold(false);
   if (p.station) e.line(`[ ${p.station} ]`);
-  if (p.reprint) e.bold().line("*** REPRINT ***").bold(false);
+  if (cancelled) {
+    e.bold().big().line("*** CANCELLED ***").big(false).bold(false);
+    const stampImg = p.cancelledStampPath
+      ? logoRasterFromFile(p.cancelledStampPath, stampMaxDots(paperWidth), {
+          centerOnPaperDots: dots,
+          maxHeight: stampMaxDots(paperWidth),
+        })
+      : null;
+    if (stampImg) e.raster(stampImg, "[CANCELLED STAMP]");
+    else e.bold().line("*** ORDER CANCELLED ***").bold(false);
+  } else if (p.reprint) {
+    e.bold().line("*** REPRINT ***").bold(false);
+  }
   e.align("left").line("");
 
   e.pair(`Date: ${datePart(p.time)}`, `Time: ${timePart(p.time)}`);
@@ -194,7 +214,7 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   if (partition) e.line(`Partition: ${partition}`);
   if (table || p.tableNo) e.line(`Table: ${table || p.tableNo}`);
   e.align("center").inverse(true).bold().line(` Table No. ${tableLabel} `).bold(false).inverse(false).align("left");
-  if (p.round) e.align("center").bold().line(`Round ${p.round}`).bold(false).align("left");
+  if (p.round && !cancelled) e.align("center").bold().line(`Round ${p.round}`).bold(false).align("left");
 
   e.rule("-");
   const qtyWidth = e.cols <= 32 ? 9 : 10;
@@ -214,7 +234,7 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   e.rule("-");
 
   if (p.notes) e.wrapped(`Note: ${p.notes}`).rule("-");
-  if (p.round && p.round > 1) {
+  if (!cancelled && p.round && p.round > 1) {
     e.align("center").bold().line(`** NEW ITEMS (Round ${p.round}) **`).bold(false).align("left");
   }
 
@@ -223,7 +243,16 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   if (showBy && takenBy) e.line(`Order taken by: ${takenBy}`);
   if (p.servedBy) e.line(`Served by: ${p.servedBy}`);
 
-  e.align("center").line("*** Kitchen copy - no prices ***");
+  if (cancelled) {
+    if (p.cancelReason) {
+      e.align("left").wrapped(`Reason: ${p.cancelReason}`).rule("-");
+    }
+    e.align("center").line("");
+    e.bold().line("*** DO NOT PREPARE ***").bold(false);
+    e.line("*** Kitchen cancel notice ***");
+  } else {
+    e.align("center").line("*** Kitchen copy - no prices ***");
+  }
   if (p.footer) e.wrapped(p.footer);
   return e.feed(4).beep().cut();
 }

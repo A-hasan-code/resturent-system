@@ -12,7 +12,16 @@ import { OrdersService } from "./orders.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
-import { AddItemsDto, CreateOrderDto, EditOrderDto, PayOrderDto, PrintKotDto, UpdateOrderDto, UpdateStatusDto } from "./dto";
+import {
+  AddItemsDto,
+  CancelOrderDto,
+  CreateOrderDto,
+  EditOrderDto,
+  PayOrderDto,
+  PrintKotDto,
+  UpdateOrderDto,
+  UpdateStatusDto,
+} from "./dto";
 
 @Controller("orders")
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -58,6 +67,18 @@ export class OrdersController {
   @RequirePerms("order.edit")
   editItems(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: EditOrderDto) {
     return this.orders.editItems(user, id, dto);
+  }
+
+  @Post(":id/cancel")
+  @RequirePerms("order.edit")
+  cancel(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: CancelOrderDto) {
+    return this.orders.cancel(user, id, dto);
+  }
+
+  @Post(":id/print-cancel-kot")
+  @RequirePerms("order.edit", "print.kot")
+  printCancelKot(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    return this.orders.printCancelKot(user, id);
   }
 
   @Patch(":id")

@@ -27,6 +27,8 @@ enum PaymentStatus {
   UNPAID
   PAID
   PARTIAL
+  /// Cancelled order — never unpaid / payable / open-table.
+  VOID
 }
 
 enum StockMoveType {
@@ -221,6 +223,7 @@ model User {
   orders            Order[]     @relation("OrderCashier")
   waiterOrders      Order[]     @relation("OrderWaiter")
   assignedOrders    Order[]     @relation("OrderAssignedCashier")
+  cancelledOrders   Order[]     @relation("OrderCancelledBy")
   itemsAdded        OrderItem[] @relation("OrderItemAddedBy")
   paymentsCollected Payment[]   @relation("PaymentCollectedBy")
   cashReceived      Payment[]   @relation("PaymentHandedTo")
@@ -478,6 +481,11 @@ model Order {
   servedByName  String?
   kotRounds     Int             @default(1)
   billRequestedAt DateTime?
+  /// Why the Main Cashier cancelled (required on cancel).
+  cancelReason  String?
+  cancelledAt   DateTime?
+  cancelledById String?
+  cancelledBy   User?           @relation("OrderCancelledBy", fields: [cancelledById], references: [id])
   /// Set when the meal is on a credit account. Cash is collected later, in one settlement.
   creditCustomerId String?
   creditCustomer   CreditCustomer? @relation(fields: [creditCustomerId], references: [id])
@@ -493,6 +501,7 @@ model Order {
   @@index([tableId])
   @@index([waiterId])
   @@index([creditCustomerId])
+  @@index([cancelledAt])
 }
 
 /// One payment taken for an order. Staff without a cash drawer (managers) hand the cash

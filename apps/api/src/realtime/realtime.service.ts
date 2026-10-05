@@ -16,7 +16,7 @@ export class RealtimeService {
 
   orderChanged(o: OrderEvent, reason: string) {
     this.gw.emit(ROOM.all, "orders.changed", { ...o, reason });
-    if (reason === "created" || reason === "items-added") {
+    if (reason === "created" || reason === "items-added" || reason === "cancelled") {
       this.gw.emit(ROOM.kitchen, "kitchen.new", { ...o, reason });
     }
     if (o.status === "READY" && reason === "status") {

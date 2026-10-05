@@ -1,6 +1,14 @@
-# Hotel System v1.3.2 — Release Notes
+# Hotel System v1.4.0 — Release Notes
 
-**Date:** 2026-10-05
+**Date:** 2026-10-05  
+**Targets:** Windows installer + Desktop (Electron) + Android APK + Web/PWA
+
+### v1.4.0
+- **Expenses:** Hotel expenses tracking with day close and net profit on the dashboard.
+- **Credit:** Customer credit sales and repayment flow.
+- **Billing:** Bill edit; out-of-stock handling on orders.
+- **Inventory / Store:** Purchasing and inventory UI/design improvements.
+- **Clients:** Full package — web, desktop app, and Android APK bundled in the release.
 
 ### v1.3.2
 - **UI:** Mobile/tablet responsive alignment — waiter cart, bills toolbar, audit/settings tables, purchase lines, credit list, close-report meta.
@@ -67,7 +75,7 @@ See `INDUSTRIAL-SETUP.md` and `README.txt` in the release folder.
 
 | File | Purpose |
 |------|---------|
-| `HotelSystem-Setup-1.3.0.exe` | Offline installer (required) |
+| `HotelSystem-Setup-1.4.0.exe` | Offline installer (required) |
 | `hotel-system.apk` | Android app (if present in this package) |
 | `README.txt` | Short client install sheet |
 | `INDUSTRIAL-SETUP.md` | Main server + counter printers guide |

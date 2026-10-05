@@ -24,7 +24,15 @@ const TICK_MS = 1000;
 /** Agent claimed a job but never finished — return to queue. */
 const AGENT_STALE_MS = 60_000;
 
-type KotOptions = { round?: number; reprint?: boolean; requestedById?: string | null };
+type KotOptions = {
+  round?: number;
+  reprint?: boolean;
+  /** Full-order cancel slip with CANCELLED stamp for the kitchen. */
+  cancelled?: boolean;
+  /** Shown on the cancel kitchen slip. */
+  cancelReason?: string | null;
+  requestedById?: string | null;
+};
 
 @Injectable()
 export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -67,8 +75,9 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     const printers = await this.prisma.printer.findMany({ where: { active: true, printsKot: true } });
     if (!printers.length) return [await this.noPrinterJob("KOT", orderId, opts.requestedById, kot.orderNo)];
 
-    // Reprint with no round → full order; otherwise only that round's lines.
-    const printItems = opts.round == null && opts.reprint ? kot.allItems : kot.roundItems;
+    // Cancel / full reprint → all kitchen lines; otherwise only that round's lines.
+    const printItems =
+      opts.cancelled || (opts.round == null && opts.reprint) ? kot.allItems : kot.roundItems;
     if (!printItems.length) return [];
 
     type KotLine = (typeof printItems)[number];
@@ -179,6 +188,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       logoUrl: brandingPublicUrl(this.settings.logoFilePath()),
       paidStampUrl: null,
       unpaidStampUrl: null,
+      cancelledStampUrl: "/branding/cancelled-stamp.png",
     };
   }
 
@@ -217,10 +227,13 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     });
     if (!order) throw new NotFoundException("Order not found");
     // Cover charge / per-head is bill-only — never on kitchen slips.
-    const kitchenRows = order.items.filter((i) => i.lineKind !== "PER_HEAD" && i.menuItem);
+    // Cancel slips still print food lines even if the menu item was later removed.
+    const kitchenRows = order.items.filter((i) =>
+      i.lineKind !== "PER_HEAD" && (opts.cancelled || !!i.menuItem),
+    );
     const mapItem = (i: (typeof kitchenRows)[number]) => ({
-      category: (i.menuItem!.category || "General").toLowerCase(),
-      station: i.menuItem!.kitchenStation.toLowerCase(),
+      category: (i.menuItem?.category || "General").toLowerCase(),
+      station: (i.menuItem?.kitchenStation || "COOKING").toLowerCase(),
       takenBy: staffLabel(i.addedBy ?? order.waiter),
       line: {
         name: i.name,
@@ -233,12 +246,14 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     const allItems = kitchenRows.map(mapItem);
     const round = opts.round ?? order.kotRounds;
     const roundItems = kitchenRows.filter((i) => i.kotRound === round).map(mapItem);
-    if (!(opts.round ? roundItems : allItems).length) throw new BadRequestException("No items to print");
+    const printable = opts.cancelled || !opts.round ? allItems : roundItems;
+    if (!printable.length) throw new BadRequestException("No items to print");
 
     const restaurant = await this.settings.restaurant();
     const time = new Date().toISOString();
     const kotOpts = await this.tips.printKotOpts();
     const billOpts = await this.tips.printBillOpts();
+    const cancelled = !!opts.cancelled;
 
     return {
       orderNo: order.orderNo,
@@ -258,11 +273,16 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
           waiter: order.waiter?.name ?? null,
           takenBy: takers.length ? takers.join(", ") : null,
           servedBy: order.servedByName || null,
-          round: opts.round ?? null,
-          reprint: !!opts.reprint,
+          round: cancelled ? null : opts.round ?? null,
+          reprint: cancelled ? false : !!opts.reprint,
+          cancelled,
+          cancelledStampPath: cancelled ? this.settings.cancelledStampFilePath() : null,
+          cancelReason: cancelled
+            ? (opts.cancelReason || order.cancelReason || null)
+            : null,
           station,
           time,
-          notes: opts.round && opts.round > 1 ? null : order.notes,
+          notes: !cancelled && opts.round && opts.round > 1 ? null : order.notes,
           items: mine.map((i) => i.line),
           showOrderBy: kotOpts.showOrderBy,
           showLogo: billOpts.showLogo,
