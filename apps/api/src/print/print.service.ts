@@ -14,7 +14,7 @@ import { ServerIdentityService } from "../system/server-identity.service";
 import { RealtimeService } from "../realtime/realtime.service";
 import { toNumber } from "../common/units";
 import { TipService } from "../system/tip.service";
-import { BillPayload, KotPayload, renderBill, renderKot, renderTest, TestPayload } from "./receipts";
+import { BillEditConfirmPayload, BillPayload, KotPayload, renderBill, renderBillEditConfirm, renderKot, renderTest, TestPayload } from "./receipts";
 import { sendToNetworkPrinter, sendToWindowsPrinter, writePreviewFile } from "./drivers";
 import { splitTableLabel } from "./table-label";
 
@@ -195,11 +195,26 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   /** Exact customer-bill bytes as plain text — same payload path as thermal print. */
   async previewBill(orderId: string) {
     const payload = await this.loadBillPayload(orderId);
-    const printer = await this.prisma.printer.findFirst({
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: {
+        cashierId: true,
+        assignedCashierId: true,
+        assignedCashier: { select: { billPrinterId: true } },
+        cashier: { select: { billPrinterId: true } },
+      },
+    });
+    const printers = await this.prisma.printer.findMany({
       where: { active: true, printsBill: true },
+      select: { id: true, kind: true, paperWidth: true },
       orderBy: { createdAt: "asc" },
     });
-    const paperWidth = printer?.paperWidth ?? 80;
+    const printerId = await this.resolveBillPrinterId(
+      printers,
+      order?.cashierId ?? null,
+      order?.assignedCashier?.billPrinterId ?? order?.cashier?.billPrinterId ?? null,
+    );
+    const paperWidth = printers.find((p) => p.id === printerId)?.paperWidth ?? printers[0]?.paperWidth ?? 80;
     return {
       text: renderBill(payload, paperWidth).plain(),
       paperWidth,
@@ -313,6 +328,71 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     return [await this.createJob("BILL", printerId, payload, orderId, requestedById)];
   }
 
+  /** Cashier confirmation slip after a paid bill edit (reason + before/after amounts). */
+  async enqueueBillEditConfirm(editId: string, requestedById?: string | null) {
+    const edit = await this.prisma.orderBillEdit.findUniqueOrThrow({
+      where: { id: editId },
+      include: {
+        order: {
+          select: {
+            id: true,
+            orderNo: true,
+            tableNo: true,
+            assignedCashier: { select: { billPrinterId: true } },
+            table: { include: { partition: { select: { name: true } } } },
+          },
+        },
+      },
+    });
+    const printers = await this.prisma.printer.findMany({ where: { active: true, printsBill: true } });
+    if (!printers.length) {
+      return [await this.noPrinterJob("BILL_EDIT", edit.order.id, requestedById, edit.order.orderNo)];
+    }
+    const printerId = await this.resolveBillPrinterId(
+      printers,
+      requestedById,
+      edit.order.assignedCashier?.billPrinterId ?? null,
+    );
+    const billOpts = await this.tips.printBillOpts();
+    const restaurant = await this.settings.restaurant();
+    const items = Array.isArray(edit.itemsJson)
+      ? (edit.itemsJson as Array<{
+          name: string;
+          beforeQty: number;
+          afterQty: number;
+          beforeAmount: number;
+          afterAmount: number;
+        }>)
+      : [];
+    const payload: BillEditConfirmPayload = {
+      restaurant: {
+        name: restaurant.name,
+        tagline: restaurant.tagline,
+        address: restaurant.address,
+        phone: restaurant.phone,
+      },
+      logoPath: this.settings.logoFilePath(),
+      orderNo: edit.order.orderNo,
+      billNo: edit.order.orderNo,
+      tableNo: edit.order.tableNo,
+      partitionName: edit.order.table?.partition?.name ?? null,
+      tableName: edit.order.table?.name ?? null,
+      time: edit.createdAt.toISOString(),
+      reason: edit.reason,
+      beforeTotal: toNumber(edit.beforeTotal),
+      afterTotal: toNumber(edit.afterTotal),
+      beforeNet: toNumber(edit.beforeNet),
+      afterNet: toNumber(edit.afterNet),
+      editedBy: edit.editedByName,
+      items,
+      showLogo: billOpts.showLogo,
+      showName: billOpts.showName,
+      showPhone: billOpts.showPhone,
+      showAddress: billOpts.showAddress,
+    };
+    return [await this.createJob("BILL_EDIT", printerId, payload, edit.order.id, requestedById)];
+  }
+
   private async loadBillPayload(orderId: string): Promise<BillPayload> {
     const order = await this.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
@@ -320,7 +400,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
         items: { orderBy: { createdAt: "asc" } },
         waiter: { select: { name: true, role: { select: { name: true } } } },
         cashier: { select: { name: true } },
-        creditCustomer: { select: { name: true } },
+        creditCustomer: { select: { name: true, phone: true, address: true } },
         payments: { select: { collectedBy: { select: { name: true } } } },
         table: { include: { partition: { select: { name: true } } } },
       },
@@ -343,6 +423,8 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       partitionName: order.table?.partition?.name ?? null,
       tableName: order.table?.name ?? null,
       creditName: order.creditCustomer?.name ?? null,
+      creditPhone: order.creditCustomer?.phone ?? null,
+      creditAddress: order.creditCustomer?.address ?? null,
       cashier,
       waiter: order.waiter?.name ?? null,
       orderedBy: staffLabel(order.waiter),
@@ -456,7 +538,15 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   async preview(jobId: string) {
     const job = await this.prisma.printJob.findUnique({ where: { id: jobId }, include: { printer: true } });
     if (!job) throw new NotFoundException("Print job not found");
-    return { text: this.render(job, job.printer?.paperWidth ?? 80).plain() };
+    const paperWidth = job.printer?.paperWidth ?? 80;
+    return {
+      text: this.render(job, paperWidth).plain(),
+      paperWidth,
+      logoUrl: brandingPublicUrl(this.settings.logoFilePath()),
+      paidStampUrl: "/branding/paid-stamp.png",
+      unpaidStampUrl: "/branding/unpaid-stamp.png",
+      cancelledStampUrl: "/branding/cancelled-stamp.png",
+    };
   }
 
   // ---------- worker ----------
@@ -658,6 +748,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     const p = job.payload as unknown;
     if (job.type === "KOT") return renderKot(p as KotPayload, paperWidth);
     if (job.type === "BILL") return renderBill(p as BillPayload, paperWidth);
+    if (job.type === "BILL_EDIT") return renderBillEditConfirm(p as BillEditConfirmPayload, paperWidth);
     return renderTest(p as TestPayload, paperWidth);
   }
 
@@ -671,7 +762,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   private createJob(
     type: PrintJob["type"],
     printerId: string,
-    payload: KotPayload | BillPayload | TestPayload,
+    payload: KotPayload | BillPayload | BillEditConfirmPayload | TestPayload,
     orderId: string | null,
     requestedById?: string | null
   ) {
@@ -687,7 +778,10 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   private async noPrinterJob(type: PrintJob["type"], orderId: string, requestedById: string | null | undefined, orderNo: number) {
-    const error = type === "KOT" ? "No kitchen printer set up (Settings → Printers)" : "No bill printer set up (Settings → Printers)";
+    const error =
+      type === "KOT"
+        ? "No kitchen printer set up (Settings → Printers)"
+        : "No bill printer set up (Settings → Printers)";
     const job = await this.prisma.printJob.create({
       data: { type, orderId, status: "FAILED", lastError: error, payload: {}, requestedById: requestedById ?? null },
     });

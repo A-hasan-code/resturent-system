@@ -37,6 +37,9 @@ const K_PORT = "hotel.port";
 const PROBE_TIMEOUT_MS = 1500;
 const SCAN_CONCURRENCY = 48;
 const RETRY_MS = 4000;
+/** Short blips reconnect; after this long offline, clients must log in again. */
+const OFFLINE_SESSION_MS = 5 * 60 * 1000;
+const RELOGIN_REASON_KEY = "hotel:reloginReason";
 
 const envBase = import.meta.env.VITE_API_URL as string | undefined;
 
@@ -45,6 +48,8 @@ const statusListeners = new Set<(s: ConnStatus) => void>();
 const originListeners = new Set<(origin: string) => void>();
 let searching: Promise<boolean> | null = null;
 let progress = "";
+let offlineSince: number | null = null;
+let offlineExpireTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** "" means same origin as the page. */
 export function serverOrigin(): string {
@@ -79,8 +84,43 @@ export function onServerMoved(fn: (origin: string) => void) {
   return () => originListeners.delete(fn);
 }
 
+function clearOfflineSessionWatch() {
+  offlineSince = null;
+  if (offlineExpireTimer) {
+    clearTimeout(offlineExpireTimer);
+    offlineExpireTimer = null;
+  }
+}
+
+function armOfflineSessionWatch() {
+  if (offlineSince != null) return;
+  offlineSince = Date.now();
+  offlineExpireTimer = setTimeout(() => {
+    offlineExpireTimer = null;
+    if (status === "ok") return;
+    // Still offline after threshold — force re-login (token cleared by AuthProvider).
+    try {
+      sessionStorage.setItem(RELOGIN_REASON_KEY, "offline");
+    } catch {
+      /* ignore */
+    }
+    window.dispatchEvent(new Event("hotel:session-expired"));
+  }, OFFLINE_SESSION_MS);
+}
+
+/** Ms since connection was lost; null when online. */
+export function offlineForMs() {
+  return offlineSince == null ? null : Math.max(0, Date.now() - offlineSince);
+}
+
+export function offlineSessionLimitMs() {
+  return OFFLINE_SESSION_MS;
+}
+
 function setStatus(s: ConnStatus) {
   if (status === s) return;
+  if (s === "ok") clearOfflineSessionWatch();
+  else armOfflineSessionWatch();
   status = s;
   statusListeners.forEach((fn) => fn(s));
 }

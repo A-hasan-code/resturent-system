@@ -42,10 +42,13 @@ const ROLE_PERMS: Record<string, string[]> = {
     "payments.view",
     "reports.view",
     "bill.view",
+    "order.edit",
     "expense.view",
     "expense.manage",
     "menu.view",
+    "menu.manage",
     "store.view",
+    "store.manage",
   ],
   SUPERVISOR: [
     "order.create",
@@ -110,6 +113,7 @@ const SETTINGS: Record<string, string> = {
   "billing.perHeadEnabled": "1",
   "billing.perHeadAmount": "100",
   "billing.perHeadLabel": "Per head",
+  "billing.perHeadPackage": "[]",
 };
 
 type StoreDef = {
@@ -191,7 +195,62 @@ type MenuSeed = {
   unit: UnitType;
   price: number;
   recipeKey?: string;
+  minQty?: number;
+  maxQty?: number | null;
+  qtyStep?: number | null;
+  allowCustomQty?: boolean;
 };
+
+const PCS_FIXED: Pick<MenuSeed, "minQty" | "qtyStep" | "allowCustomQty" | "maxQty"> = {
+  minQty: 1,
+  qtyStep: 1,
+  allowCustomQty: false,
+  maxQty: null,
+};
+
+/** Half band by weight: custom from 225g up to 1 kg. Price = per KG (0.5 kg ≈ card half). */
+function halfKg(
+  name: string,
+  category: string,
+  station: KitchenStation,
+  pricePerKg: number,
+  recipeKey?: string
+): MenuSeed {
+  return {
+    name: `${name} (Half)`,
+    category,
+    station,
+    unit: UnitType.KG,
+    price: pricePerKg,
+    recipeKey,
+    minQty: 0.225,
+    maxQty: 1,
+    qtyStep: 0.025,
+    allowCustomQty: true,
+  };
+}
+
+/** Full band by weight: from 1 kg upward in 0.5 kg steps. */
+function fullKg(
+  name: string,
+  category: string,
+  station: KitchenStation,
+  pricePerKg: number,
+  recipeKey?: string
+): MenuSeed {
+  return {
+    name: `${name} (Full)`,
+    category,
+    station,
+    unit: UnitType.KG,
+    price: pricePerKg,
+    recipeKey,
+    minQty: 1,
+    maxQty: null,
+    qtyStep: 0.5,
+    allowCustomQty: true,
+  };
+}
 
 /** Bowl / plate portions (not weight) — keep as separate PCS lines. */
 function halfFull(
@@ -202,12 +261,12 @@ function halfFull(
   full: number
 ): MenuSeed[] {
   return [
-    { name: `${base} (Half)`, category, station, unit: UnitType.PCS, price: half },
-    { name: `${base} (Full)`, category, station, unit: UnitType.PCS, price: full },
+    { name: `${base} (Half)`, category, station, unit: UnitType.PCS, price: half, ...PCS_FIXED },
+    { name: `${base} (Full)`, category, station, unit: UnitType.PCS, price: full, ...PCS_FIXED },
   ];
 }
 
-/** Meat sold by weight: Half = 0.5 KG, Full = 1 KG at the POS. Price = Full / KG. */
+/** Meat sold by weight (single line). Price = per KG. Custom from 0.5 kg unless overridden. */
 function byKg(
   name: string,
   category: string,
@@ -215,22 +274,51 @@ function byKg(
   pricePerKg: number,
   recipeKey?: string
 ): MenuSeed {
-  return { name, category, station, unit: UnitType.KG, price: pricePerKg, recipeKey };
+  return {
+    name,
+    category,
+    station,
+    unit: UnitType.KG,
+    price: pricePerKg,
+    recipeKey,
+    minQty: 0.5,
+    maxQty: null,
+    qtyStep: 0.5,
+    allowCustomQty: true,
+  };
 }
 
 const MENU: MenuSeed[] = [
-  // Live Kitchen
+  // Live Kitchen — fixed PCS (no half/full / no custom grams)
   {
     name: "Mutton Khada Sijji (5hr advance)",
     category: "Live Kitchen",
     station: KitchenStation.COOKING,
     unit: UnitType.PCS,
     price: 4500,
+    ...PCS_FIXED,
   },
-  { name: "Ranjha Goshat", category: "Live Kitchen", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 4500 },
-  { name: "Chicken Khada Sijji", category: "Live Kitchen", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 2000 },
-  byKg("Chicken Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 1800, "chicken_shinwari_karahi"),
-  byKg("Mutton Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 4100),
+  {
+    name: "Ranjha Goshat",
+    category: "Live Kitchen",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 4500,
+    ...PCS_FIXED,
+  },
+  {
+    name: "Chicken Khada Sijji",
+    category: "Live Kitchen",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 2000,
+    ...PCS_FIXED,
+  },
+  // Shinwari: card half/full ≈ 950/1800 & 2200/4100 → per-kg rates on Half/Full lines
+  halfKg("Chicken Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 1900, "chicken_shinwari_karahi"),
+  fullKg("Chicken Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 1800, "chicken_shinwari_karahi"),
+  halfKg("Mutton Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 4400),
+  fullKg("Mutton Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 4100),
   {
     name: "Banu Pulao",
     category: "Live Kitchen",
@@ -238,12 +326,52 @@ const MENU: MenuSeed[] = [
     unit: UnitType.KG,
     price: 1000,
     recipeKey: "bannu_beef_pulao",
+    minQty: 0.5,
+    maxQty: null,
+    qtyStep: 0.5,
+    allowCustomQty: true,
   },
-  { name: "Dam Pukhat", category: "Live Kitchen", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 1000 },
-  { name: "Rosh + Daal", category: "Live Kitchen", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 1500, recipeKey: "mutton_namkeen_rosh" },
-  { name: "Paneer BBQ", category: "Live Kitchen", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 400 },
-  { name: "Beef BBQ", category: "Live Kitchen", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 350 },
-  { name: "Afghani Boti", category: "Live Kitchen", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 200 },
+  {
+    name: "Dam Pukhat",
+    category: "Live Kitchen",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 1000,
+    ...PCS_FIXED,
+  },
+  {
+    name: "Rosh + Daal",
+    category: "Live Kitchen",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 1500,
+    recipeKey: "mutton_namkeen_rosh",
+    ...PCS_FIXED,
+  },
+  {
+    name: "Paneer BBQ",
+    category: "Live Kitchen",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 400,
+    ...PCS_FIXED,
+  },
+  {
+    name: "Beef BBQ",
+    category: "Live Kitchen",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 350,
+    ...PCS_FIXED,
+  },
+  {
+    name: "Afghani Boti",
+    category: "Live Kitchen",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 200,
+    ...PCS_FIXED,
+  },
 
   // Breakfast
   { name: "Plain Paratha", category: "Breakfast & Paratha", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 60 },
@@ -653,6 +781,30 @@ const RECIPES: RecipeDef[] = [
   },
 ];
 
+/** Daily pots sold by plate / Rs from residual batch (linked to cook recipes above). */
+const SPECIAL_PRODUCTS: {
+  name: string;
+  category: string;
+  platePrice: number;
+  plateGrams: number;
+  cookRecipeKey: string;
+}[] = [
+  {
+    name: "Bannu Palao",
+    category: "Pakistani Special",
+    platePrice: 400,
+    plateGrams: 400,
+    cookRecipeKey: "bannu_beef_pulao",
+  },
+  {
+    name: "Mutton Namkeen Rosh",
+    category: "Pakistani Special",
+    platePrice: 550,
+    plateGrams: 350,
+    cookRecipeKey: "mutton_namkeen_rosh",
+  },
+];
+
 async function upsertStoreItem(categoryId: string, def: StoreDef) {
   return prisma.storeItem.upsert({
     where: { categoryId_name: { categoryId, name: def.name } },
@@ -790,14 +942,21 @@ async function seedCatalog() {
     recipeIds[def.key] = row.id;
   }
 
-  // Replace menu with Quetta Sangat catalog (idempotent by name+category)
+  // Upsert demo/catalog menu rows only — never delete or disable restaurant-owned items.
+  // (Older seed versions wiped anything not in MENU; that destroyed live hotel menus.)
   const existingMenu = await prisma.menuItem.findMany({ select: { id: true, name: true, category: true } });
   const byKey = new Map(existingMenu.map((m) => [`${m.category ?? ""}::${m.name}`, m.id]));
-  const keepKeys = new Set(MENU.map((m) => `${m.category}::${m.name}`));
 
   for (const m of MENU) {
     const key = `${m.category}::${m.name}`;
     const recipeId = m.recipeKey ? recipeIds[m.recipeKey] ?? null : null;
+    const pcsDefault = m.unit === UnitType.PCS;
+    const qty = {
+      minQty: m.minQty ?? (pcsDefault ? 1 : 0),
+      maxQty: m.maxQty === undefined ? null : m.maxQty,
+      qtyStep: m.qtyStep === undefined ? (pcsDefault ? 1 : null) : m.qtyStep,
+      allowCustomQty: m.allowCustomQty ?? !pcsDefault,
+    };
     const id = byKey.get(key);
     if (id) {
       await prisma.menuItem.update({
@@ -807,6 +966,7 @@ async function seedCatalog() {
           sellUnit: m.unit,
           sellingPrice: m.price,
           recipeId,
+          ...qty,
           active: true,
         },
       });
@@ -819,34 +979,80 @@ async function seedCatalog() {
           sellUnit: m.unit,
           sellingPrice: m.price,
           recipeId,
+          ...qty,
         },
       });
       byKey.set(key, created.id);
     }
   }
 
-  // Drop old meat Half/Full PCS rows (and any other stale seed names not in MENU)
-  const staleIds = existingMenu
-    .filter((m) => !keepKeys.has(`${m.category ?? ""}::${m.name}`))
-    .map((m) => m.id);
-  if (staleIds.length) {
-    // Soft-disable if referenced by orders; hard-delete unused.
-    const used = new Set(
-      (
-        await prisma.orderItem.findMany({
-          where: { menuItemId: { in: staleIds } },
-          select: { menuItemId: true },
-          distinct: ["menuItemId"],
+  // Special pots (Bannu Palao, Rosh, …) + auto SPECIAL menu rows
+  for (const sp of SPECIAL_PRODUCTS) {
+    const cookRecipeId = recipeIds[sp.cookRecipeKey];
+    if (!cookRecipeId) throw new Error(`Missing cook recipe key: ${sp.cookRecipeKey}`);
+    const existing = await prisma.specialProduct.findUnique({ where: { name: sp.name } });
+    const product = existing
+      ? await prisma.specialProduct.update({
+          where: { id: existing.id },
+          data: {
+            category: sp.category,
+            platePrice: sp.platePrice,
+            plateGrams: sp.plateGrams,
+            cookRecipeId,
+            active: true,
+          },
         })
-      )
-        .map((r) => r.menuItemId)
-        .filter((id): id is string => !!id)
-    );
-    const del = staleIds.filter((id) => !used.has(id));
-    const disable = staleIds.filter((id) => used.has(id));
-    if (del.length) await prisma.menuItem.deleteMany({ where: { id: { in: del } } });
-    if (disable.length) {
-      await prisma.menuItem.updateMany({ where: { id: { in: disable } }, data: { active: false } });
+      : await prisma.specialProduct.create({
+          data: {
+            name: sp.name,
+            category: sp.category,
+            platePrice: sp.platePrice,
+            plateGrams: sp.plateGrams,
+            cookRecipeId,
+          },
+        });
+
+    const menu = await prisma.menuItem.findFirst({
+      where: { specialProductId: product.id, kind: "SPECIAL" },
+      orderBy: { createdAt: "asc" },
+    });
+    if (menu) {
+      await prisma.menuItem.update({
+        where: { id: menu.id },
+        data: {
+          name: product.name,
+          category: product.category,
+          sellingPrice: sp.platePrice,
+          sellUnit: UnitType.PCS,
+          kind: "SPECIAL",
+          specialProductId: product.id,
+          recipeId: null,
+          mixSpecialPlates: null,
+          listPortionQty: 1,
+          active: true,
+          minQty: 1,
+          qtyStep: 1,
+          allowCustomQty: false,
+          kitchenStation: KitchenStation.COOKING,
+        },
+      });
+    } else {
+      await prisma.menuItem.create({
+        data: {
+          name: product.name,
+          category: product.category,
+          kitchenStation: KitchenStation.COOKING,
+          kind: "SPECIAL",
+          sellUnit: UnitType.PCS,
+          sellingPrice: sp.platePrice,
+          listPortionQty: 1,
+          minQty: 1,
+          qtyStep: 1,
+          allowCustomQty: false,
+          specialProductId: product.id,
+          recipeId: null,
+        },
+      });
     }
   }
 
@@ -858,6 +1064,7 @@ async function seedCatalog() {
   return {
     store: STORE_ITEMS.length,
     recipes: RECIPES.length,
+    specials: SPECIAL_PRODUCTS.length,
     menu: MENU.length,
     menuActive,
     menuKg,

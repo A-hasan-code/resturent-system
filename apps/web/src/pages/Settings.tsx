@@ -1,43 +1,19 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { api, uploadApi } from "../api";
+import { api, unitLabel, uploadApi } from "../api";
 import { useAuth } from "../auth";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
 import { useConfirm } from "../components/ConfirmModal";
-import { BillPreview, type BillOrder } from "../components/BillPreview";
+import { SearchField, matchesSearch } from "../components/SearchField";
 import { ThermalPreview } from "../components/ThermalPreview";
 import { Pagination, paginate } from "../components/Pagination";
 import { useSocketEvent } from "../socket";
-import { serverOrigin } from "../server";
+import { serverOrigin, apiBase } from "../server";
 import { applyAccent, THEME_PRESETS, useBrand } from "../brand";
 import { useT, type MessageKey } from "../i18n";
 
 const PAGE_SIZE = 15;
-
-const SAMPLE_BILL: BillOrder = {
-  orderNo: 206,
-  billNo: 206,
-  tableNo: "Roof Top · Table 4",
-  tableName: "Table 4",
-  partitionName: "Roof Top",
-  paymentStatus: "PAID",
-  total: 2785,
-  tipAmount: 0,
-  paidAmount: 2785,
-  createdAt: new Date().toISOString(),
-  cashier: "Cashier",
-  waiter: "Ali",
-  orderedBy: { name: "Ali", roleName: "Waiter" },
-  servedByName: "Hassan",
-  items: [
-    { name: "Beef Karahi Black Pepper (Full)", quantity: 0.75, sellUnit: "KG", ratePerUnit: 2500, amount: 1875 },
-    { name: "Quetta Sangat Special Kheer", quantity: 1, sellUnit: "PCS", ratePerUnit: 150, amount: 150 },
-    { name: "Per Head", quantity: 3, sellUnit: "PCS", ratePerUnit: 120, amount: 360 },
-    { name: "Gur Chaye", quantity: 3, sellUnit: "PCS", ratePerUnit: 100, amount: 300 },
-    { name: "Raita Glass Extra", quantity: 1, sellUnit: "PCS", ratePerUnit: 100, amount: 100 },
-  ],
-};
 
 type ServerInfo = {
   serverId: string;
@@ -84,6 +60,24 @@ type Printer = {
 
 type SystemPrinter = { name: string; driver: string; port: string; status: string; isDefault: boolean };
 
+type UsbDeviceRow = {
+  name: string;
+  className: string;
+  status: string;
+  instanceId: string;
+  problem: boolean;
+};
+
+type PrintAgentRow = {
+  id: string;
+  hostname: string;
+  displayName: string;
+  lastSeenAt: string;
+  online: boolean;
+  printers: { id: string; name: string; target: string; active: boolean; printsBill: boolean; printsKot: boolean }[];
+  devices?: UsbDeviceRow[];
+};
+
 type Job = {
   id: string;
   type: string;
@@ -96,17 +90,6 @@ type Job = {
   createdAt: string;
 };
 
-type Partition = { id: string; name: string; sortOrder: number; active?: boolean };
-type Table = {
-  id: string;
-  name: string;
-  area: string | null;
-  seats: number;
-  sortOrder: number;
-  active: boolean;
-  partitionId?: string;
-  partition?: { id: string; name: string } | null;
-};
 type Backup = { file: string; size: number; createdAt: string; auto: boolean; kind?: "daily" | "monthly" | "manual" | "safety" };
 
 const BACKUP_KIND_KEY: Record<string, MessageKey> = {
@@ -148,7 +131,6 @@ export function SettingsPage() {
       {can("system.manage") && <TipPrintSection />}
       {can("printers.manage") && <PrintersSection />}
       {can("printers.manage") && <JobsSection />}
-      {can("tables.manage") && <TablesSection />}
       {can("system.manage") && <BackupSection />}
     </div>
   );
@@ -599,8 +581,8 @@ function BillDesignSection() {
           </label>
           {d.showPaidStamp ? (
             <div className="paid-stamp-sample" aria-hidden>
-              <img src={brandingUrl("/branding/paid-stamp.png?v=2")} alt="" />
-              <img src={brandingUrl("/branding/unpaid-stamp.png?v=2")} alt="" />
+              <img src={brandingUrl("/branding/paid-stamp.png?v=4")} alt="" />
+              <img src={brandingUrl("/branding/unpaid-stamp.png?v=4")} alt="" />
               <span className="tiny muted">{t("settings.paidStampGraphicHint")}</span>
             </div>
           ) : null}
@@ -667,9 +649,23 @@ function BillDesignSection() {
 }
 
 function brandingUrl(path: string) {
-  const origin = serverOrigin() || (typeof location !== "undefined" ? location.origin : "");
+  const origin =
+    apiBase().replace(/\/api\/?$/, "") ||
+    serverOrigin() ||
+    (typeof location !== "undefined" ? location.origin : "");
   return `${origin}${path.startsWith("/") ? path : `/${path}`}`;
 }
+
+type PerHeadPkgRow = {
+  menuItemId: string;
+  qty: string;
+  /** Order-taker sets qty when adding per head on the bill. */
+  variable: boolean;
+  name?: string;
+  sellUnit?: string;
+};
+
+type MenuPick = { id: string; name: string; sellUnit: string; category?: string | null; kind?: string; active?: boolean };
 
 function TipPrintSection() {
   const toast = useToast();
@@ -680,12 +676,36 @@ function TipPrintSection() {
   const [perHeadEnabled, setPerHeadEnabled] = useState(true);
   const [perHeadAmount, setPerHeadAmount] = useState("100");
   const [perHeadLabel, setPerHeadLabel] = useState("Per head");
+  const [perHeadPackage, setPerHeadPackage] = useState<PerHeadPkgRow[]>([]);
+  const [menuItems, setMenuItems] = useState<MenuPick[]>([]);
+  const [pkgSearch, setPkgSearch] = useState("");
   const [busy, setBusy] = useState(false);
+
+  const usedPkgIds = useMemo(() => new Set(perHeadPackage.map((p) => p.menuItemId).filter(Boolean)), [perHeadPackage]);
+  const pkgSearchHits = useMemo(() => {
+    if (!perHeadEnabled || perHeadPackage.length >= 12) return [];
+    return menuItems
+      .filter((m) => !usedPkgIds.has(m.id) && matchesSearch(pkgSearch, m.name, m.category, m.sellUnit))
+      .slice(0, 12);
+  }, [menuItems, usedPkgIds, pkgSearch, perHeadEnabled, perHeadPackage.length]);
 
   useEffect(() => {
     api<{
       tip: { split: string };
-      billing?: { perHead?: { enabled: boolean; amount: number; label: string } };
+      billing?: {
+        perHead?: {
+          enabled: boolean;
+          amount: number;
+          label: string;
+          items?: {
+            menuItemId: string;
+            name: string;
+            sellUnit: string;
+            qty: number;
+            variable: boolean;
+          }[];
+        };
+      };
       print: {
         kot: { showOrderBy: boolean; footer: string };
       };
@@ -699,8 +719,20 @@ function TipPrintSection() {
           setPerHeadEnabled(ph.enabled !== false);
           setPerHeadAmount(String(ph.amount ?? 100));
           setPerHeadLabel(ph.label || "Per head");
+          setPerHeadPackage(
+            (ph.items ?? []).map((i) => ({
+              menuItemId: i.menuItemId,
+              qty: String(i.qty),
+              variable: !!i.variable,
+              name: i.name,
+              sellUnit: i.sellUnit,
+            }))
+          );
         }
       })
+      .catch(() => undefined);
+    api<MenuPick[]>("/menu")
+      .then((rows) => setMenuItems(rows.filter((m) => m.active !== false)))
       .catch(() => undefined);
   }, []);
 
@@ -709,6 +741,16 @@ function TipPrintSection() {
     setBusy(true);
     try {
       const amount = Math.max(0, Number(perHeadAmount) || 0);
+      const packagePayload = perHeadPackage
+        .filter((p) => p.menuItemId)
+        .map((p) => ({
+          menuItemId: p.menuItemId,
+          qty: Math.max(0.001, Number(p.qty) || 0),
+          variable: !!p.variable,
+        }));
+      if (packagePayload.filter((p) => p.variable).length > 1) {
+        throw new Error(t("settings.perHeadOneVariable"));
+      }
       await api("/system/settings", {
         method: "PATCH",
         body: JSON.stringify({
@@ -718,6 +760,7 @@ function TipPrintSection() {
           perHeadEnabled: perHeadEnabled ? "1" : "0",
           perHeadAmount: amount,
           perHeadLabel: perHeadLabel.trim() || "Per head",
+          perHeadPackage: packagePayload,
         }),
       });
       toast.push(t("settings.saved"), "ok");
@@ -781,6 +824,129 @@ function TipPrintSection() {
       </div>
 
       <h3 className="settings-h" style={{ fontSize: "1rem" }}>
+        {t("settings.perHeadPackage")}
+      </h3>
+      <p className="muted" style={{ marginTop: 0 }}>
+        {t("settings.perHeadPackageHint")}
+      </p>
+      <div style={{ display: "grid", gap: "0.5rem", marginBottom: "0.75rem" }}>
+        {perHeadPackage.map((row, idx) => {
+          const unit =
+            row.sellUnit ||
+            menuItems.find((m) => m.id === row.menuItemId)?.sellUnit ||
+            "PCS";
+          const name = row.name || menuItems.find((m) => m.id === row.menuItemId)?.name || "—";
+          return (
+            <div
+              key={row.menuItemId || `row-${idx}`}
+              className="row"
+              style={{ gap: "0.5rem", flexWrap: "wrap", alignItems: "flex-end" }}
+            >
+              <div className="field" style={{ flex: "1 1 12rem", margin: 0 }}>
+                <label>{t("settings.perHeadPickMenu")}</label>
+                <div className="field-ctrl" style={{ padding: "0.55rem 0.75rem", fontWeight: 600 }}>
+                  {name}
+                  <span className="tiny muted" style={{ marginLeft: "0.4rem", fontWeight: 500 }}>
+                    ({unitLabel(unit)})
+                  </span>
+                </div>
+              </div>
+              <div className="field" style={{ width: "7rem", margin: 0 }}>
+                <label>
+                  {t("settings.perHeadDefaultQty")} ({unitLabel(unit)})
+                </label>
+                <input
+                  type="number"
+                  min={0.001}
+                  step="any"
+                  value={row.qty}
+                  disabled={!perHeadEnabled}
+                  onChange={(e) =>
+                    setPerHeadPackage((prev) =>
+                      prev.map((p, i) => (i === idx ? { ...p, qty: e.target.value } : p))
+                    )
+                  }
+                />
+              </div>
+              <label className="switch-row" style={{ marginBottom: "0.35rem" }}>
+                <input
+                  type="checkbox"
+                  checked={row.variable}
+                  disabled={!perHeadEnabled}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setPerHeadPackage((prev) =>
+                      prev.map((p, i) => ({
+                        ...p,
+                        variable: i === idx ? on : on ? false : p.variable,
+                      }))
+                    );
+                  }}
+                />
+                <span className="tiny">{t("settings.perHeadVariable")}</span>
+              </label>
+              <button
+                type="button"
+                className="btn ghost"
+                disabled={!perHeadEnabled}
+                onClick={() => setPerHeadPackage((prev) => prev.filter((_, i) => i !== idx))}
+                aria-label={t("common.remove")}
+              >
+                ×
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      {perHeadEnabled && perHeadPackage.length < 12 ? (
+        <div style={{ marginBottom: "1rem" }}>
+          <SearchField
+            value={pkgSearch}
+            onChange={setPkgSearch}
+            placeholder={t("settings.perHeadSearchMenu")}
+          />
+          {pkgSearch.trim() ? (
+            <div className="waiter-menu" style={{ marginTop: "0.5rem", maxHeight: "14rem", overflow: "auto" }}>
+              {pkgSearchHits.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className="waiter-item"
+                  onClick={() => {
+                    setPerHeadPackage((prev) => [
+                      ...prev,
+                      {
+                        menuItemId: m.id,
+                        qty: "1",
+                        variable: false,
+                        name: m.name,
+                        sellUnit: m.sellUnit,
+                      },
+                    ]);
+                    setPkgSearch("");
+                  }}
+                >
+                  <strong>{m.name}</strong>
+                  <span className="tiny muted">
+                    {unitLabel(m.sellUnit)}
+                    {m.kind && m.kind !== "NORMAL" ? ` · ${m.kind}` : ""}
+                    {m.category ? ` · ${m.category}` : ""}
+                  </span>
+                </button>
+              ))}
+              {!pkgSearchHits.length ? (
+                <div className="empty">{t("settings.perHeadNoMenuMatch")}</div>
+              ) : null}
+            </div>
+          ) : (
+            <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
+              {t("settings.perHeadSearchHint")}
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      <h3 className="settings-h" style={{ fontSize: "1rem" }}>
         {t("settings.kotFields")}
       </h3>
       <label className="switch-row">
@@ -801,18 +967,74 @@ function TipPrintSection() {
   );
 }
 
+function UsbDevicesList({
+  devices,
+  emptyLabel,
+}: {
+  devices: UsbDeviceRow[];
+  emptyLabel?: string;
+}) {
+  const t = useT();
+  if (!devices.length) {
+    return <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>{emptyLabel || t("settings.noUsbDevices")}</p>;
+  }
+  const problems = devices.filter((d) => d.problem).length;
+  return (
+    <div style={{ marginTop: "0.35rem" }}>
+      <p className="tiny" style={{ margin: "0 0 0.25rem" }}>
+        <strong>{t("settings.usbDevices")}: </strong>
+        {devices.length}
+        {problems > 0 ? (
+          <span className="unpaid" style={{ marginLeft: "0.35rem" }}>
+            · {t("settings.usbNeedDriver", { n: problems })}
+          </span>
+        ) : null}
+      </p>
+      <ul className="tiny" style={{ margin: 0, paddingLeft: "1.1rem" }}>
+        {devices.map((d) => (
+          <li key={`${d.instanceId || d.name}-${d.status}`} style={{ marginBottom: "0.15rem" }}>
+            <span className={d.problem ? "unpaid" : undefined} style={{ fontWeight: d.problem ? 600 : undefined }}>
+              {d.name}
+            </span>
+            {d.className ? ` · ${d.className}` : ""}
+            {d.status ? ` · ${d.status}` : ""}
+            {d.problem ? ` — ${t("settings.usbUnknownHint")}` : ""}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function PrintersSection() {
   const toast = useToast();
   const t = useT();
   const ask = useConfirm();
   const [printers, setPrinters] = useState<Printer[]>([]);
+  const [agents, setAgents] = useState<PrintAgentRow[]>([]);
+  const [agentLabels, setAgentLabels] = useState<Record<string, string>>({});
   const [page, setPage] = useState(1);
   const [system, setSystem] = useState<SystemPrinter[]>([]);
+  const [serverDevices, setServerDevices] = useState<UsbDeviceRow[]>([]);
   const [edit, setEdit] = useState<(Omit<Printer, "id"> & { id?: string }) | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setPrinters(await api<Printer[]>("/printers"));
+      const [p, a, devices] = await Promise.all([
+        api<Printer[]>("/printers"),
+        api<PrintAgentRow[]>("/print-agents").catch(() => [] as PrintAgentRow[]),
+        api<UsbDeviceRow[]>("/printers/devices").catch(() => [] as UsbDeviceRow[]),
+      ]);
+      setPrinters(p);
+      setAgents(a);
+      setServerDevices(devices);
+      setAgentLabels((prev) => {
+        const next: Record<string, string> = {};
+        for (const row of a) {
+          next[row.id] = prev[row.id] ?? (row.displayName || row.hostname);
+        }
+        return next;
+      });
     } catch (e) {
       toast.push(errMsg(e, t("settings.printersLoadFailed")), "err");
     }
@@ -881,6 +1103,24 @@ function PrintersSection() {
     }
   }
 
+  async function saveAgentLabel(agentId: string) {
+    const displayName = (agentLabels[agentId] || "").trim();
+    if (!displayName) {
+      toast.push(t("settings.agentLabelRequired"), "err");
+      return;
+    }
+    try {
+      await api(`/print-agents/${agentId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ displayName }),
+      });
+      toast.push(t("settings.agentLabelSaved"), "ok");
+      void load();
+    } catch (err) {
+      toast.push(errMsg(err, t("settings.saveFailed")), "err");
+    }
+  }
+
   function kindLabel(kind: Printer["kind"]) {
     if (kind === "WINDOWS") return t("settings.usb");
     if (kind === "NETWORK") return t("settings.lan");
@@ -906,6 +1146,69 @@ function PrintersSection() {
           {t("settings.addPrinter")}
         </button>
       </div>
+      <div style={{ marginTop: "0.75rem" }}>
+        <h3 className="settings-h" style={{ margin: 0, fontSize: "1rem" }}>
+          {t("settings.cashierPcs")}
+        </h3>
+        <p className="tiny muted" style={{ margin: "0.25rem 0 0.5rem" }}>
+          {t("settings.cashierPcsHint")}
+        </p>
+        {!agents.length ? (
+          <p className="tiny muted">{t("settings.noAgents")}</p>
+        ) : (
+          <div style={{ display: "grid", gap: "0.65rem" }}>
+            {agents.map((a) => (
+              <div
+                key={a.id}
+                style={{
+                  border: "1px solid var(--border, #2a3544)",
+                  borderRadius: 8,
+                  padding: "0.65rem 0.75rem",
+                }}
+              >
+                <div className="row" style={{ flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+                  <span className={a.online ? "paid" : "muted"} style={{ fontWeight: 600 }}>
+                    {a.online ? t("settings.agentOnline") : t("settings.agentOffline")}
+                  </span>
+                  <span className="tiny muted">{a.hostname}</span>
+                </div>
+                <div className="row" style={{ marginTop: "0.45rem", flexWrap: "wrap", gap: "0.4rem", alignItems: "flex-end" }}>
+                  <div className="field" style={{ margin: 0, flex: "1 1 180px", minWidth: 160 }}>
+                    <label className="tiny">{t("settings.agentLabel")}</label>
+                    <input
+                      value={agentLabels[a.id] ?? a.displayName}
+                      onChange={(e) => setAgentLabels((prev) => ({ ...prev, [a.id]: e.target.value }))}
+                      placeholder={t("settings.agentLabelPh")}
+                    />
+                  </div>
+                  <button type="button" className="btn sm" onClick={() => void saveAgentLabel(a.id)}>
+                    {t("settings.saveAgentLabel")}
+                  </button>
+                </div>
+                <p className="tiny muted" style={{ margin: "0.4rem 0 0" }}>
+                  <strong>{t("settings.agentPrinters")}: </strong>
+                  {a.printers.filter((p) => p.active).length
+                    ? a.printers
+                        .filter((p) => p.active)
+                        .map((p) => `${p.name}${p.printsBill ? ` (${t("settings.bill")})` : ""}`)
+                        .join(" · ")
+                    : t("settings.agentNoUsb")}
+                </p>
+                <UsbDevicesList devices={a.devices || []} />
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ marginTop: "0.85rem" }}>
+          <h3 className="settings-h" style={{ margin: 0, fontSize: "0.95rem" }}>
+            {t("settings.serverUsbDevices")}
+          </h3>
+          <p className="tiny muted" style={{ margin: "0.25rem 0 0.4rem" }}>
+            {t("settings.serverUsbDevicesHint")}
+          </p>
+          <UsbDevicesList devices={serverDevices} emptyLabel={t("settings.noUsbDevices")} />
+        </div>
+      </div>
       <div className="table-wrap wide" style={{ marginTop: "0.75rem" }}>
       <table>
         <thead>
@@ -929,6 +1232,8 @@ function PrintersSection() {
                 {p.kind === "AGENT" && p.agent && (
                   <div className="tiny muted">
                     {p.agent.online ? t("settings.agentOnline") : t("settings.agentOffline")} · {p.agent.displayName}
+                    {" · "}
+                    {p.agent.hostname}
                   </div>
                 )}
               </td>
@@ -1096,7 +1401,14 @@ function JobsSection() {
   const t = useT();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [page, setPage] = useState(1);
-  const [preview, setPreview] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{
+    text: string;
+    paperWidth?: number;
+    logoUrl?: string | null;
+    paidStampUrl?: string | null;
+    unpaidStampUrl?: string | null;
+    cancelledStampUrl?: string | null;
+  } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -1127,8 +1439,15 @@ function JobsSection() {
 
   async function show(id: string) {
     try {
-      const r = await api<{ text: string }>(`/print/jobs/${id}/preview`);
-      setPreview(r.text);
+      const r = await api<{
+        text: string;
+        paperWidth?: number;
+        logoUrl?: string | null;
+        paidStampUrl?: string | null;
+        unpaidStampUrl?: string | null;
+        cancelledStampUrl?: string | null;
+      }>(`/print/jobs/${id}/preview`);
+      setPreview(r);
     } catch (e) {
       toast.push(errMsg(e, t("kot.previewFailed")), "err");
     }
@@ -1202,160 +1521,20 @@ function JobsSection() {
       <Pagination page={page} pageSize={PAGE_SIZE} total={jobs.length} onChange={setPage} />
       <Modal open={preview != null} title={t("settings.printPreview")} onClose={() => setPreview(null)}>
         <div className="modal-scroll">
-          <pre className="print-preview">{preview}</pre>
+          {preview ? (
+            <div className="bill-design-preview-frame" style={{ ["--preview-mm" as string]: `${preview.paperWidth || 80}mm` }}>
+              <ThermalPreview
+                text={preview.text}
+                paperWidth={preview.paperWidth || 80}
+                logoUrl={preview.logoUrl}
+                paidStampUrl={preview.paidStampUrl}
+                unpaidStampUrl={preview.unpaidStampUrl}
+                cancelledStampUrl={preview.cancelledStampUrl}
+              />
+            </div>
+          ) : null}
         </div>
       </Modal>
-    </div>
-  );
-}
-
-function TablesSection() {
-  const toast = useToast();
-  const t = useT();
-  const [tables, setTables] = useState<Table[]>([]);
-  const [partitions, setPartitions] = useState<Partition[]>([]);
-  const [name, setName] = useState("");
-  const [partitionId, setPartitionId] = useState("");
-  const [partName, setPartName] = useState("");
-
-  const load = useCallback(async () => {
-    try {
-      const [all, parts] = await Promise.all([
-        api<Table[]>("/tables/all"),
-        api<Partition[]>("/tables/partitions"),
-      ]);
-      setTables(all);
-      setPartitions(parts);
-      setPartitionId((prev) => prev || parts[0]?.id || "");
-    } catch (e) {
-      toast.push(errMsg(e, t("settings.printersLoadFailed")), "err");
-    }
-  }, [toast, t]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  async function addPartition(e: FormEvent) {
-    e.preventDefault();
-    if (!partName.trim()) return;
-    try {
-      const p = await api<Partition>("/tables/partitions", {
-        method: "POST",
-        body: JSON.stringify({ name: partName.trim(), sortOrder: partitions.length }),
-      });
-      setPartName("");
-      setPartitionId(p.id);
-      void load();
-    } catch (err) {
-      toast.push(errMsg(err, t("common.failed")), "err");
-    }
-  }
-
-  async function setPartitionActive(p: Partition, active: boolean) {
-    try {
-      await api(`/tables/partitions/${p.id}`, { method: "PATCH", body: JSON.stringify({ active }) });
-      void load();
-    } catch (err) {
-      toast.push(errMsg(err, t("common.failed")), "err");
-    }
-  }
-
-  async function add(e: FormEvent) {
-    e.preventDefault();
-    if (!name.trim()) return;
-    if (!partitionId) {
-      toast.push(t("settings.pickPartition"), "err");
-      return;
-    }
-    try {
-      await api("/tables", {
-        method: "POST",
-        body: JSON.stringify({ name: name.trim(), partitionId, sortOrder: tables.length + 1 }),
-      });
-      setName("");
-      void load();
-    } catch (err) {
-      toast.push(errMsg(err, t("common.failed")), "err");
-    }
-  }
-
-  async function setActive(tbl: Table, active: boolean) {
-    try {
-      await api(`/tables/${tbl.id}`, { method: "PATCH", body: JSON.stringify({ active }) });
-      void load();
-    } catch (err) {
-      toast.push(errMsg(err, t("common.failed")), "err");
-    }
-  }
-
-  return (
-    <div className="panel panel-pad settings-block">
-      <h2 className="settings-h">{t("settings.tables")}</h2>
-
-      <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.95rem" }}>{t("settings.partitions")}</h3>
-      <form className="row tables-add" onSubmit={addPartition}>
-        <div className="field" style={{ margin: 0, flex: "1 1 180px" }}>
-          <input
-            value={partName}
-            onChange={(e) => setPartName(e.target.value)}
-            placeholder={t("settings.partitionNamePh")}
-          />
-        </div>
-        <button className="btn ghost" type="submit" style={{ minHeight: "2.6rem" }}>
-          {t("settings.addPartition")}
-        </button>
-      </form>
-      <div className="chips" style={{ marginTop: "0.6rem", marginBottom: "1rem" }}>
-        {partitions.map((p) => (
-          <span key={p.id} className={`chip ${p.active !== false ? "active" : ""}`}>
-            {p.name}
-            <button
-              type="button"
-              className="chip-x"
-              title={p.active !== false ? t("settings.hideTitles") : t("settings.showTitles")}
-              onClick={() => void setPartitionActive(p, p.active === false)}
-            >
-              {p.active !== false ? "×" : "+"}
-            </button>
-          </span>
-        ))}
-      </div>
-
-      <form className="row tables-add" onSubmit={add}>
-        <div className="field" style={{ margin: 0, flex: "1 1 140px" }}>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("settings.tableNamePh")} />
-        </div>
-        <div className="field" style={{ margin: 0, flex: "1 1 160px" }}>
-          <select value={partitionId} onChange={(e) => setPartitionId(e.target.value)} required>
-            <option value="">{t("settings.pickPartition")}</option>
-            {partitions.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <button className="btn" type="submit" style={{ minHeight: "2.6rem" }} disabled={!partitionId}>
-          {t("settings.addTable")}
-        </button>
-      </form>
-      <div className="chips" style={{ marginTop: "0.75rem" }}>
-        {tables.map((tbl) => (
-          <span key={tbl.id} className={`chip ${tbl.active ? "active" : ""}`}>
-            {tbl.partition?.name ? `${tbl.partition.name} · ` : ""}
-            {tbl.name}
-            <button
-              type="button"
-              className="chip-x"
-              title={tbl.active ? t("settings.hideTitles") : t("settings.showTitles")}
-              onClick={() => void setActive(tbl, !tbl.active)}
-            >
-              {tbl.active ? "×" : "+"}
-            </button>
-          </span>
-        ))}
-      </div>
     </div>
   );
 }
@@ -1417,6 +1596,9 @@ function BackupSection() {
           <h2 className="settings-h" style={{ margin: 0 }}>{t("settings.backup")}</h2>
           <p className="tiny muted" style={{ margin: "0.2rem 0 0" }}>
             {t("settings.backupHint")} <code>{dir}</code>
+          </p>
+          <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
+            {t("settings.restoreHint")}
           </p>
         </div>
         <button type="button" className="btn sm" disabled={busy} onClick={() => void backupNow()}>

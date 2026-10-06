@@ -73,6 +73,7 @@ enum PrinterKind {
 enum PrintJobType {
   KOT
   BILL
+  BILL_EDIT
   TEST
 }
 
@@ -94,6 +95,33 @@ enum KitchenStation {
 enum OrderLineKind {
   MENU
   PER_HEAD
+}
+
+/// NORMAL = store recipe on sale; SPECIAL = daily cooked pot; MIX = store + pot.
+enum MenuItemKind {
+  NORMAL
+  SPECIAL
+  MIX
+}
+
+enum DailyBatchStatus {
+  OPEN
+  CLOSED
+}
+
+/// How a special line was sold on the order.
+enum SpecialSaleMode {
+  PLATE
+  RS
+  MIX
+  MIX_SOLO_STORE
+}
+
+/// Which sell paths Waiter may use for this pot.
+enum SpecialSellMode {
+  BOTH
+  SERVING_ONLY
+  RS_ONLY
 }
 
 model Setting {
@@ -138,6 +166,8 @@ model PrintAgent {
   /// Bearer token for claim / heartbeat (rotated on register if missing).
   token       String    @unique
   lastSeenAt  DateTime  @default(now())
+  /// Last USB / PnP device snapshot from that PC (incl. Unknown USB) — diagnosis only.
+  devices     Json      @default("[]")
   printers    Printer[]
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -224,6 +254,8 @@ model User {
   waiterOrders      Order[]     @relation("OrderWaiter")
   assignedOrders    Order[]     @relation("OrderAssignedCashier")
   cancelledOrders   Order[]     @relation("OrderCancelledBy")
+  billEdits         OrderBillEdit[] @relation("OrderBillEditedBy")
+  billEditConfirms  OrderBillEdit[] @relation("OrderBillEditConfirmedBy")
   itemsAdded        OrderItem[] @relation("OrderItemAddedBy")
   paymentsCollected Payment[]   @relation("PaymentCollectedBy")
   cashReceived      Payment[]   @relation("PaymentHandedTo")
@@ -231,8 +263,12 @@ model User {
   dayCloses         DayStockClose[]
   dayCashCloses     DayCashClose[]
   hotelExpenses     HotelExpense[]
+  /// Soft-delete: keeps bill/payment history FKs intact while removing login.
+  deletedAt         DateTime?
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
+
+  @@index([deletedAt])
 }
 
 model StoreCategory {
@@ -404,6 +440,7 @@ model Recipe {
   active      Boolean            @default(true)
   ingredients RecipeIngredient[]
   menuItems   MenuItem[]
+  specialCook SpecialProduct[]   @relation("SpecialCookRecipe")
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt
 }
@@ -426,14 +463,112 @@ model MenuItem {
   category       String?
   /// Kitchen printer station (Beverages / Cooking / BBQ).
   kitchenStation KitchenStation @default(COOKING)
+  kind           MenuItemKind   @default(NORMAL)
   sellUnit       UnitType
   sellingPrice   Decimal        @db.Decimal(14, 2)
+  /// Qty in sellUnit the menu card price refers to (e.g. 0.5 KG = 500g half at list price).
+  /// Bill still uses sellingPrice × ordered qty — order can be less or more.
+  listPortionQty Decimal        @default(1) @db.Decimal(14, 3)
+  /// Lowest order qty in sellUnit (e.g. 0.225 KG / 1 PCS). 0 = no floor beyond > 0.
+  minQty         Decimal        @default(0) @db.Decimal(14, 3)
+  /// Highest order qty; null = no cap (e.g. Half band max 1 KG).
+  maxQty         Decimal?       @db.Decimal(14, 3)
+  /// +/- / chip step; null = unit default (KG/L 0.5, else 1).
+  qtyStep        Decimal?       @db.Decimal(14, 3)
+  /// false = only min + n×step (no free decimal typing).
+  allowCustomQty Boolean        @default(true)
+  /// Store recipe (NORMAL / MIX store part). Null for pure SPECIAL.
   recipeId       String?
   recipe         Recipe?        @relation(fields: [recipeId], references: [id])
+  /// Daily cooked pot (SPECIAL / MIX batch part).
+  specialProductId String?
+  specialProduct   SpecialProduct? @relation(fields: [specialProductId], references: [id])
+  /// MIX only: how many special plates per 1 menu qty.
+  mixSpecialPlates Decimal?     @db.Decimal(14, 3)
   active         Boolean        @default(true)
   orderItems     OrderItem[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
+}
+
+/// Master for a daily-cooked pot (e.g. Daal Special). Cook once → sell all day from remaining.
+model SpecialProduct {
+  id           String          @id @default(cuid())
+  name         String          @unique
+  category     String          @default("Pakistani Special")
+  /// Display name for one serving: Plate, Glass, Box, Bowl, Cup…
+  servingLabel String          @default("Plate")
+  /// Waiter: BOTH = serving + Rs; SERVING_ONLY / RS_ONLY lock the other path.
+  sellMode     SpecialSellMode @default(BOTH)
+  /// Price of one serving (plate/glass/box…).
+  platePrice   Decimal         @db.Decimal(14, 2)
+  /// Grams (or ml≈g) in one serving. Rs sale converts via platePrice/plateGrams.
+  plateGrams   Decimal         @db.Decimal(14, 3)
+  /// Recipe used when System Manager logs morning cook (store OUT once).
+  cookRecipeId String?
+  cookRecipe   Recipe?         @relation("SpecialCookRecipe", fields: [cookRecipeId], references: [id])
+  active       Boolean         @default(true)
+  menuItems    MenuItem[]
+  batches      DailyBatch[]
+  closeLines   DayBatchCloseLine[]
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+}
+
+/// One pot per special product per business day.
+model DailyBatch {
+  id                 String           @id @default(cuid())
+  specialProductId   String
+  specialProduct     SpecialProduct   @relation(fields: [specialProductId], references: [id], onDelete: Cascade)
+  businessDate       String
+  /// Carried from previous day close (grams).
+  openingCarryGrams  Decimal          @default(0) @db.Decimal(14, 3)
+  /// Newly cooked today (grams).
+  cookedGrams        Decimal          @default(0) @db.Decimal(14, 3)
+  /// Sold via orders (grams).
+  soldGrams          Decimal          @default(0) @db.Decimal(14, 3)
+  status             DailyBatchStatus @default(OPEN)
+  note               String?
+  cookedById         String?
+  cookedByName       String?
+  cookedAt           DateTime?
+  closedAt           DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@unique([specialProductId, businessDate])
+  @@index([businessDate])
+  @@index([status])
+}
+
+/// End-of-day disposition for all special pots (carry / waste → loss).
+model DayBatchClose {
+  id           String              @id @default(cuid())
+  businessDate String              @unique
+  note         String?
+  closedById   String?
+  closedByName String?
+  lines        DayBatchCloseLine[]
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+}
+
+model DayBatchCloseLine {
+  id                     String         @id @default(cuid())
+  closeId                String
+  close                  DayBatchClose  @relation(fields: [closeId], references: [id], onDelete: Cascade)
+  specialProductId       String
+  specialProduct         SpecialProduct @relation(fields: [specialProductId], references: [id])
+  dailyBatchId           String?
+  systemRemainingGrams   Decimal        @db.Decimal(14, 3)
+  countedRemainingGrams  Decimal        @db.Decimal(14, 3)
+  carryGrams             Decimal        @default(0) @db.Decimal(14, 3)
+  wasteGrams             Decimal        @default(0) @db.Decimal(14, 3)
+  wasteNote              String?
+  /// Cost attributed to waste (from cook recipe unit cost × waste grams / plateGrams scale).
+  lossCost               Decimal        @default(0) @db.Decimal(14, 2)
+
+  @@unique([closeId, specialProductId])
 }
 
 /// Seated guest who eats now and pays the whole account later. Not supplier credit.
@@ -494,6 +629,7 @@ model Order {
   printJobs     PrintJob[]
   payments      Payment[]
   tipShares     TipShare[]
+  billEdits     OrderBillEdit[]
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
 
@@ -502,6 +638,34 @@ model Order {
   @@index([waiterId])
   @@index([creditCustomerId])
   @@index([cancelledAt])
+}
+
+/// Audit trail when Main Cashier edits a PAID bill (reason + before/after amounts).
+model OrderBillEdit {
+  id               String    @id @default(cuid())
+  orderId          String
+  order            Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  reason           String
+  beforeTotal      Decimal   @db.Decimal(14, 2)
+  afterTotal       Decimal   @db.Decimal(14, 2)
+  beforeNet        Decimal   @db.Decimal(14, 2)
+  afterNet         Decimal   @db.Decimal(14, 2)
+  beforePaidAmount Decimal   @db.Decimal(14, 2)
+  afterPaidAmount  Decimal   @db.Decimal(14, 2)
+  /// Snapshot of line changes: [{ name, beforeQty, afterQty, beforeAmount, afterAmount }]
+  itemsJson        Json?
+  editedById       String
+  editedBy         User      @relation("OrderBillEditedBy", fields: [editedById], references: [id])
+  editedByName     String
+  confirmedAt      DateTime?
+  confirmedById    String?
+  confirmedBy      User?     @relation("OrderBillEditConfirmedBy", fields: [confirmedById], references: [id])
+  confirmedByName  String?
+  createdAt        DateTime  @default(now())
+
+  @@index([orderId])
+  @@index([createdAt])
+  @@index([confirmedAt])
 }
 
 /// One payment taken for an order. Staff without a cash drawer (managers) hand the cash
@@ -558,6 +722,10 @@ model OrderItem {
   amount          Decimal       @db.Decimal(14, 2)
   unitCost        Decimal       @default(0) @db.Decimal(14, 2)
   costAmount      Decimal       @default(0) @db.Decimal(14, 2)
+  /// Grams taken from daily special batch (SPECIAL / MIX).
+  batchGrams      Decimal       @default(0) @db.Decimal(14, 3)
+  specialProductId String?
+  saleMode        SpecialSaleMode?
   notes           String?
   kotRound        Int           @default(1)
   addedById       String?

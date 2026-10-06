@@ -72,8 +72,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const onUnauthorized = () => logout();
+    const onSessionExpired = () => logout();
     window.addEventListener("hotel:unauthorized", onUnauthorized);
-    return () => window.removeEventListener("hotel:unauthorized", onUnauthorized);
+    window.addEventListener("hotel:session-expired", onSessionExpired);
+    return () => {
+      window.removeEventListener("hotel:unauthorized", onUnauthorized);
+      window.removeEventListener("hotel:session-expired", onSessionExpired);
+    };
   }, [logout]);
 
   const can = useCallback(

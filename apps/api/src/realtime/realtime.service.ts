@@ -16,7 +16,7 @@ export class RealtimeService {
 
   orderChanged(o: OrderEvent, reason: string) {
     this.gw.emit(ROOM.all, "orders.changed", { ...o, reason });
-    if (reason === "created" || reason === "items-added" || reason === "cancelled") {
+    if (reason === "created" || reason === "items-added" || reason === "cancelled" || reason === "reversed") {
       this.gw.emit(ROOM.kitchen, "kitchen.new", { ...o, reason });
     }
     if (o.status === "READY" && reason === "status") {
@@ -43,6 +43,10 @@ export class RealtimeService {
 
   cashConfirmed(collectorId: string, p: { id: string; amount: number; orderNo: number; by: string }) {
     this.gw.emit(ROOM.user(collectorId), "cash.confirmed", p);
+  }
+
+  hotelStatus(status: unknown) {
+    this.gw.emit(ROOM.all, "hotel.status", status);
   }
 
   printResult(

@@ -11,6 +11,7 @@ export type PayTarget = {
   orderNo: number;
   tableNo?: string | null;
   status?: string;
+  paymentStatus?: string;
   total: number;
   discountAmount?: number;
   paidAmount?: number;

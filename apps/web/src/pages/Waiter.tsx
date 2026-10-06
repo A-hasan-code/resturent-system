@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, money, unitLabel } from "../api";
+import { api, ApiError, formatKg, money, unitLabel } from "../api";
 import { useAuth } from "../auth";
 import { useToast } from "../toast";
 import { useSocketEvent } from "../socket";
@@ -10,8 +10,23 @@ import { PayModal } from "../components/PayModal";
 import { PickServerModal } from "../components/PickServerModal";
 import { PickCashierModal } from "../components/PickCashierModal";
 import { EditBillForm, serverNames, withCurrent, type EditBillMeta, type EditBillPerson } from "../components/EditBillForm";
-import { usePrompt } from "../components/ConfirmModal";
+import { useConfirm, usePrompt } from "../components/ConfirmModal";
+import { useHotelGate } from "../hotel-gate";
+import { Modal } from "../components/Modal";
 import { MessageKey, useI18n, useT } from "../i18n";
+import {
+  allowCustomOf,
+  bumpQty,
+  clampQty,
+  listPriceLabel,
+  maxQtyOf,
+  minQtyOf,
+  qtyIssueOf,
+  qtyStepOf,
+  quickQtys,
+  startQtyOf,
+  type QtyRules,
+} from "../menuQty";
 
 type OrderSummary = {
   id: string;
@@ -58,7 +73,43 @@ const twKey = (orderId: string) => `tw:${orderId}`;
 const isTwKey = (sel: string | null) => !!sel && sel.startsWith("tw:");
 const twId = (sel: string) => sel.slice(3);
 
-type MenuItem = { id: string; name: string; category: string | null; sellUnit: string; sellingPrice: number };
+type MenuItem = {
+  id: string;
+  name: string;
+  category: string | null;
+  kind?: "NORMAL" | "SPECIAL" | "MIX";
+  sellUnit: string;
+  sellingPrice: number;
+  listPortionQty?: number;
+  listAmount?: number;
+  specialProductId?: string | null;
+  mixSpecialPlates?: number | null;
+  specialProduct?: {
+    id: string;
+    name: string;
+    platePrice: number;
+    plateGrams: number;
+    servingLabel?: string;
+    sellMode?: "BOTH" | "SERVING_ONLY" | "RS_ONLY";
+  } | null;
+  minQty?: number;
+  maxQty?: number | null;
+  qtyStep?: number | null;
+  allowCustomQty?: boolean;
+};
+
+type TodaySpecial = {
+  id: string;
+  name: string;
+  platePrice: number;
+  plateGrams: number;
+  servingLabel?: string;
+  sellMode?: "BOTH" | "SERVING_ONLY" | "RS_ONLY";
+  remainingGrams: number;
+  remainingPlates: number;
+  maxRs: number;
+  status: string | null;
+};
 
 type OrderItem = {
   id: string;
@@ -103,15 +154,56 @@ type CartLine = {
   rate: number;
   quantity: number;
   notes: string;
+  saleMode?: "PLATE" | "RS" | "MIX";
+  amountRs?: number;
+  /** SPECIAL RS: grams taken from pot (display; API still uses quantity as plates). */
+  specialGrams?: number;
+  soloStoreFallback?: boolean;
+  minQty?: number;
+  maxQty?: number | null;
+  qtyStep?: number | null;
+  allowCustomQty?: boolean;
+  listPortionQty?: number;
+  /** Included with per-head (Rs 0); sent as packageLines on the PER_HEAD line. */
+  fromPerHead?: boolean;
+  /** Fixed package line — cart shows name only, no qty/remove. */
+  perHeadLocked?: boolean;
 };
 
-type PerHeadCfg = { enabled: boolean; amount: number; label: string };
+type PerHeadPkgItem = {
+  menuItemId: string;
+  name: string;
+  sellUnit: string;
+  qty: number;
+  variable: boolean;
+  minQty?: number;
+  maxQty?: number | null;
+  qtyStep?: number | null;
+  allowCustomQty?: boolean;
+  listPortionQty?: number;
+};
+
+type PerHeadCfg = {
+  enabled: boolean;
+  amount: number;
+  label: string;
+  items: PerHeadPkgItem[];
+};
 
 const WALK_IN = "__walkin__";
 const PER_HEAD_KEY = "__per_head__";
+const phPkgKey = (menuItemId: string) => `__ph__${menuItemId}`;
 
-const step = (unit: string) => (unit === "KG" || unit === "L" ? 0.5 : 1);
-const quickQty = (unit: string) => (unit === "KG" || unit === "L" ? [0.5, 1, 1.5, 2] : [1, 2, 3, 4]);
+function rulesOf(m: QtyRules): QtyRules {
+  return {
+    sellUnit: m.sellUnit,
+    minQty: m.minQty,
+    maxQty: m.maxQty,
+    qtyStep: m.qtyStep,
+    allowCustomQty: m.allowCustomQty,
+    listPortionQty: m.listPortionQty,
+  };
+}
 
 function minutesSince(
   iso: string,
@@ -143,18 +235,28 @@ export function WaiterPage() {
   const t = useT();
   const { ts } = useI18n();
   const askPrompt = usePrompt();
+  const ask = useConfirm();
+  const { gate } = useHotelGate();
+  const hotelClosed = !!gate && !gate.acceptingOrders;
   const [previewFirst, setPreviewFirst] = useKotPreviewPref(user);
   const [kot, setKot] = useState<KotTarget | null>(null);
   const closeKot = useCallback(() => setKot(null), []);
   const [partitions, setPartitions] = useState<PartitionBoard[]>([]);
   const [tables, setTables] = useState<TableCard[]>([]);
+  /** Empty = all walls/partitions (Lawn, Hall…). */
+  const [partitionFilter, setPartitionFilter] = useState("");
   const [takeaways, setTakeaways] = useState<TakeawayCard[]>([]);
   const [menu, setMenu] = useState<MenuItem[]>([]);
+  const [specialsToday, setSpecialsToday] = useState<TodaySpecial[]>([]);
+  const [specialPick, setSpecialPick] = useState<MenuItem | null>(null);
+  const [specialMode, setSpecialMode] = useState<"PLATE" | "RS">("PLATE");
+  const [specialRs, setSpecialRs] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [walkInName, setWalkInName] = useState("");
   const [order, setOrder] = useState<Order | null>(null);
   const [paying, setPaying] = useState(false);
   const [cart, setCart] = useState<CartLine[]>([]);
+  const [qtyDraft, setQtyDraft] = useState<Record<string, string>>({});
   const [cat, setCat] = useState("ALL");
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
@@ -169,6 +271,11 @@ export function WaiterPage() {
   const [savingEdit, setSavingEdit] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [perHead, setPerHead] = useState<PerHeadCfg | null>(null);
+  const [perHeadWizard, setPerHeadWizard] = useState<
+    | { step: "persons"; persons: string }
+    | { step: "itemQty"; persons: number; item: PerHeadPkgItem; qty: string }
+    | null
+  >(null);
   const [creditOn, setCreditOn] = useState(false);
   const [creditPick, setCreditPick] = useState<{ id: string; name: string; phone: string } | null>(null);
   const [creditQ, setCreditQ] = useState("");
@@ -233,9 +340,19 @@ export function WaiterPage() {
     api<MenuItem[]>("/menu")
       .then(setMenu)
       .catch((e) => toast.push(e instanceof Error ? e.message : t("waiter.loadFailed"), "err"));
-    const timer = setInterval(() => void loadTables(), 30000);
+    api<{ products: TodaySpecial[] }>("/specials/today")
+      .then((d) => setSpecialsToday(d.products || []))
+      .catch(() => setSpecialsToday([]));
+    const timer = setInterval(() => {
+      void loadTables();
+      api<{ products: TodaySpecial[] }>("/specials/today")
+        .then((d) => setSpecialsToday(d.products || []))
+        .catch(() => undefined);
+    }, 30000);
     return () => clearInterval(timer);
   }, [loadTables, toast, t]);
+
+  const specialById = useMemo(() => new Map(specialsToday.map((s) => [s.id, s])), [specialsToday]);
 
   useEffect(() => {
     if (!canAddPerHead) {
@@ -244,7 +361,9 @@ export function WaiterPage() {
     }
     let cancelled = false;
     const apply = (cfg: PerHeadCfg | null | undefined) => {
-      if (!cancelled && cfg) setPerHead(cfg);
+      if (!cancelled && cfg) {
+        setPerHead({ ...cfg, items: Array.isArray(cfg.items) ? cfg.items : [] });
+      }
     };
     api<PerHeadCfg>("/orders/per-head")
       .then(apply)
@@ -273,18 +392,23 @@ export function WaiterPage() {
     if (order) void loadOrder(order.id);
   });
 
-  const categories = useMemo(
-    () => ["ALL", ...Array.from(new Set(menu.map((m) => m.category || "General")))],
-    [menu]
-  );
+  const categories = useMemo(() => {
+    const cats = Array.from(new Set(menu.map((m) => m.category || "General")));
+    const hasSpecial = menu.some((m) => m.kind === "SPECIAL" || m.kind === "MIX");
+    return hasSpecial ? ["ALL", "SPECIAL", ...cats] : ["ALL", ...cats];
+  }, [menu]);
 
-  const shownMenu = menu.filter(
-    (m) =>
-      (cat === "ALL" || (m.category || "General") === cat) &&
-      matchesSearch(q, m.name, m.category)
-  );
+  const shownMenu = menu.filter((m) => {
+    if (cat === "SPECIAL") {
+      return (m.kind === "SPECIAL" || m.kind === "MIX") && matchesSearch(q, m.name, m.category);
+    }
+    return (cat === "ALL" || (m.category || "General") === cat) && matchesSearch(q, m.name, m.category);
+  });
 
-  const cartTotal = cart.reduce((s, l) => s + l.rate * l.quantity, 0);
+  const cartTotal = cart.reduce((s, l) => {
+    if (l.saleMode === "RS" && l.amountRs != null) return s + l.amountRs;
+    return s + l.rate * l.quantity;
+  }, 0);
 
   function canOpenOrder(o: OrderSummary | null | undefined) {
     if (!o) return true;
@@ -306,6 +430,7 @@ export function WaiterPage() {
     }
     setSelected(tbl.id);
     setCart([]);
+    setQtyDraft({});
     setQ("");
     setNoteFor(null);
     setEditing(false);
@@ -321,6 +446,7 @@ export function WaiterPage() {
     }
     setSelected(twKey(tw.id));
     setCart([]);
+    setQtyDraft({});
     setQ("");
     setNoteFor(null);
     setEditing(false);
@@ -330,6 +456,7 @@ export function WaiterPage() {
   function openWalkIn() {
     setSelected(WALK_IN);
     setCart([]);
+    setQtyDraft({});
     setQ("");
     setNoteFor(null);
     setOrder(null);
@@ -341,32 +468,213 @@ export function WaiterPage() {
     setSelected(null);
     setOrder(null);
     setCart([]);
+    setQtyDraft({});
     setWalkInName("");
     setEditing(false);
   }
 
-  function add(m: MenuItem) {
+  function addNormal(m: MenuItem, extras?: Partial<CartLine>) {
+    const rules = rulesOf(m);
+    const cartKey = extras?.cartKey || m.id;
+    const hit = cart.find((p) => p.cartKey === cartKey);
+    if (hit && !extras?.saleMode) {
+      const base = Number(qtyDraft[cartKey] ?? hit.quantity);
+      const from = Number.isFinite(base) && base > 0 ? base : hit.quantity;
+      const next = bumpQty(rules, from, 1);
+      if (next <= from) {
+        toast.push(t("waiter.qtyMax"), "err");
+        return;
+      }
+      setCart((prev) => prev.map((p) => (p.cartKey === cartKey ? { ...p, quantity: next } : p)));
+      setQtyDraft((d) => ({ ...d, [cartKey]: String(next) }));
+      return;
+    }
+    const start = extras?.quantity ?? startQtyOf(rules);
+    setCart((prev) => [
+      ...prev.filter((p) => p.cartKey !== cartKey),
+      {
+        cartKey,
+        kind: "MENU" as const,
+        menuItemId: m.id,
+        name: extras?.name || m.name,
+        sellUnit: m.sellUnit,
+        rate: extras?.rate ?? m.sellingPrice,
+        quantity: start,
+        notes: "",
+        saleMode: extras?.saleMode,
+        amountRs: extras?.amountRs,
+        specialGrams: extras?.specialGrams,
+        soloStoreFallback: extras?.soloStoreFallback,
+        minQty: rules.minQty ?? undefined,
+        maxQty: rules.maxQty ?? null,
+        qtyStep: rules.qtyStep ?? null,
+        allowCustomQty: extras?.saleMode === "RS" ? false : rules.allowCustomQty !== false,
+      },
+    ]);
+    setQtyDraft((d) => ({ ...d, [cartKey]: String(start) }));
+  }
+
+  async function add(m: MenuItem) {
+    if (m.kind === "SPECIAL") {
+      const batch = m.specialProductId ? specialById.get(m.specialProductId) : null;
+      if (!batch || batch.remainingGrams <= 0) {
+        toast.push(t("waiter.specialOut"), "err");
+        return;
+      }
+      const sellMode = m.specialProduct?.sellMode || batch.sellMode || "BOTH";
+      const platePrice = m.specialProduct?.platePrice || batch.platePrice || m.sellingPrice;
+      if (sellMode === "SERVING_ONLY") {
+        if (batch.remainingPlates < startQtyOf(rulesOf(m))) {
+          toast.push(t("waiter.specialOut"), "err");
+          return;
+        }
+        addNormal(m, {
+          cartKey: m.id,
+          saleMode: "PLATE",
+          rate: platePrice,
+        });
+        return;
+      }
+      setSpecialPick(m);
+      setSpecialMode(sellMode === "RS_ONLY" ? "RS" : "PLATE");
+      setSpecialRs("");
+      return;
+    }
+    if (m.kind === "MIX") {
+      const batch = m.specialProductId ? specialById.get(m.specialProductId) : null;
+      const platesPer = m.mixSpecialPlates || 1;
+      const needGrams = (m.specialProduct?.plateGrams || batch?.plateGrams || 1) * platesPer * startQtyOf(rulesOf(m));
+      if (!batch || batch.remainingGrams + 0.0005 < needGrams) {
+        const ok = await ask({
+          title: t("waiter.mixFallbackTitle"),
+          body: t("waiter.mixFallbackBody", { name: m.name }),
+        });
+        if (!ok) return;
+        addNormal(m, {
+          cartKey: `${m.id}:solo`,
+          saleMode: "MIX",
+          soloStoreFallback: true,
+          name: `${m.name} (${t("waiter.storeOnly")})`,
+        });
+        return;
+      }
+      addNormal(m, { saleMode: "MIX" });
+      return;
+    }
+    addNormal(m);
+  }
+
+  function confirmSpecialAdd() {
+    if (!specialPick) return;
+    const m = specialPick;
+    const batch = m.specialProductId ? specialById.get(m.specialProductId) : null;
+    const sellMode = m.specialProduct?.sellMode || batch?.sellMode || "BOTH";
+    if (specialMode === "RS" && sellMode === "SERVING_ONLY") return;
+    if (specialMode === "PLATE" && sellMode === "RS_ONLY") return;
+    const platePrice = m.specialProduct?.platePrice || batch?.platePrice || m.sellingPrice;
+    if (specialMode === "RS") {
+      const rs = Number(specialRs);
+      if (!Number.isFinite(rs) || rs < 0.01) {
+        toast.push(t("waiter.specialRsInvalid"), "err");
+        return;
+      }
+      if (batch && rs > batch.maxRs + 0.01) {
+        toast.push(t("waiter.specialRsMax", { n: money(batch.maxRs) }), "err");
+        return;
+      }
+      if (!(platePrice > 0)) {
+        toast.push(t("waiter.specialRsInvalid"), "err");
+        return;
+      }
+      const plateGrams = m.specialProduct?.plateGrams || batch?.plateGrams || 1;
+      const plates = rs / platePrice;
+      const grams = Math.round(plates * plateGrams * 1000) / 1000;
+      if (batch && grams > batch.remainingGrams + 0.05) {
+        toast.push(t("waiter.specialRsMax", { n: money(batch.maxRs) }), "err");
+        return;
+      }
+      addNormal(m, {
+        cartKey: `${m.id}:rs`,
+        saleMode: "RS",
+        amountRs: rs,
+        specialGrams: grams,
+        quantity: Math.round(plates * 1000) / 1000,
+        rate: platePrice,
+        name: `${m.name} (Rs)`,
+        allowCustomQty: false,
+      });
+    } else {
+      if (batch && batch.remainingPlates < startQtyOf(rulesOf(m))) {
+        toast.push(t("waiter.specialOut"), "err");
+        return;
+      }
+      addNormal(m, {
+        cartKey: m.id,
+        saleMode: "PLATE",
+        rate: platePrice,
+      });
+    }
+    setSpecialPick(null);
+  }
+
+  function commitPerHead(opts?: { heads?: number; variableQty?: number; lockVariable?: boolean }) {
+    if (!perHead?.enabled || perHead.amount <= 0) {
+      toast.push(t("waiter.perHeadDisabled"), "err");
+      return;
+    }
+    const orderAlreadyHasPerHead = !!order?.items.some((i) => i.lineKind === "PER_HEAD");
+    const pkgItems = perHead.items ?? [];
+    const heads = Math.max(1, Math.floor(Number(opts?.heads) || 1));
     setCart((prev) => {
-      const hit = prev.find((p) => p.cartKey === m.id);
+      const hit = prev.find((p) => p.cartKey === PER_HEAD_KEY);
       if (hit) {
         return prev.map((p) =>
-          p.cartKey === m.id ? { ...p, quantity: +(p.quantity + step(m.sellUnit)).toFixed(3) } : p
+          p.cartKey === PER_HEAD_KEY
+            ? { ...p, quantity: p.quantity + 1, rate: perHead.amount, name: perHead.label }
+            : p
         );
       }
-      return [
-        ...prev,
-        {
-          cartKey: m.id,
-          kind: "MENU",
-          menuItemId: m.id,
-          name: m.name,
-          sellUnit: m.sellUnit,
-          rate: m.sellingPrice,
-          quantity: 1,
-          notes: "",
-        },
-      ];
+      const charge: CartLine = {
+        cartKey: PER_HEAD_KEY,
+        kind: "PER_HEAD",
+        name: perHead.label,
+        sellUnit: "PCS",
+        rate: perHead.amount,
+        quantity: heads,
+        notes: "",
+      };
+      if (orderAlreadyHasPerHead || !pkgItems.length) {
+        return [...prev, charge];
+      }
+      const pkgLines: CartLine[] = pkgItems
+        .map((pkg) => {
+          const quantity = pkg.variable
+            ? Math.max(0.001, opts?.variableQty ?? pkg.qty)
+            : Math.max(0.001, pkg.qty);
+          if (!(quantity > 0)) return null;
+          const lockVar = !!pkg.variable && !!opts?.lockVariable;
+          return {
+            cartKey: phPkgKey(pkg.menuItemId),
+            kind: "MENU" as const,
+            menuItemId: pkg.menuItemId,
+            name: pkg.name,
+            sellUnit: pkg.sellUnit,
+            rate: 0,
+            quantity,
+            notes: "Per head",
+            fromPerHead: true,
+            perHeadLocked: !pkg.variable || lockVar,
+            minQty: pkg.minQty,
+            maxQty: pkg.maxQty,
+            qtyStep: pkg.qtyStep,
+            allowCustomQty: pkg.variable && !lockVar ? pkg.allowCustomQty : false,
+            listPortionQty: pkg.listPortionQty,
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x != null);
+      return [...prev, charge, ...pkgLines];
     });
+    setPerHeadWizard(null);
   }
 
   function addPerHead() {
@@ -374,33 +682,138 @@ export function WaiterPage() {
       toast.push(t("waiter.perHeadDisabled"), "err");
       return;
     }
-    setCart((prev) => {
-      const hit = prev.find((p) => p.cartKey === PER_HEAD_KEY);
-      if (hit) {
-        return prev.map((p) =>
-          p.cartKey === PER_HEAD_KEY ? { ...p, quantity: p.quantity + 1, rate: perHead.amount, name: perHead.label } : p
-        );
-      }
-      return [
-        ...prev,
-        {
-          cartKey: PER_HEAD_KEY,
-          kind: "PER_HEAD",
-          name: perHead.label,
-          sellUnit: "PCS",
-          rate: perHead.amount,
-          quantity: 1,
-          notes: "",
-        },
-      ];
+    if (cart.some((p) => p.cartKey === PER_HEAD_KEY)) {
+      commitPerHead();
+      return;
+    }
+    // First add: always ask how many persons.
+    setPerHeadWizard({ step: "persons", persons: "1" });
+  }
+
+  function continuePerHeadPersons() {
+    if (!perHead) return;
+    const persons = Math.max(1, Math.floor(Number(perHeadWizard?.step === "persons" ? perHeadWizard.persons : 0) || 0));
+    if (!Number.isFinite(persons) || persons < 1) {
+      toast.push(t("waiter.qtyFixFirst"), "err");
+      return;
+    }
+    const orderAlreadyHasPerHead = !!order?.items.some((i) => i.lineKind === "PER_HEAD");
+    const pkgItems = perHead.items ?? [];
+    if (orderAlreadyHasPerHead || !pkgItems.length) {
+      commitPerHead({ heads: persons });
+      return;
+    }
+    const variable = pkgItems.find((i) => i.variable);
+    if (!variable) {
+      commitPerHead({ heads: persons });
+      return;
+    }
+    // 1 person → choose-item must come (default qty), no ask.
+    if (persons === 1) {
+      commitPerHead({
+        heads: 1,
+        variableQty: Math.max(0.001, variable.qty || 1),
+        lockVariable: true,
+      });
+      return;
+    }
+    // 2+ persons → ask how many of the choose-item to give.
+    setPerHeadWizard({
+      step: "itemQty",
+      persons,
+      item: variable,
+      qty: String(variable.qty || 1),
     });
   }
 
   function setQty(id: string, qty: number) {
+    const line = cart.find((p) => p.cartKey === id);
+    if (!line) return;
+    if (line.fromPerHead && line.perHeadLocked) return;
+    if (qty <= 0) {
+      setCart((prev) => {
+        let next = prev.filter((p) => p.cartKey !== id);
+        if (id === PER_HEAD_KEY) {
+          next = next.filter((p) => !p.fromPerHead);
+        }
+        return next;
+      });
+      setQtyDraft((d) => {
+        const next = { ...d };
+        delete next[id];
+        if (id === PER_HEAD_KEY) {
+          for (const k of Object.keys(next)) {
+            if (k.startsWith("__ph__")) delete next[k];
+          }
+        }
+        return next;
+      });
+      return;
+    }
+    const next =
+      id === PER_HEAD_KEY
+        ? Math.max(1, Math.floor(Number(qty) || 1))
+        : clampQty(rulesOf(line), qty);
+    if (next <= 0) {
+      setCart((prev) => prev.filter((p) => p.cartKey !== id));
+      setQtyDraft((d) => {
+        const n = { ...d };
+        delete n[id];
+        return n;
+      });
+      return;
+    }
+    const chooseId = (perHead?.items ?? []).find((i) => i.variable)?.menuItemId;
     setCart((prev) =>
-      qty <= 0 ? prev.filter((p) => p.cartKey !== id) : prev.map((p) => (p.cartKey === id ? { ...p, quantity: +qty.toFixed(3) } : p))
+      prev.map((p) => {
+        if (p.cartKey === id) return { ...p, quantity: next };
+        // Per head → 1 person: choose-item auto becomes 1 and locks.
+        if (id === PER_HEAD_KEY && next === 1 && chooseId && p.fromPerHead && p.menuItemId === chooseId) {
+          return { ...p, quantity: 1, perHeadLocked: true, allowCustomQty: false };
+        }
+        // Per head → 2+: unlock choose-item again so qty can be edited.
+        if (id === PER_HEAD_KEY && next > 1 && chooseId && p.fromPerHead && p.menuItemId === chooseId) {
+          return { ...p, perHeadLocked: false, allowCustomQty: true };
+        }
+        return p;
+      })
+    );
+    setQtyDraft((d) => {
+      const draft: Record<string, string> = { ...d, [id]: String(next) };
+      if (id === PER_HEAD_KEY && next === 1 && chooseId) {
+        draft[phPkgKey(chooseId)] = "1";
+      }
+      return draft;
+    });
+  }
+
+  /** Free typing — do not clamp; validation blocks send instead. */
+  function setQtyTyped(id: string, text: string) {
+    const line = cart.find((p) => p.cartKey === id);
+    if (line?.fromPerHead && line.perHeadLocked) return;
+    setQtyDraft((d) => ({ ...d, [id]: text }));
+    const n = Number(text);
+    if (!Number.isFinite(n)) return;
+    setCart((prev) =>
+      prev.map((p) => (p.cartKey === id ? { ...p, quantity: +n.toFixed(3) } : p))
     );
   }
+
+  function qtyTextOf(l: CartLine) {
+    return qtyDraft[l.cartKey] ?? String(l.quantity);
+  }
+
+  function lineQtyIssue(l: CartLine) {
+    if (l.kind === "PER_HEAD") return null;
+    if (l.fromPerHead && l.perHeadLocked) return null;
+    if (l.saleMode === "RS") return null;
+    const text = qtyTextOf(l).trim();
+    if (text === "" || text === "." || text === "-") return "invalid" as const;
+    const n = Number(text);
+    return qtyIssueOf(rulesOf(l), n);
+  }
+
+  const cartQtyBlocked = cart.some((l) => lineQtyIssue(l) != null);
 
   function setNote(id: string, notes: string) {
     setCart((prev) => prev.map((p) => (p.cartKey === id ? { ...p, notes } : p)));
@@ -443,6 +856,7 @@ export function WaiterPage() {
       const updated = await api<Order>(`/orders/${order.id}/release-credit`, { method: "POST" });
       setOrder(null);
       setCart([]);
+      setQtyDraft({});
       if (updated.creditCustomer) {
         setCreditOn(true);
         setCreditPick(updated.creditCustomer);
@@ -458,6 +872,10 @@ export function WaiterPage() {
 
   async function sendToKitchen() {
     if (!cart.length) return;
+    if (cart.some((l) => lineQtyIssue(l) != null)) {
+      toast.push(t("waiter.qtyFixFirst"), "err");
+      return;
+    }
     if (can("order.pay") && !isTakeawayView && creditOn && !creditPick && !order?.creditCustomer) {
       toast.push(t("waiter.creditNeed"), "err");
       return;
@@ -484,12 +902,29 @@ export function WaiterPage() {
 
   async function sendOrder(serverName: string, assignedCashierId?: string) {
     setBusy(true);
+    const packageLines = cart
+      .filter((c) => c.fromPerHead && c.menuItemId)
+      .map((c) => ({ menuItemId: c.menuItemId!, quantity: c.quantity }));
     const hasMenu = cart.some((c) => c.kind === "MENU");
-    const items = cart.map((c) =>
-      c.kind === "PER_HEAD"
-        ? { kind: "PER_HEAD" as const, quantity: c.quantity, notes: c.notes || undefined }
-        : { menuItemId: c.menuItemId!, quantity: c.quantity, notes: c.notes || undefined }
-    );
+    const items = cart
+      .filter((c) => !c.fromPerHead)
+      .map((c) =>
+        c.kind === "PER_HEAD"
+          ? {
+              kind: "PER_HEAD" as const,
+              quantity: c.quantity,
+              notes: c.notes || undefined,
+              ...(packageLines.length ? { packageLines } : {}),
+            }
+          : {
+              menuItemId: c.menuItemId!,
+              quantity: c.quantity,
+              notes: c.notes || undefined,
+              ...(c.saleMode ? { saleMode: c.saleMode } : {}),
+              ...(c.amountRs != null ? { amountRs: c.amountRs } : {}),
+              ...(c.soloStoreFallback ? { soloStoreFallback: true } : {}),
+            }
+      );
     const preview = hasMenu && previewFirst && canReprintKot;
     try {
       const isNewWalkIn = selected === WALK_IN;
@@ -526,10 +961,44 @@ export function WaiterPage() {
         toast.push(t("waiter.sentPrint", { n: res.orderNo }), "ok");
       }
       setCart([]);
+      setQtyDraft({});
       setOrder(res);
       if (isTakeaway) setSelected(twKey(res.id));
       void loadTables();
+      api<{ products: TodaySpecial[] }>("/specials/today")
+        .then((d) => setSpecialsToday(d.products || []))
+        .catch(() => undefined);
     } catch (e) {
+      if (e instanceof ApiError && e.code === "HOTEL_CLOSED") {
+        toast.push(t("waiter.hotelClosed"), "err");
+        return;
+      }
+      if (e instanceof ApiError && (e.code === "BATCH_SHORT" || e.code === "BATCH_UNAVAILABLE")) {
+        const mixLines = cart.filter((c) => c.saleMode === "MIX" && !c.soloStoreFallback);
+        if (mixLines.length) {
+          const ok = await ask({
+            title: t("waiter.mixFallbackTitle"),
+            body: `${e.message}\n\n${t("waiter.mixFallbackRetry")}`,
+          });
+          if (ok) {
+            setCart((prev) =>
+              prev.map((c) =>
+                c.saleMode === "MIX" && !c.soloStoreFallback
+                  ? {
+                      ...c,
+                      soloStoreFallback: true,
+                      cartKey: `${c.menuItemId}:solo`,
+                      name: c.name.includes("(") ? c.name : `${c.name} (${t("waiter.storeOnly")})`,
+                    }
+                  : c
+              )
+            );
+            toast.push(t("waiter.mixFallbackHint"), "ok");
+            setBusy(false);
+            return;
+          }
+        }
+      }
       toast.push(e instanceof Error ? e.message : t("waiter.sendFailed"), "err");
     } finally {
       setBusy(false);
@@ -676,6 +1145,7 @@ export function WaiterPage() {
 
   function catLabel(c: string) {
     if (c === "ALL") return t("common.all");
+    if (c === "SPECIAL") return t("waiter.specialTab");
     if (c === "General") return t("common.general");
     return c;
   }
@@ -754,11 +1224,19 @@ export function WaiterPage() {
 
   // ---------- table grid ----------
   if (!selected) {
-    const busyCount = tables.filter((tbl) => tbl.order).length + takeaways.length;
+    const visibleTables = partitionFilter
+      ? tables.filter((tbl) => tbl.partitionId === partitionFilter)
+      : tables;
+    const busyCount = visibleTables.filter((tbl) => tbl.order).length + takeaways.length;
     const sections =
       partitions.length > 0
         ? partitions
-        : [{ id: "_all", name: "", sortOrder: 0, tables }];
+            .filter((p) => !partitionFilter || p.id === partitionFilter)
+            .map((p) => ({
+              ...p,
+              tables: p.tables.filter((tbl) => !partitionFilter || tbl.partitionId === partitionFilter),
+            }))
+        : [{ id: "_all", name: "", sortOrder: 0, tables: visibleTables }];
     return (
       <div className="waiter">
         {kotModal}
@@ -767,7 +1245,7 @@ export function WaiterPage() {
             <h1>{t("waiter.title")}</h1>
             <p>
               {t("waiter.occupied", { n: busyCount })} ·{" "}
-              {t("waiter.freeCount", { n: tables.length - tables.filter((x) => x.order).length })} ·{" "}
+              {t("waiter.freeCount", { n: visibleTables.length - visibleTables.filter((x) => x.order).length })} ·{" "}
               {t("waiter.takeawayOpen", { n: takeaways.length })} · {t("waiter.hint")}
             </p>
           </div>
@@ -775,6 +1253,27 @@ export function WaiterPage() {
             {t("common.refresh")}
           </button>
         </div>
+        {partitions.length > 0 && (
+          <div className="chips" style={{ marginBottom: "0.75rem" }}>
+            <button
+              type="button"
+              className={`chip ${!partitionFilter ? "active" : ""}`}
+              onClick={() => setPartitionFilter("")}
+            >
+              {t("waiter.filterAll")}
+            </button>
+            {partitions.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                className={`chip ${partitionFilter === p.id ? "active" : ""}`}
+                onClick={() => setPartitionFilter(p.id)}
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="table-legend tiny muted">
           <span className="dot free" /> {t("waiter.free")}{" "}
           <span className="dot busy" /> {t("waiter.inProgress")}
@@ -794,9 +1293,14 @@ export function WaiterPage() {
         <div className="table-partition" style={{ marginTop: "0.5rem" }}>
           <h2 style={{ margin: "0 0 0.6rem", fontSize: "1.05rem" }}>{t("waiter.takeawaySection")}</h2>
           <div className="table-grid">
-            <button type="button" className="table-card walkin free" onClick={openWalkIn}>
+            <button
+              type="button"
+              className="table-card walkin free"
+              disabled={hotelClosed}
+              onClick={openWalkIn}
+            >
               <strong>+ {t("waiter.newTakeaway")}</strong>
-              <span className="tiny">{t("waiter.walkInParcel")}</span>
+              <span className="tiny">{hotelClosed ? t("waiter.hotelClosed") : t("waiter.walkInParcel")}</span>
             </button>
             {takeaways.map(renderTakeawayCard)}
           </div>
@@ -873,16 +1377,34 @@ export function WaiterPage() {
               </button>
             )}
             {shownMenu.map((m) => {
-              const inCart = cart.find((c) => c.cartKey === m.id);
+              const inCart = cart.find(
+                (c) => c.menuItemId === m.id || c.cartKey === m.id || c.cartKey.startsWith(`${m.id}:`)
+              );
+              const batch = m.specialProductId ? specialById.get(m.specialProductId) : null;
+              const serving =
+                m.specialProduct?.servingLabel || batch?.servingLabel || t("specials.plate");
+              const remHint =
+                m.kind === "SPECIAL" || m.kind === "MIX"
+                  ? batch
+                    ? ` · ${batch.remainingPlates.toFixed(1)} ${serving}`
+                    : ` · ${t("waiter.specialOutShort")}`
+                  : "";
               return (
-                <button key={m.id} type="button" className={`waiter-item ${inCart ? "in-cart" : ""}`} onClick={() => add(m)}>
+                <button key={m.id} type="button" className={`waiter-item ${inCart ? "in-cart" : ""}`} onClick={() => void add(m)}>
                   <strong>{m.name}</strong>
                   <span className="tiny muted">
-                    {money(m.sellingPrice)} / {unitLabel(m.sellUnit)}
+                    {m.kind === "SPECIAL"
+                      ? `${money(m.specialProduct?.platePrice ?? m.sellingPrice)} / ${serving}`
+                      : listPriceLabel(m, money)}
+                    {m.minQty ? ` · ≥${m.minQty}` : ""}
+                    {m.maxQty != null ? ` · ≤${m.maxQty}` : ""}
+                    {remHint}
                   </span>
                   {inCart && (
                     <span className="waiter-item-qty">
-                      {inCart.quantity} {unitLabel(m.sellUnit)}
+                      {inCart.saleMode === "RS" && inCart.amountRs != null
+                        ? money(inCart.amountRs)
+                        : `${inCart.quantity} ${unitLabel(m.sellUnit)}`}
                     </span>
                   )}
                 </button>
@@ -978,41 +1500,101 @@ export function WaiterPage() {
                     }}
                   />
                   <div className="edit-bill-items">{t("common.items")}</div>
-                  {order.items.map((i) => (
-                    <div key={i.id} className="row" style={{ justifyContent: "space-between", marginBottom: "0.5rem" }}>
-                      <span>
-                        {i.name}
-                        <span className="tiny muted"> · {unitLabel(i.sellUnit)}</span>
-                      </span>
-                      <div className="row" style={{ gap: "0.35rem", alignItems: "center" }}>
+                  {order.items.map((i) => {
+                    const menuHit = menu.find((m) => m.name === i.name && m.sellUnit === i.sellUnit);
+                    const rules: QtyRules = menuHit
+                      ? rulesOf(menuHit)
+                      : { sellUnit: i.sellUnit, allowCustomQty: true };
+                    const cur = editQty[i.id] ?? i.quantity;
+                    const removed = cur <= 0;
+                    return (
+                    <div key={i.id} className="waiter-line" style={{ marginBottom: "0.35rem" }}>
+                      <div className="row" style={{ justifyContent: "space-between", gap: "0.5rem" }}>
+                        <span>
+                          {i.name}
+                          <span className="tiny muted"> · {unitLabel(i.sellUnit)}</span>
+                          {removed ? (
+                            <span className="tiny qty-error-msg"> · {t("bills.itemRemoved")}</span>
+                          ) : null}
+                        </span>
+                        {removed ? (
+                          <button
+                            type="button"
+                            className="btn ghost sm"
+                            onClick={() =>
+                              setEditQty((prev) => ({
+                                ...prev,
+                                [i.id]: startQtyOf(rules) || i.quantity || 1,
+                              }))
+                            }
+                          >
+                            {t("bills.undoRemove")}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="icon-btn waiter-remove"
+                            onClick={() => setEditQty((prev) => ({ ...prev, [i.id]: 0 }))}
+                            aria-label={t("common.remove")}
+                            title={t("common.remove")}
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                      {!removed && (
+                      <div className="row waiter-qty">
                         <button
                           type="button"
                           className="qty-btn"
                           onClick={() =>
-                            setEditQty((prev) => ({
-                              ...prev,
-                              [i.id]: Math.max(0, +((prev[i.id] ?? i.quantity) - step(i.sellUnit)).toFixed(3)),
-                            }))
+                            setEditQty((prev) => {
+                              const q = prev[i.id] ?? i.quantity;
+                              const proposed = +(q - qtyStepOf(rules)).toFixed(3);
+                              const next =
+                                proposed + 1e-9 < startQtyOf(rules) ? 0 : clampQty(rules, proposed);
+                              return { ...prev, [i.id]: next };
+                            })
                           }
                         >
                           −
                         </button>
-                        <span className="qty-val">{editQty[i.id] ?? i.quantity}</span>
+                        {allowCustomOf(rules) ? (
+                          <input
+                            className="qty-val"
+                            style={{ width: "4.2rem", textAlign: "center" }}
+                            type="number"
+                            min={0}
+                            step="any"
+                            value={cur}
+                            onChange={(e) => {
+                              const raw = Number(e.target.value);
+                              setEditQty((prev) => ({
+                                ...prev,
+                                [i.id]: Number.isFinite(raw) ? (raw <= 0 ? 0 : clampQty(rules, raw)) : 0,
+                              }));
+                            }}
+                          />
+                        ) : (
+                          <span className="qty-val">{cur}</span>
+                        )}
                         <button
                           type="button"
                           className="qty-btn"
                           onClick={() =>
                             setEditQty((prev) => ({
                               ...prev,
-                              [i.id]: +((prev[i.id] ?? i.quantity) + step(i.sellUnit)).toFixed(3),
+                              [i.id]: bumpQty(rules, prev[i.id] ?? i.quantity, 1),
                             }))
                           }
                         >
                           +
                         </button>
                       </div>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <>
@@ -1072,42 +1654,144 @@ export function WaiterPage() {
 
           <h3>{order ? t("waiter.newItems") : t("common.order")}</h3>
           {!cart.length && <div className="empty">{t("waiter.tapAdd")}</div>}
-          {cart.map((l) => (
-            <div className="waiter-line" key={l.cartKey}>
-              <div className="row" style={{ justifyContent: "space-between" }}>
+          {cart.map((l) => {
+            const issue = lineQtyIssue(l);
+            const minQ = minQtyOf(rulesOf(l));
+            const maxQ = maxQtyOf(rulesOf(l));
+            const issueMsg =
+              issue === "below_min"
+                ? t("waiter.qtyKeepAbove", { n: minQ, u: unitLabel(l.sellUnit) })
+                : issue === "above_max" && maxQ != null
+                  ? t("waiter.qtyKeepBelow", { n: maxQ, u: unitLabel(l.sellUnit) })
+                  : issue === "invalid"
+                    ? t("waiter.qtyInvalid")
+                    : issue === "bad_step"
+                      ? t("waiter.qtyBadStep", {
+                          n: qtyStepOf(rulesOf(l)),
+                          u: unitLabel(l.sellUnit),
+                        })
+                      : null;
+            if (l.fromPerHead && l.perHeadLocked) {
+              return (
+                <div className="waiter-line waiter-line-perhead-fixed" key={l.cartKey}>
+                  <strong>{l.name}</strong>
+                  <span className="tiny muted"> · {t("waiter.perHeadIncl")}</span>
+                </div>
+              );
+            }
+            return (
+            <div className={`waiter-line${issue ? " qty-error" : ""}`} key={l.cartKey}>
+              <div className="row" style={{ justifyContent: "space-between", gap: "0.5rem" }}>
                 <strong>
                   {l.name}
                   {l.kind === "PER_HEAD" ? (
                     <span className="tiny muted"> · {t("waiter.onBill")}</span>
+                  ) : l.fromPerHead ? (
+                    <span className="tiny muted"> · {t("waiter.perHeadIncl")}</span>
                   ) : null}
                 </strong>
-                <span>{money(l.rate * l.quantity)}</span>
+                <div className="row" style={{ gap: "0.35rem", alignItems: "center", flexShrink: 0 }}>
+                  <span>
+                    {l.fromPerHead
+                      ? t("waiter.perHeadIncl")
+                      : l.saleMode === "RS" && l.amountRs != null
+                        ? money(l.amountRs)
+                        : money(l.rate * Math.max(0, l.quantity))}
+                  </span>
+                  <button
+                    type="button"
+                    className="icon-btn waiter-remove"
+                    onClick={() => setQty(l.cartKey, 0)}
+                    aria-label={t("common.remove")}
+                    title={t("common.remove")}
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
               <div className="row waiter-qty">
-                <button type="button" className="qty-btn" onClick={() => setQty(l.cartKey, l.quantity - step(l.sellUnit))}>
+                {l.saleMode === "RS" ? (
+                  <>
+                    <span className="qty-val">
+                      {l.specialGrams != null
+                        ? `${Math.round(l.specialGrams * 1000) / 1000} g`
+                        : "—"}
+                    </span>
+                    <span className="tiny muted">{t("waiter.specialGramsLocked")}</span>
+                  </>
+                ) : (
+                  <>
+                <button
+                  type="button"
+                  className="qty-btn"
+                  onClick={() => {
+                    const rules = rulesOf(l);
+                    const cur = Number(qtyTextOf(l));
+                    const base = Number.isFinite(cur) ? cur : l.quantity;
+                    const proposed = +(base - qtyStepOf(rules)).toFixed(3);
+                    setQty(l.cartKey, proposed + 1e-9 < startQtyOf(rules) ? 0 : proposed);
+                  }}
+                >
                   −
                 </button>
-                <span className="qty-val">
-                  {l.quantity} {unitLabel(l.sellUnit)}
-                </span>
-                <button type="button" className="qty-btn" onClick={() => setQty(l.cartKey, l.quantity + step(l.sellUnit))}>
+                {l.kind === "PER_HEAD" || !allowCustomOf(l) ? (
+                  <span className="qty-val">{l.quantity}</span>
+                ) : (
+                  <input
+                    className={`field-ctrl sm${issue ? " qty-error-input" : ""}`}
+                    style={{ textAlign: "center" }}
+                    type="text"
+                    inputMode="decimal"
+                    value={qtyTextOf(l)}
+                    onChange={(e) => setQtyTyped(l.cartKey, e.target.value)}
+                    aria-label={t("waiter.qtyCustom")}
+                    aria-invalid={!!issue}
+                  />
+                )}
+                <span className="tiny muted">{unitLabel(l.sellUnit)}</span>
+                <button
+                  type="button"
+                  className="qty-btn"
+                  onClick={() => {
+                    const cur = Number(qtyTextOf(l));
+                    const base = Number.isFinite(cur) && cur > 0 ? cur : l.quantity;
+                    setQty(l.cartKey, bumpQty(rulesOf(l), base, 1));
+                  }}
+                >
                   +
                 </button>
-                {quickQty(l.sellUnit).map((qv) => (
+                {quickQtys(rulesOf(l)).map((qv) => (
                   <button
                     key={qv}
                     type="button"
-                    className={`chip ${l.quantity === qv ? "active" : ""}`}
+                    className={`chip ${Number(qtyTextOf(l)) === qv ? "active" : ""}`}
                     onClick={() => setQty(l.cartKey, qv)}
                   >
                     {qv}
                   </button>
                 ))}
+                  </>
+                )}
               </div>
+              {l.saleMode === "RS" ? (
+                <div className="tiny muted">
+                  {l.amountRs != null ? money(l.amountRs) : null}
+                  {l.specialGrams != null ? ` · ${formatKg(l.specialGrams)}` : ""}
+                </div>
+              ) : issueMsg ? (
+                <div className="tiny qty-error-msg">{issueMsg}</div>
+              ) : l.kind === "MENU" && (l.minQty || l.maxQty != null) ? (
+                <div className="tiny muted">
+                  {l.minQty ? t("waiter.qtyMin", { n: l.minQty, u: unitLabel(l.sellUnit) }) : null}
+                  {l.maxQty != null
+                    ? `${l.minQty ? " · " : ""}${t("waiter.qtyMaxHint", { n: l.maxQty, u: unitLabel(l.sellUnit) })}`
+                    : null}
+                </div>
+              ) : null}
               {l.kind === "MENU" &&
                 (noteFor === l.cartKey || l.notes ? (
                   <input
-                    className="waiter-note"
+                    className="waiter-note field-ctrl wide"
                     value={l.notes}
                     onChange={(e) => setNote(l.cartKey, e.target.value)}
                     placeholder={t("waiter.notePh")}
@@ -1119,7 +1803,8 @@ export function WaiterPage() {
                   </button>
                 ))}
             </div>
-          ))}
+            );
+          })}
 
           {cart.length > 0 && (
             <div className="cart-total">
@@ -1191,10 +1876,11 @@ export function WaiterPage() {
             </div>
           )}
 
+          {hotelClosed && <p className="hotel-note">{t("waiter.hotelClosed")}</p>}
           <button
             type="button"
             className="btn waiter-send"
-            disabled={busy || !cart.length}
+            disabled={busy || !cart.length || cartQtyBlocked || hotelClosed}
             onClick={() => void sendToKitchen()}
           >
             {busy
@@ -1250,6 +1936,225 @@ export function WaiterPage() {
           )}
         </aside>
       </div>
+
+      <Modal
+        open={!!specialPick}
+        title={specialPick ? specialPick.name : t("waiter.specialTab")}
+        onClose={() => setSpecialPick(null)}
+      >
+        {specialPick && (
+          <div>
+            <p className="tiny muted">
+              {(() => {
+                const b = specialPick.specialProductId
+                  ? specialById.get(specialPick.specialProductId)
+                  : null;
+                const unit =
+                  specialPick.specialProduct?.servingLabel || b?.servingLabel || t("specials.plate");
+                return b
+                  ? t("waiter.specialRemain", {
+                      kg: formatKg(b.remainingGrams),
+                      p: b.remainingPlates.toFixed(1),
+                      unit,
+                      rs: money(b.maxRs),
+                    })
+                  : t("waiter.specialOut");
+              })()}
+            </p>
+            {(() => {
+              const b = specialPick.specialProductId
+                ? specialById.get(specialPick.specialProductId)
+                : null;
+              const sellMode = specialPick.specialProduct?.sellMode || b?.sellMode || "BOTH";
+              const unit =
+                specialPick.specialProduct?.servingLabel || b?.servingLabel || t("specials.plate");
+              if (sellMode !== "BOTH") return null;
+              return (
+            <div className="chips" style={{ margin: "0.75rem 0" }}>
+              <button
+                type="button"
+                className={`chip ${specialMode === "PLATE" ? "active" : ""}`}
+                onClick={() => setSpecialMode("PLATE")}
+              >
+                {t("waiter.saleServing", { unit })}
+              </button>
+              <button
+                type="button"
+                className={`chip ${specialMode === "RS" ? "active" : ""}`}
+                onClick={() => setSpecialMode("RS")}
+              >
+                {t("waiter.saleRs")}
+              </button>
+            </div>
+              );
+            })()}
+            {specialMode === "RS" && (
+              <>
+                <div className="field">
+                  <label>{t("waiter.amountRs")}</label>
+                  <input
+                    value={specialRs}
+                    onChange={(e) => setSpecialRs(e.target.value)}
+                    placeholder="500"
+                    inputMode="decimal"
+                    autoFocus
+                  />
+                </div>
+                {(() => {
+                  const b = specialPick.specialProductId
+                    ? specialById.get(specialPick.specialProductId)
+                    : null;
+                  const platePrice =
+                    specialPick.specialProduct?.platePrice || b?.platePrice || specialPick.sellingPrice;
+                  const plateGrams =
+                    specialPick.specialProduct?.plateGrams || b?.plateGrams || 1;
+                  const rs = Number(specialRs);
+                  if (!(rs > 0) || !(platePrice > 0)) {
+                    return (
+                      <p className="tiny muted" style={{ marginTop: 0 }}>
+                        {t("waiter.specialGramsHint")}
+                      </p>
+                    );
+                  }
+                  const grams = Math.round((rs / platePrice) * plateGrams * 1000) / 1000;
+                  return (
+                    <div className="field">
+                      <label>{t("waiter.specialGrams")}</label>
+                      <div
+                        className="field-ctrl"
+                        style={{
+                          padding: "0.55rem 0.75rem",
+                          background: "var(--panel-2, rgba(0,0,0,0.04))",
+                          fontWeight: 700,
+                        }}
+                      >
+                        {grams} g
+                        <span className="tiny muted" style={{ marginLeft: "0.5rem", fontWeight: 500 }}>
+                          ({formatKg(grams)})
+                        </span>
+                      </div>
+                      <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
+                        {t("waiter.specialGramsAuto", {
+                          price: money(platePrice),
+                          plateG: String(plateGrams),
+                        })}
+                      </p>
+                    </div>
+                  );
+                })()}
+              </>
+            )}
+            <div className="form-actions">
+              <button type="button" className="btn ghost" onClick={() => setSpecialPick(null)}>
+                {t("common.cancel")}
+              </button>
+              <button type="button" className="btn" onClick={confirmSpecialAdd}>
+                {t("waiter.addToCart")}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        open={!!perHeadWizard}
+        title={
+          perHeadWizard?.step === "itemQty"
+            ? t("waiter.perHeadVarTitle")
+            : t("waiter.perHeadPersonsTitle")
+        }
+        onClose={() => setPerHeadWizard(null)}
+        size="sm"
+      >
+        {perHeadWizard?.step === "persons" && (
+          <div>
+            <p style={{ marginTop: 0 }}>{t("waiter.perHeadPersonsHint")}</p>
+            <div className="field">
+              <label>{t("waiter.perHeadPersonsLabel")}</label>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={perHeadWizard.persons}
+                autoFocus
+                onChange={(e) =>
+                  setPerHeadWizard({ step: "persons", persons: e.target.value })
+                }
+              />
+            </div>
+            <div className="form-actions">
+              <button type="button" className="btn ghost" onClick={() => setPerHeadWizard(null)}>
+                {t("common.cancel")}
+              </button>
+              <button type="button" className="btn" onClick={continuePerHeadPersons}>
+                {t("common.next")}
+              </button>
+            </div>
+          </div>
+        )}
+        {perHeadWizard?.step === "itemQty" && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              {t("waiter.perHeadVarBody", {
+                name: perHeadWizard.item.name,
+                n: perHeadWizard.persons,
+              })}
+            </p>
+            <p className="tiny muted">
+              {t("waiter.perHeadPersonsCount", { n: perHeadWizard.persons })}
+            </p>
+            {(perHead?.items ?? [])
+              .filter((i) => !i.variable)
+              .map((i) => (
+                <div key={i.menuItemId} className="tiny muted">
+                  {i.name}: {i.qty} {unitLabel(i.sellUnit)} · {t("waiter.perHeadIncl")}
+                </div>
+              ))}
+            <div className="field" style={{ marginTop: "0.75rem" }}>
+              <label>
+                {t("waiter.perHeadVarLabel", {
+                  unit: unitLabel(perHeadWizard.item.sellUnit),
+                })}
+              </label>
+              <input
+                type="number"
+                min={0.001}
+                step="any"
+                value={perHeadWizard.qty}
+                autoFocus
+                onChange={(e) =>
+                  setPerHeadWizard((p) =>
+                    p?.step === "itemQty" ? { ...p, qty: e.target.value } : p
+                  )
+                }
+              />
+            </div>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => setPerHeadWizard({ step: "persons", persons: String(perHeadWizard.persons) })}
+              >
+                {t("common.back")}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  const n = Number(perHeadWizard.qty);
+                  if (!Number.isFinite(n) || n <= 0) {
+                    toast.push(t("waiter.qtyFixFirst"), "err");
+                    return;
+                  }
+                  commitPerHead({ heads: perHeadWizard.persons, variableQty: n });
+                }}
+              >
+                {t("waiter.addToCart")}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

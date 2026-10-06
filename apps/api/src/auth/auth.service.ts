@@ -24,7 +24,7 @@ export class AuthService {
         role: { include: { permissions: { include: { permission: true } } } },
       },
     });
-    if (!user?.active) return null;
+    if (!user?.active || user.deletedAt) return null;
     return {
       id: user.id,
       name: user.name,
@@ -39,7 +39,7 @@ export class AuthService {
     const key = `pw:${ip}:${username}`;
     this.throttle.assertAllowed(key);
     const user = await this.prisma.user.findUnique({ where: { username } });
-    if (!user?.active || !(await bcrypt.compare(dto.password, user.passwordHash))) {
+    if (!user?.active || user.deletedAt || !(await bcrypt.compare(dto.password, user.passwordHash))) {
       this.throttle.fail(key);
       throw new UnauthorizedException(INVALID);
     }
@@ -51,7 +51,12 @@ export class AuthService {
     const key = `pin:${ip}:${dto.userId}`;
     this.throttle.assertAllowed(key);
     const user = await this.prisma.user.findUnique({ where: { id: dto.userId } });
-    if (!user?.active || !user.pinHash || !(await bcrypt.compare(dto.pin, user.pinHash))) {
+    if (
+      !user?.active ||
+      user.deletedAt ||
+      !user.pinHash ||
+      !(await bcrypt.compare(dto.pin, user.pinHash))
+    ) {
       this.throttle.fail(key);
       throw new UnauthorizedException("Wrong PIN");
     }
@@ -62,7 +67,7 @@ export class AuthService {
   /** Public list for the PIN login screen: only active staff who have a PIN. */
   async staff() {
     const users = await this.prisma.user.findMany({
-      where: { active: true, pinHash: { not: null } },
+      where: { active: true, deletedAt: null, pinHash: { not: null } },
       include: { role: true },
       orderBy: [{ role: { code: "asc" } }, { name: "asc" }],
     });

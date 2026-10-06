@@ -75,6 +75,12 @@ export class OrdersController {
     return this.orders.cancel(user, id, dto);
   }
 
+  @Post(":id/reverse")
+  @RequirePerms("order.edit")
+  reverse(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: CancelOrderDto) {
+    return this.orders.reverse(user, id, dto);
+  }
+
   @Post(":id/print-cancel-kot")
   @RequirePerms("order.edit", "print.kot")
   printCancelKot(@CurrentUser() user: AuthUser, @Param("id") id: string) {

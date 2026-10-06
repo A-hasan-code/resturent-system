@@ -117,14 +117,90 @@ export function writePreviewFile(folder: string, name: string, text: string) {
 
 export type SystemPrinter = { name: string; driver: string; port: string; status: string; isDefault: boolean };
 
+export type SystemUsbDevice = {
+  name: string;
+  className: string;
+  status: string;
+  instanceId: string;
+  problem: boolean;
+};
+
 export async function listWindowsPrinters(): Promise<SystemPrinter[]> {
   if (process.platform !== "win32") return [];
-  const out = await powershell([
-    "-Command",
+  // Win32_Printer first — Get-Printer needs PrintManagement and can return empty on some PCs.
+  const commands = [
+    "Get-CimInstance Win32_Printer | ForEach-Object { [pscustomobject]@{ name=$_.Name; driver=$_.DriverName; port=$_.PortName; status=[string]$_.PrinterStatus; isDefault=[bool]$_.Default } } | ConvertTo-Json -Compress",
+    "Get-WmiObject Win32_Printer | ForEach-Object { [pscustomobject]@{ name=$_.Name; driver=$_.DriverName; port=$_.PortName; status=[string]$_.PrinterStatus; isDefault=[bool]$_.Default } } | ConvertTo-Json -Compress",
     "$d=(Get-CimInstance Win32_Printer | Where-Object Default).Name; Get-Printer | ForEach-Object { [pscustomobject]@{ name=$_.Name; driver=$_.DriverName; port=$_.PortName; status=[string]$_.PrinterStatus; isDefault=($_.Name -eq $d) } } | ConvertTo-Json -Compress",
-  ]);
-  const trimmed = out.trim();
-  if (!trimmed) return [];
-  const parsed = JSON.parse(trimmed);
-  return Array.isArray(parsed) ? parsed : [parsed];
+  ];
+  for (const cmd of commands) {
+    try {
+      const out = await powershell(["-Command", cmd]);
+      const trimmed = out.trim();
+      if (!trimmed) continue;
+      const parsed = JSON.parse(trimmed);
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      if (list.length) return list;
+    } catch {
+      /* try next */
+    }
+  }
+  return [];
+}
+
+/** USB / PnP devices on this PC — includes Unknown USB (missing driver) so admins see attached hardware. */
+export async function listUsbDevices(): Promise<SystemUsbDevice[]> {
+  if (process.platform !== "win32") return [];
+  const commands = [
+    String.raw`$ErrorActionPreference='SilentlyContinue';
+$skip='USB Root Hub|Generic USB Hub|USB Composite Device|HID-compliant|USB Input Device|USB Keyboard|USB Mouse|Bluetooth|Webcam|Camera|Audio|Headset|Microphone|Mass Storage|Disk Drive|CD-ROM';
+$rows=@()
+try {
+  $rows = @(Get-PnpDevice -PresentOnly | Where-Object {
+    $id=[string]$_.InstanceId; $cls=[string]$_.Class; $n=[string]$_.FriendlyName; $st=[string]$_.Status
+    if ($n -match $skip) { return $false }
+    if ($id -like 'USB*' -or $cls -in @('USB','USBDevice','Printer','PrintQueue','Image','Ports','SoftwareDevice') -or $st -in @('Error','Unknown','Degraded') -or $n -match 'Unknown|USB Printing|POS|Thermal|Receipt|ESC/POS') { return $true }
+    $false
+  } | ForEach-Object {
+    $n=$_.FriendlyName; if (-not $n) { $n=$_.InstanceId }
+    $st=[string]$_.Status; $cls=[string]$_.Class
+    $problem = ($st -ne 'OK') -or ($n -match 'Unknown') -or ($cls -match 'Unknown') -or ([string]$_.Problem -ne '' -and [string]$_.Problem -ne 'CM_PROB_NONE' -and $_.Problem -ne 0)
+    [pscustomobject]@{ name=$n; className=$cls; status=$st; instanceId=[string]$_.InstanceId; problem=[bool]$problem }
+  })
+} catch {}
+if (-not $rows.Count) {
+  $rows = @(Get-CimInstance Win32_PnPEntity | Where-Object {
+    $id=[string]$_.PNPDeviceID; $n=[string]$_.Name; $st=[string]$_.Status
+    if ($n -match $skip) { return $false }
+    if ($id -like 'USB*' -or $n -match 'Unknown|USB Printing|Printer|POS|Thermal|Receipt') { return $true }
+    $false
+  } | Select-Object -First 80 | ForEach-Object {
+    $n=$_.Name; $st=[string]$_.Status
+    $problem = ($st -ne 'OK') -or ($n -match 'Unknown')
+    [pscustomobject]@{ name=$n; className=([string]$_.PNPClass); status=$st; instanceId=[string]$_.PNPDeviceID; problem=[bool]$problem }
+  })
+}
+$rows | Select-Object -First 80 | ConvertTo-Json -Compress`,
+  ];
+  for (const cmd of commands) {
+    try {
+      const out = await powershell(["-Command", cmd], 45_000);
+      const trimmed = out.trim();
+      if (!trimmed) continue;
+      const parsed = JSON.parse(trimmed);
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      return list
+        .filter((d) => d && d.name)
+        .map((d) => ({
+          name: String(d.name).slice(0, 200),
+          className: String(d.className || "").slice(0, 80),
+          status: String(d.status || "").slice(0, 40),
+          instanceId: String(d.instanceId || "").slice(0, 260),
+          problem: !!d.problem,
+        }));
+    } catch {
+      /* try next */
+    }
+  }
+  return [];
 }

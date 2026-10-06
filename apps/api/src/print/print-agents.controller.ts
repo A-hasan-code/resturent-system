@@ -4,6 +4,7 @@ import {
   Get,
   Headers,
   Param,
+  Patch,
   Post,
   UseGuards,
 } from "@nestjs/common";
@@ -28,6 +29,14 @@ class AgentPrinterDto {
   @IsOptional() @IsBoolean() isDefault?: boolean;
 }
 
+class AgentDeviceDto {
+  @IsString() @MaxLength(200) name!: string;
+  @IsOptional() @IsString() @MaxLength(80) className?: string;
+  @IsOptional() @IsString() @MaxLength(40) status?: string;
+  @IsOptional() @IsString() @MaxLength(260) instanceId?: string;
+  @IsOptional() @IsBoolean() problem?: boolean;
+}
+
 class RegisterAgentDto {
   @IsString() @MaxLength(80) machineKey!: string;
   @IsString() @MaxLength(80) hostname!: string;
@@ -36,6 +45,11 @@ class RegisterAgentDto {
   @ValidateNested({ each: true })
   @Type(() => AgentPrinterDto)
   printers!: AgentPrinterDto[];
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => AgentDeviceDto)
+  devices?: AgentDeviceDto[];
 }
 
 class HeartbeatDto {
@@ -44,10 +58,19 @@ class HeartbeatDto {
   @ValidateNested({ each: true })
   @Type(() => AgentPrinterDto)
   printers?: AgentPrinterDto[];
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => AgentDeviceDto)
+  devices?: AgentDeviceDto[];
 }
 
 class FailJobDto {
   @IsOptional() @IsString() @MaxLength(500) error?: string;
+}
+
+class RenameAgentDto {
+  @IsString() @MaxLength(80) displayName!: string;
 }
 
 @Controller("print-agents")
@@ -62,6 +85,14 @@ export class PrintAgentsController {
     return this.agents.listForAdmin();
   }
 
+  /** Admin: label counter PC (Lawn / Main / Rooftop) — used in printer names + Users assign. */
+  @Patch(":id")
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePerms("printers.manage")
+  rename(@Param("id") id: string, @Body() dto: RenameAgentDto) {
+    return this.agents.rename(id, dto.displayName);
+  }
+
   /** Desktop Additional PC: register / refresh local USB printers. */
   @Post("register")
   register(@Body() dto: RegisterAgentDto) {
@@ -71,7 +102,7 @@ export class PrintAgentsController {
   @Post("heartbeat")
   async heartbeat(@Headers("authorization") auth: string | undefined, @Body() dto: HeartbeatDto) {
     const agent = await this.agents.requireAgent(auth);
-    return this.agents.heartbeat(agent.id, dto.printers);
+    return this.agents.heartbeat(agent.id, dto.printers, dto.devices);
   }
 
   @Post("jobs/claim")

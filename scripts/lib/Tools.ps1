@@ -19,6 +19,11 @@ function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Invoke-Checked([string]$exe, [string[]]$argv, [string]$cwd = $script:RepoRoot) {
   Push-Location $cwd
   try {
+    # Prefer pnpm.cmd over pnpm.ps1: the .ps1 shim mangles multi-arg splats when a path has spaces.
+    if ($exe -eq "pnpm") {
+      $cmd = Get-Command "pnpm.cmd" -ErrorAction SilentlyContinue
+      if ($cmd) { $exe = $cmd.Source }
+    }
     & $exe @argv
     if ($LASTEXITCODE -ne 0) { throw "$exe $($argv -join ' ') failed (exit $LASTEXITCODE)" }
   } finally { Pop-Location }

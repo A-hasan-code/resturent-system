@@ -12,11 +12,23 @@ import {
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { memoryStorage } from "multer";
-import { IsNumber, IsOptional, IsString, Matches, MaxLength, Min } from "class-validator";
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  Min,
+  ValidateNested,
+} from "class-validator";
 import { Type } from "class-transformer";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
-import { RequirePerms } from "../common/decorators";
+import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
+import { RealtimeService } from "../realtime/realtime.service";
 import { ServerIdentityService } from "./server-identity.service";
 import { SettingsService } from "./settings.service";
 import { BackupService } from "./backup.service";
@@ -51,8 +63,21 @@ class UpdateSettingsDto {
   @IsOptional() @IsString() @Matches(/^[01]$/) perHeadEnabled?: string;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) perHeadAmount?: number;
   @IsOptional() @IsString() @MaxLength(40) perHeadLabel?: string;
+  /** Menu items included with per-head (kitchen lines at Rs 0). */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(12)
+  @ValidateNested({ each: true })
+  @Type(() => PerHeadPackageItemDto)
+  perHeadPackage?: PerHeadPackageItemDto[];
   /** Business day starts at this server time, HH:mm. Runs until the same time next day. */
   @IsOptional() @IsString() @Matches(/^([01]\d|2[0-3]):[0-5]\d$/) dayStart?: string;
+}
+
+class PerHeadPackageItemDto {
+  @IsString() menuItemId!: string;
+  @Type(() => Number) @IsNumber() @Min(0.001) qty!: number;
+  @IsBoolean() variable!: boolean;
 }
 
 class BillPreviewDto {
@@ -100,8 +125,29 @@ export class SystemController {
     private readonly identity: ServerIdentityService,
     private readonly settings: SettingsService,
     private readonly backups: BackupService,
-    private readonly tips: TipService
+    private readonly tips: TipService,
+    private readonly realtime: RealtimeService
   ) {}
+
+  /** Any signed-in user can see whether new orders are allowed. */
+  @Get("hotel")
+  hotelStatus() {
+    return this.settings.hotelStatus();
+  }
+
+  @Post("hotel/close")
+  async closeHotel(@CurrentUser() user: AuthUser) {
+    const status = await this.settings.closeHotel(user);
+    this.realtime.hotelStatus(status);
+    return status;
+  }
+
+  @Post("hotel/open")
+  async openHotel(@CurrentUser() user: AuthUser) {
+    const status = await this.settings.openHotel(user);
+    this.realtime.hotelStatus(status);
+    return status;
+  }
 
   @Get("settings")
   async getSettings() {
@@ -227,6 +273,15 @@ export class SystemController {
     }
     if (dto.perHeadAmount != null) {
       await this.settings.set("billing.perHeadAmount", String(dto.perHeadAmount));
+    }
+    if (dto.perHeadPackage != null) {
+      await this.settings.savePerHeadPackage(
+        dto.perHeadPackage.map((p) => ({
+          menuItemId: p.menuItemId,
+          qty: p.qty,
+          variable: p.variable,
+        }))
+      );
     }
     return this.getSettings();
   }

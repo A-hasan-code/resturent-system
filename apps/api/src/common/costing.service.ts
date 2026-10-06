@@ -11,6 +11,18 @@ function qtyLabel(n: number, unit: UnitType) {
   return `${text} ${UNIT_LABEL[unit] ?? unit}`;
 }
 
+function formatShortfalls(
+  short: { name: string; unit: UnitType; need: number; onHand: number; dishes?: string[] }[],
+  action: string
+) {
+  const parts = short.map((n) => {
+    const dish = n.dishes?.length ? `${n.dishes.join(", ")} · ` : "";
+    const state = n.onHand <= 0.0001 ? "out of stock" : "short";
+    return `${dish}${n.name} is ${state} (store ${qtyLabel(n.onHand, n.unit)}, need ${qtyLabel(n.need, n.unit)})`;
+  });
+  return `${action}: ${parts.join("; ")}. Not done — inventory unchanged.`;
+}
+
 @Injectable()
 export class CostingService {
   constructor(private readonly prisma: PrismaService) {}
@@ -35,10 +47,16 @@ export class CostingService {
     return { recipe, costPerBase: cost / baseQty, totalForBase: cost };
   }
 
-  /** Block the order when any recipe ingredient is short. Shared ingredients in one order are added together. */
-  async assertCanSell(lines: { recipeId: string; quantity: number; name: string }[]) {
+  /** Ingredients that would go short for the given recipe quantities (shared items summed). */
+  async recipeStockShortfalls(lines: { recipeId: string; quantity: number; name: string }[]) {
     const wanted = lines.filter((l) => l.recipeId && l.quantity > 0);
-    if (!wanted.length) return;
+    if (!wanted.length) return [] as {
+      name: string;
+      unit: UnitType;
+      need: number;
+      onHand: number;
+      dishes: string[];
+    }[];
 
     const recipes = await this.prisma.recipe.findMany({
       where: { id: { in: [...new Set(wanted.map((l) => l.recipeId))] } },
@@ -65,7 +83,7 @@ export class CostingService {
           name: ing.storeItem.name,
           unit: ing.storeItem.unit,
           need: 0,
-          onHand: toNumber(ing.storeItem.quantityOnHand),
+          onHand: Math.max(0, toNumber(ing.storeItem.quantityOnHand)),
           dishes: new Set<string>(),
         };
         row.need += deduct;
@@ -74,15 +92,22 @@ export class CostingService {
       }
     }
 
-    const short = [...needs.values()].filter((n) => n.need - n.onHand > 0.0001);
-    if (!short.length) return;
+    return [...needs.values()]
+      .filter((n) => n.need - n.onHand > 0.0001)
+      .map((n) => ({
+        name: n.name,
+        unit: n.unit,
+        need: n.need,
+        onHand: n.onHand,
+        dishes: [...n.dishes],
+      }));
+  }
 
-    const parts = short.map((n) => {
-      const dishes = [...n.dishes].join(", ");
-      const state = n.onHand <= 0.0001 ? "is out of stock" : "is short";
-      return `${dishes}: ${n.name} ${state} (${qtyLabel(n.onHand, n.unit)} in store, this order needs ${qtyLabel(n.need, n.unit)})`;
-    });
-    throw new BadRequestException(`${parts.join(". ")}. Order was not placed.`);
+  /** Block when any recipe ingredient is short. Shared ingredients in one order are added together. */
+  async assertCanSell(lines: { recipeId: string; quantity: number; name: string }[]) {
+    const short = await this.recipeStockShortfalls(lines);
+    if (!short.length) return;
+    throw new BadRequestException(formatShortfalls(short, "Cannot sell"));
   }
 
   /** Cost for selling `qty` of a menu item (from linked recipe). */
@@ -134,17 +159,149 @@ export class CostingService {
     return fixed;
   }
 
+  /**
+   * Convert finished cooked weight (grams) into the recipe's base-unit quantity.
+   * KG recipes: 5000g → 5. PCS recipes: uses plateGrams as one "plate" of finished food.
+   */
+  cookedGramsToRecipeQty(args: {
+    baseUnit: UnitType;
+    cookedGrams: number;
+    plateGrams?: number | null;
+  }): number {
+    const g = Math.max(0, Number(args.cookedGrams) || 0);
+    const plateG = Math.max(1, Number(args.plateGrams) || 1);
+    switch (args.baseUnit) {
+      case UnitType.KG:
+      case UnitType.L:
+        return g / 1000;
+      case UnitType.G:
+      case UnitType.ML:
+        return g;
+      case UnitType.PCS:
+        return g / plateG;
+      default:
+        return g / 1000;
+    }
+  }
+
+  /**
+   * Deduct recipe ingredients. Never lets quantityOnHand go below 0 —
+   * if any ingredient is short, throws and leaves stock unchanged.
+   */
   async deductRecipeStock(
     recipeId: string,
     orderQty: number,
     note: string,
     orderId?: string
   ) {
+    if (!(orderQty > 0)) return 0;
+
+    return this.prisma.$transaction(async (tx) => {
+      const recipe = await tx.recipe.findUniqueOrThrow({
+        where: { id: recipeId },
+        include: { ingredients: { include: { storeItem: true } } },
+      });
+      const baseQty = toNumber(recipe.baseQty) || 1;
+      const scale = orderQty / baseQty;
+
+      type Plan = {
+        storeItemId: string;
+        name: string;
+        unit: UnitType;
+        deduct: number;
+        ratePerUnit: (typeof recipe.ingredients)[number]["storeItem"]["ratePerUnit"];
+      };
+      const needByItem = new Map<string, Plan>();
+
+      for (const ing of recipe.ingredients) {
+        const deduct = convertQty(
+          toNumber(ing.quantity) * scale,
+          ing.unit,
+          ing.storeItem.unit
+        );
+        const prev = needByItem.get(ing.storeItemId);
+        if (prev) {
+          prev.deduct += deduct;
+        } else {
+          needByItem.set(ing.storeItemId, {
+            storeItemId: ing.storeItemId,
+            name: ing.storeItem.name,
+            unit: ing.storeItem.unit,
+            deduct,
+            ratePerUnit: ing.storeItem.ratePerUnit,
+          });
+        }
+      }
+
+      const short: { name: string; unit: UnitType; need: number; onHand: number }[] = [];
+      const onHandById = new Map<string, number>();
+
+      for (const plan of needByItem.values()) {
+        const fresh = await tx.storeItem.findUniqueOrThrow({
+          where: { id: plan.storeItemId },
+          select: { quantityOnHand: true, name: true, unit: true },
+        });
+        const onHand = Math.max(0, toNumber(fresh.quantityOnHand));
+        onHandById.set(plan.storeItemId, onHand);
+        if (plan.deduct - onHand > 0.0001) {
+          short.push({
+            name: fresh.name,
+            unit: fresh.unit,
+            need: plan.deduct,
+            onHand,
+          });
+        }
+      }
+
+      if (short.length) {
+        throw new BadRequestException(formatShortfalls(short, "Cannot deduct stock"));
+      }
+
+      for (const plan of needByItem.values()) {
+        const onHand = onHandById.get(plan.storeItemId) ?? 0;
+        const next = Math.max(0, Math.round((onHand - plan.deduct) * 1e6) / 1e6);
+        await tx.storeItem.update({
+          where: { id: plan.storeItemId },
+          data: { quantityOnHand: next },
+        });
+        await tx.stockMovement.create({
+          data: {
+            storeItemId: plan.storeItemId,
+            type: "SALE",
+            quantity: -plan.deduct,
+            ratePerUnit: plan.ratePerUnit,
+            note,
+            orderId: orderId ?? null,
+          },
+        });
+      }
+
+      let totalForBase = 0;
+      for (const ing of recipe.ingredients) {
+        totalForBase += unitCostFromRate(
+          toNumber(ing.storeItem.ratePerUnit),
+          ing.storeItem.unit,
+          toNumber(ing.quantity),
+          ing.unit
+        );
+      }
+      return (totalForBase / baseQty) * orderQty;
+    });
+  }
+
+  /** Put ingredients back when a line quantity is reduced after a sale. */
+  async restoreRecipeStock(
+    recipeId: string,
+    orderQty: number,
+    note: string,
+    orderId?: string
+  ) {
+    if (orderQty <= 0) return 0;
     const { recipe, costPerBase } = await this.recipeUnitCost(recipeId);
     const scale = orderQty / (toNumber(recipe.baseQty) || 1);
 
     for (const ing of recipe.ingredients) {
-      const deduct = convertQty(
+      const restore = convertQty(
         toNumber(ing.quantity) * scale,
         ing.unit,
         ing.storeItem.unit
@@ -152,13 +309,13 @@ export class CostingService {
 
       await this.prisma.storeItem.update({
         where: { id: ing.storeItemId },
-        data: { quantityOnHand: { decrement: deduct } },
+        data: { quantityOnHand: { increment: restore } },
       });
       await this.prisma.stockMovement.create({
         data: {
           storeItemId: ing.storeItemId,
-          type: "SALE",
-          quantity: -deduct,
+          type: "ADJUST",
+          quantity: restore,
           ratePerUnit: ing.storeItem.ratePerUnit,
           note,
           orderId: orderId ?? null,

@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 import { api, money, unitLabel } from "../api";
 import { useToast } from "../toast";
 import { useAuth } from "../auth";
+import { HotelGatePanel } from "../components/HotelGatePanel";
 import { MessageKey, useI18n, useT } from "../i18n";
 
 type LowItem = {
@@ -82,6 +83,7 @@ type Stats = {
   totalOrders: number;
   unpaidCount: number;
   unpaidAmount: number;
+  paidCount?: number;
   cancelledToday?: number;
   cancelledCount?: number;
   cancelledOrders?: DashOrder[];
@@ -292,6 +294,7 @@ function AdminDash({
   const salesToday = data ? money(data.orderAmountToday ?? data.salesToday ?? 0) : "—";
   return (
     <>
+      <HotelGatePanel />
       <StaleAlert
         orders={data?.staleOrders ?? []}
         minutes={data?.staleMinutes ?? 10}

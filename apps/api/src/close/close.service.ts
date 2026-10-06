@@ -105,7 +105,7 @@ export class CloseService {
         orderBy: { createdAt: "asc" },
       }),
       this.prisma.user.findMany({
-        where: { active: true, role: { code: { in: ["MAIN_CASHIER", "CASHIER"] } } },
+        where: { active: true, deletedAt: null, role: { code: { in: ["MAIN_CASHIER", "CASHIER"] } } },
         select: { id: true, name: true, role: { select: { code: true } } },
         orderBy: { name: "asc" },
       }),

@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundEx
 import { OrderStatus, PaymentStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { CostingService } from "../common/costing.service";
+import { assertMenuQty } from "../common/menu-qty";
 import { toNumber } from "../common/units";
 import { AuthUser } from "../common/decorators";
 import { PrintService } from "../print/print.service";
@@ -19,6 +20,7 @@ import {
 } from "./dto";
 import { TipService } from "../system/tip.service";
 import { SettingsService } from "../system/settings.service";
+import { SpecialsService } from "../specials/specials.service";
 
 const staffSelect = { id: true, name: true, role: { select: { code: true, name: true } } } as const;
 
@@ -65,6 +67,9 @@ type Line = {
   costAmount: number;
   notes?: string;
   recipeId: string | null;
+  batchGrams: number;
+  specialProductId: string | null;
+  saleMode: "PLATE" | "RS" | "MIX" | "MIX_SOLO_STORE" | null;
 };
 
 const canSeeCost = (u: AuthUser) => u.permissions.includes("reports.view");
@@ -95,11 +100,23 @@ export class OrdersService {
     private readonly print: PrintService,
     private readonly realtime: RealtimeService,
     private readonly tips: TipService,
-    private readonly settings: SettingsService
+    private readonly settings: SettingsService,
+    private readonly specials: SpecialsService
   ) {}
 
   perHeadConfig() {
     return this.settings.perHead();
+  }
+
+  private async assertAcceptingOrders() {
+    const gate = await this.settings.hotelStatus();
+    if (gate.acceptingOrders) return;
+    throw new BadRequestException({
+      code: "HOTEL_CLOSED",
+      message: gate.manuallyClosed
+        ? "Hotel is closed. No new orders."
+        : "Outside hotel hours. No new orders.",
+    });
   }
 
   async list(user: AuthUser, paymentStatus?: string, status?: string, billing = false) {
@@ -139,6 +156,7 @@ export class OrdersService {
   }
 
   async create(user: AuthUser, dto: CreateOrderDto) {
+    await this.assertAcceptingOrders();
     const table = await this.resolveTable(dto.tableId, dto.tableNo);
     const walkInLabel = !table && dto.tableNo?.trim() ? dto.tableNo.trim() : null;
     if (table) {
@@ -203,6 +221,9 @@ export class OrdersService {
             amount: rest.amount,
             unitCost: rest.unitCost,
             costAmount: rest.costAmount,
+            batchGrams: rest.batchGrams,
+            specialProductId: rest.specialProductId,
+            saleMode: rest.saleMode,
             notes: rest.notes,
             kotRound: rest.lineKind === "MENU" ? 1 : 0,
             addedById: user.id,
@@ -224,6 +245,7 @@ export class OrdersService {
   }
 
   async addItems(user: AuthUser, id: string, dto: AddItemsDto) {
+    await this.assertAcceptingOrders();
     const order = await this.prisma.order.findUnique({
       where: { id },
       include: { waiter: { select: { id: true, name: true } } },
@@ -295,6 +317,9 @@ export class OrdersService {
           amount: rest.amount,
           unitCost: rest.unitCost,
           costAmount: rest.costAmount,
+          batchGrams: rest.batchGrams,
+          specialProductId: rest.specialProductId,
+          saleMode: rest.saleMode,
           notes: rest.notes ?? null,
           kotRound: nextRound,
           addedById: user.id,
@@ -394,6 +419,64 @@ export class OrdersService {
     return { ...this.toDto(updated, canSeeCost(user)), printQueued, printError };
   }
 
+  /**
+   * Main cashier: reverse a paid (or partially paid) bill — wipe payments/tips,
+   * restore stock, mark VOID/CANCELLED. No kitchen cancel slip.
+   */
+  async reverse(user: AuthUser, id: string, dto: CancelOrderDto) {
+    if (!user.permissions.includes("order.edit")) {
+      throw new ForbiddenException("Only the Main Cashier can reverse payments");
+    }
+    const reason = (dto.reason || "").trim();
+    if (reason.length < 2) throw new BadRequestException("Enter a reverse reason");
+    if (reason.length > 200) throw new BadRequestException("Reverse reason is too long");
+
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      include: {
+        items: true,
+        payments: { select: { id: true } },
+      },
+    });
+    if (!order) throw new NotFoundException("Order not found");
+    if (order.status === "CANCELLED" || order.paymentStatus === "VOID") {
+      throw new BadRequestException("Order is already cancelled");
+    }
+    if (order.paymentStatus !== "PAID" && toNumber(order.paidAmount) <= 0 && toNumber(order.tipAmount) <= 0) {
+      throw new BadRequestException("Nothing to reverse — bill has no payment");
+    }
+
+    await this.restoreStockForOrder(order.id, order.orderNo);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.payment.deleteMany({ where: { orderId: id } });
+      await tx.tipShare.deleteMany({ where: { orderId: id } });
+      await tx.order.update({
+        where: { id },
+        data: {
+          status: "CANCELLED",
+          paymentStatus: "VOID",
+          paidAmount: 0,
+          tenderedAmount: 0,
+          tipAmount: 0,
+          billRequestedAt: null,
+          cancelReason: reason,
+          cancelledAt: new Date(),
+          cancelledById: user.id,
+        },
+      });
+    });
+
+    const updated = await this.prisma.order.findUniqueOrThrow({
+      where: { id },
+      include: orderInclude,
+    });
+
+    this.realtime.orderChanged(this.event(updated), "reversed");
+    this.realtime.paymentsChanged();
+    return this.toDto(updated, canSeeCost(user));
+  }
+
   /** Reprint CANCELLED kitchen slip for an already-cancelled order. */
   async printCancelKot(user: AuthUser, id: string) {
     const order = await this.prisma.order.findUnique({
@@ -417,48 +500,84 @@ export class OrdersService {
     };
   }
 
-  /** Main cashier: change quantities (0 = remove) on unpaid orders. */
+  /**
+   * Main cashier: change quantities (0 = remove).
+   * Unpaid / partial bills only — paid bills cannot be edited.
+   */
   async editItems(user: AuthUser, id: string, dto: EditOrderDto) {
     if (!user.permissions.includes("order.edit")) {
       throw new ForbiddenException("Only the Main Cashier can edit order items");
     }
     const order = await this.prisma.order.findUnique({
       where: { id },
-      include: { items: true },
+      include: { items: true, payments: { orderBy: { createdAt: "desc" } } },
     });
     if (!order) throw new NotFoundException("Order not found");
-    if (order.paymentStatus === "PAID") throw new BadRequestException("Bill already paid");
     if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
+    if (order.paymentStatus === "PAID") {
+      throw new BadRequestException("Paid bills cannot be edited");
+    }
+
+    if (!(dto.items?.length) && !(dto.addItems?.length)) {
+      throw new BadRequestException("Nothing to edit");
+    }
+
+    const growing =
+      (dto.addItems?.length ?? 0) > 0 ||
+      (dto.items ?? []).some((change) => {
+        const line = order.items.find((i) => i.id === change.id);
+        return !!line && change.quantity > toNumber(line.quantity) + 0.0001;
+      });
+    if (growing) await this.assertAcceptingOrders();
+
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const beforeTotal = toNumber(order.total);
+    const beforeDiscount = toNumber(order.discountAmount);
+    const beforePaidAmount = toNumber(order.paidAmount);
 
     let subDelta = 0;
     let costDelta = 0;
     const increases: { menuItemId: string; quantity: number; name: string }[] = [];
+    const addLines = dto.addItems ?? [];
+
     for (const change of dto.items) {
       const line = order.items.find((i) => i.id === change.id);
       if (!line?.menuItemId) continue;
       const qtyDiff = Math.max(0, change.quantity) - toNumber(line.quantity);
       if (qtyDiff > 0) increases.push({ menuItemId: line.menuItemId, quantity: qtyDiff, name: line.name });
     }
+    for (const add of addLines) {
+      increases.push({ menuItemId: add.menuItemId, quantity: add.quantity, name: add.menuItemId });
+    }
+
     const billMeta = await this.resolveBillEdit(order, dto);
+
     if (increases.length) {
       const menus = await this.prisma.menuItem.findMany({
-        where: { id: { in: increases.map((i) => i.menuItemId) } },
-        select: { id: true, recipeId: true },
+        where: { id: { in: [...new Set(increases.map((i) => i.menuItemId))] } },
+        select: { id: true, recipeId: true, name: true },
       });
       const recipeOf = new Map(menus.map((m) => [m.id, m.recipeId]));
+      const nameOf = new Map(menus.map((m) => [m.id, m.name]));
       await this.ensureStock(
         increases.flatMap((i) => {
           const recipeId = recipeOf.get(i.menuItemId);
-          return recipeId ? [{ recipeId, quantity: i.quantity, name: i.name }] : [];
+          const name = nameOf.get(i.menuItemId) ?? i.name;
+          return recipeId ? [{ recipeId, quantity: i.quantity, name }] : [];
         })
       );
     }
+
     for (const change of dto.items) {
       const line = order.items.find((i) => i.id === change.id);
       if (!line) throw new BadRequestException(`Item not found: ${change.id}`);
       const oldQty = toNumber(line.quantity);
       const newQty = Math.max(0, change.quantity);
       if (newQty === oldQty) continue;
+      if (newQty > 0 && line.menuItemId) {
+        const menuRules = await this.prisma.menuItem.findUnique({ where: { id: line.menuItemId } });
+        if (menuRules) assertMenuQty(menuRules, newQty);
+      }
       const rate = toNumber(line.ratePerUnit);
       const unitCost = toNumber(line.unitCost);
       const qtyDiff = newQty - oldQty;
@@ -476,6 +595,31 @@ export class OrdersService {
           );
         }
       }
+      if (line.menuItemId && qtyDiff < 0) {
+        const menu = await this.prisma.menuItem.findUnique({ where: { id: line.menuItemId } });
+        if (menu?.recipeId) {
+          await this.costing.restoreRecipeStock(
+            menu.recipeId,
+            -qtyDiff,
+            `Order #${order.orderNo} · edit remove`,
+            order.id
+          );
+        }
+      }
+
+      const oldGrams = toNumber(line.batchGrams);
+      let nextBatchGrams = oldGrams;
+      if (line.specialProductId && oldQty > 0 && oldGrams > 0 && qtyDiff !== 0) {
+        if (qtyDiff > 0) {
+          const addGrams = (oldGrams / oldQty) * qtyDiff;
+          await this.specials.assertAndTake(line.specialProductId, addGrams);
+          nextBatchGrams = oldGrams + addGrams;
+        } else {
+          const remGrams = newQty <= 0 ? oldGrams : (oldGrams / oldQty) * -qtyDiff;
+          await this.specials.restoreGrams(line.specialProductId, remGrams);
+          nextBatchGrams = newQty <= 0 ? 0 : Math.max(0, oldGrams - remGrams);
+        }
+      }
 
       if (newQty <= 0) {
         await this.prisma.orderItem.delete({ where: { id: line.id } });
@@ -486,29 +630,113 @@ export class OrdersService {
             quantity: newQty,
             amount: rate * newQty,
             costAmount: unitCost * newQty,
+            batchGrams: nextBatchGrams,
           },
         });
+      }
+    }
+
+    if (addLines.length) {
+      const built = await this.buildLines(
+        user,
+        addLines.map((a) => ({
+          menuItemId: a.menuItemId,
+          quantity: a.quantity,
+          notes: a.notes,
+          saleMode: a.saleMode,
+          amountRs: a.amountRs,
+          soloStoreFallback: a.soloStoreFallback,
+        }))
+      );
+      await this.ensureStock(built.lines);
+      for (const line of built.lines) {
+        await this.prisma.orderItem.create({
+          data: {
+            orderId: id,
+            lineKind: line.lineKind,
+            menuItemId: line.menuItemId,
+            name: line.name,
+            sellUnit: line.sellUnit,
+            quantity: line.quantity,
+            ratePerUnit: line.ratePerUnit,
+            amount: line.amount,
+            unitCost: line.unitCost,
+            costAmount: line.costAmount,
+            batchGrams: line.batchGrams,
+            specialProductId: line.specialProductId,
+            saleMode: line.saleMode,
+            notes: line.notes,
+            kotRound: order.kotRounds,
+            addedById: user.id,
+          },
+        });
+        if (line.recipeId) {
+          await this.costing.deductRecipeStock(
+            line.recipeId,
+            line.quantity,
+            `Order #${order.orderNo} · edit new item`,
+            order.id
+          );
+        }
+        if (line.specialProductId && line.batchGrams > 0) {
+          await this.specials.assertAndTake(line.specialProductId, line.batchGrams);
+        }
+        subDelta += line.amount;
+        costDelta += line.costAmount;
       }
     }
 
     const remaining = await this.prisma.orderItem.count({ where: { orderId: id } });
     if (!remaining) throw new BadRequestException("Order must keep at least one item — cancel instead");
 
-    const nextTotal = Math.max(0, toNumber(order.total) + subDelta);
+    const nextTotal = Math.max(0, round2(beforeTotal + subDelta));
+    let nextPaid = beforePaidAmount;
+    let nextDiscount = Math.min(beforeDiscount, Math.max(0, nextTotal));
+    let nextPaymentStatus: PaymentStatus = order.paymentStatus;
+
+    if (beforePaidAmount > 0) {
+      // Keep discount within remaining due headroom after payment.
+      nextDiscount = Math.min(beforeDiscount, Math.max(0, round2(nextTotal)));
+      const nextNet = Math.max(0, round2(nextTotal - nextDiscount));
+      if (nextNet < nextPaid - 0.001) {
+        let refund = round2(nextPaid - nextNet);
+        for (const pay of order.payments) {
+          if (refund <= 0) break;
+          const amt = toNumber(pay.amount);
+          if (amt <= 0) continue;
+          const cut = Math.min(amt, refund);
+          const newAmt = round2(amt - cut);
+          await this.prisma.payment.update({
+            where: { id: pay.id },
+            data: {
+              amount: newAmt,
+              tenderedAmount: Math.min(toNumber(pay.tenderedAmount), newAmt + toNumber(pay.tipAmount)),
+            },
+          });
+          refund = round2(refund - cut);
+        }
+        nextPaid = nextNet;
+      }
+      nextPaymentStatus =
+        nextPaid + 0.001 >= nextNet ? "PAID" : nextPaid > 0 ? "PARTIAL" : "UNPAID";
+    } else {
+      nextDiscount = Math.min(beforeDiscount, Math.max(0, nextTotal - beforePaidAmount));
+    }
+
     const updated = await this.prisma.order.update({
       where: { id },
       data: {
         subtotal: { increment: subDelta },
-        total: { increment: subDelta },
+        total: nextTotal,
         costTotal: { increment: costDelta },
-        discountAmount: Math.min(
-          toNumber(order.discountAmount),
-          Math.max(0, nextTotal - toNumber(order.paidAmount)),
-        ),
+        discountAmount: nextDiscount,
+        paidAmount: nextPaid,
+        paymentStatus: nextPaymentStatus,
         ...billMeta,
       },
       include: orderInclude,
     });
+
     this.realtime.orderChanged(this.event(updated), "edited");
     return this.toDto(updated, canSeeCost(user));
   }
@@ -604,6 +832,7 @@ export class OrdersService {
         where: {
           id: dto.handedToId,
           active: true,
+          deletedAt: null,
           role: { permissions: { some: { permission: { code: "cash.keep" } } } },
         },
         select: { id: true, name: true },
@@ -801,7 +1030,12 @@ export class OrdersService {
     }
     if (dto.assignedCashierId && dto.assignedCashierId !== order.assignedCashierId) {
       const cashier = await this.prisma.user.findFirst({
-        where: { id: dto.assignedCashierId, active: true, role: { code: { in: ["MAIN_CASHIER", "CASHIER"] } } },
+        where: {
+          id: dto.assignedCashierId,
+          active: true,
+          deletedAt: null,
+          role: { code: { in: ["MAIN_CASHIER", "CASHIER"] } },
+        },
         select: { id: true },
       });
       if (!cashier) throw new BadRequestException("Select Main Cashier or Cashier for this bill");
@@ -809,7 +1043,7 @@ export class OrdersService {
     }
     if (dto.waiterId && dto.waiterId !== order.waiterId) {
       const supervisor = await this.prisma.user.findFirst({
-        where: { id: dto.waiterId, active: true, role: { code: "SUPERVISOR" } },
+        where: { id: dto.waiterId, active: true, deletedAt: null, role: { code: "SUPERVISOR" } },
         select: { id: true },
       });
       if (!supervisor) throw new BadRequestException("Select a supervisor");
@@ -825,6 +1059,7 @@ export class OrdersService {
         where: {
           id: assignedCashierId,
           active: true,
+          deletedAt: null,
           role: { code: { in: ["MAIN_CASHIER", "CASHIER"] } },
         },
         select: { id: true },
@@ -866,6 +1101,8 @@ export class OrdersService {
     let subtotal = 0;
     let costTotal = 0;
     let perHeadCfg: Awaited<ReturnType<SettingsService["perHead"]>> | null = null;
+    /** Accumulate planned batch takes so multiple cart lines don't oversell. */
+    const plannedTake = new Map<string, number>();
 
     for (const line of items) {
       const kind = line.kind === "PER_HEAD" ? "PER_HEAD" : "MENU";
@@ -891,13 +1128,282 @@ export class OrdersService {
           costAmount: 0,
           notes: line.notes?.trim() || undefined,
           recipeId: null,
+          batchGrams: 0,
+          specialProductId: null,
+          saleMode: null,
         });
+
+        const pkgReq = line.packageLines ?? [];
+        if (pkgReq.length) {
+          const allowed = new Map(perHeadCfg.items.map((p) => [p.menuItemId, p]));
+          for (const pkg of pkgReq) {
+            const cfg = allowed.get(pkg.menuItemId);
+            if (!cfg) throw new BadRequestException("Package item is not in per-head settings");
+            const menu = await this.prisma.menuItem.findUnique({
+              where: { id: pkg.menuItemId },
+              include: { specialProduct: true },
+            });
+            if (!menu || !menu.active) {
+              throw new BadRequestException(`${cfg.name} is not available for per-head package`);
+            }
+            assertMenuQty(menu, pkg.quantity);
+
+            if (menu.kind === "SPECIAL") {
+              const sp = menu.specialProduct;
+              if (!sp) throw new BadRequestException(`${menu.name} is not linked to a special pot`);
+              const plateGrams = toNumber(sp.plateGrams) || 1;
+              const plates = pkg.quantity;
+              const grams = plates * plateGrams;
+              const planned = plannedTake.get(sp.id) ?? 0;
+              await this.specials.assertAvailable(sp.id, grams + planned);
+              plannedTake.set(sp.id, planned + grams);
+              let unitCost = 0;
+              let costAmount = 0;
+              if (sp.cookRecipeId) {
+                const { costPerBase, recipe } = await this.costing.recipeUnitCost(sp.cookRecipeId);
+                const cookQty = this.costing.cookedGramsToRecipeQty({
+                  baseUnit: recipe.baseUnit,
+                  cookedGrams: grams,
+                  plateGrams,
+                });
+                unitCost = plateGrams > 0 ? (costPerBase * cookQty) / plates : costPerBase;
+                costAmount = costPerBase * cookQty;
+              }
+              costTotal += costAmount;
+              lines.push({
+                lineKind: "MENU",
+                menuItemId: menu.id,
+                name: menu.name,
+                sellUnit: menu.sellUnit,
+                quantity: plates,
+                ratePerUnit: 0,
+                amount: 0,
+                unitCost,
+                costAmount,
+                notes: "Per head",
+                recipeId: null,
+                batchGrams: grams,
+                specialProductId: sp.id,
+                saleMode: "PLATE",
+              });
+              continue;
+            }
+
+            if (menu.kind === "MIX") {
+              const sp = menu.specialProduct;
+              if (!sp) throw new BadRequestException(`${menu.name} is not linked to a special pot`);
+              const plateGrams = toNumber(sp.plateGrams) || 1;
+              const mixPlates = toNumber(menu.mixSpecialPlates) || 1;
+              const plates = pkg.quantity * mixPlates;
+              const grams = plates * plateGrams;
+              const planned = plannedTake.get(sp.id) ?? 0;
+              await this.specials.assertAvailable(sp.id, grams + planned);
+              plannedTake.set(sp.id, planned + grams);
+              let unitCost = 0;
+              if (menu.recipeId) {
+                unitCost = (await this.costing.recipeUnitCost(menu.recipeId)).costPerBase;
+              }
+              if (sp.cookRecipeId) {
+                const { costPerBase, recipe } = await this.costing.recipeUnitCost(sp.cookRecipeId);
+                const specialCost =
+                  costPerBase *
+                  this.costing.cookedGramsToRecipeQty({
+                    baseUnit: recipe.baseUnit,
+                    cookedGrams: grams,
+                    plateGrams,
+                  });
+                unitCost += specialCost / Math.max(pkg.quantity, 1e-9);
+              }
+              const costAmount = unitCost * pkg.quantity;
+              costTotal += costAmount;
+              lines.push({
+                lineKind: "MENU",
+                menuItemId: menu.id,
+                name: menu.name,
+                sellUnit: menu.sellUnit,
+                quantity: pkg.quantity,
+                ratePerUnit: 0,
+                amount: 0,
+                unitCost,
+                costAmount,
+                notes: "Per head",
+                recipeId: menu.recipeId,
+                batchGrams: grams,
+                specialProductId: sp.id,
+                saleMode: "MIX",
+              });
+              continue;
+            }
+
+            // NORMAL (store recipe)
+            const unitCost = menu.recipeId ? (await this.costing.recipeUnitCost(menu.recipeId)).costPerBase : 0;
+            const costAmount = unitCost * pkg.quantity;
+            costTotal += costAmount;
+            lines.push({
+              lineKind: "MENU",
+              menuItemId: menu.id,
+              name: menu.name,
+              sellUnit: menu.sellUnit,
+              quantity: pkg.quantity,
+              ratePerUnit: 0,
+              amount: 0,
+              unitCost,
+              costAmount,
+              notes: "Per head",
+              recipeId: menu.recipeId,
+              batchGrams: 0,
+              specialProductId: null,
+              saleMode: null,
+            });
+          }
+        }
         continue;
       }
 
       if (!line.menuItemId) throw new BadRequestException("Menu item required");
-      const menu = await this.prisma.menuItem.findUnique({ where: { id: line.menuItemId } });
+      const menu = await this.prisma.menuItem.findUnique({
+        where: { id: line.menuItemId },
+        include: { specialProduct: true },
+      });
       if (!menu || !menu.active) throw new BadRequestException("Menu item not available");
+
+      if (menu.kind === "SPECIAL") {
+        const sp = menu.specialProduct;
+        if (!sp) throw new BadRequestException(`${menu.name} is not linked to a special pot`);
+        const platePrice = toNumber(sp.platePrice);
+        const plateGrams = toNumber(sp.plateGrams) || 1;
+        const mode = line.saleMode === "RS" || (line.amountRs != null && line.amountRs > 0) ? "RS" : "PLATE";
+        if (mode === "RS" && sp.sellMode === "SERVING_ONLY") {
+          throw new BadRequestException(
+            `${menu.name} is selling by ${sp.servingLabel || "serving"} only — not by Rs`
+          );
+        }
+        if (mode === "PLATE" && sp.sellMode === "RS_ONLY") {
+          throw new BadRequestException(`${menu.name} is selling by Rs only`);
+        }
+
+        let plates: number;
+        let amount: number;
+        let rate: number;
+        let qty: number;
+        if (mode === "RS") {
+          const rs = line.amountRs ?? line.quantity * platePrice;
+          if (rs < 0.01) throw new BadRequestException("Enter rupees for special sale");
+          plates = rs / platePrice;
+          amount = Math.round(rs * 100) / 100;
+          rate = platePrice;
+          qty = Math.round(plates * 1000) / 1000;
+        } else {
+          assertMenuQty(menu, line.quantity);
+          plates = line.quantity;
+          rate = platePrice > 0 ? platePrice : toNumber(menu.sellingPrice);
+          amount = Math.round(rate * plates * 100) / 100;
+          qty = plates;
+        }
+        const grams = plates * plateGrams;
+        const planned = plannedTake.get(sp.id) ?? 0;
+        await this.specials.assertAvailable(sp.id, grams + planned);
+        plannedTake.set(sp.id, planned + grams);
+
+        let unitCost = 0;
+        let costAmount = 0;
+        if (sp.cookRecipeId) {
+          const { costPerBase, recipe } = await this.costing.recipeUnitCost(sp.cookRecipeId);
+          const cookQty = this.costing.cookedGramsToRecipeQty({
+            baseUnit: recipe.baseUnit,
+            cookedGrams: grams,
+            plateGrams,
+          });
+          unitCost = plateGrams > 0 ? (costPerBase * cookQty) / plates : costPerBase;
+          costAmount = costPerBase * cookQty;
+        }
+        subtotal += amount;
+        costTotal += costAmount;
+        lines.push({
+          lineKind: "MENU",
+          menuItemId: menu.id,
+          name: menu.name,
+          sellUnit: menu.sellUnit,
+          quantity: qty,
+          ratePerUnit: rate,
+          amount,
+          unitCost,
+          costAmount,
+          notes: line.notes?.trim() || undefined,
+          recipeId: null,
+          batchGrams: grams,
+          specialProductId: sp.id,
+          saleMode: mode,
+        });
+        continue;
+      }
+
+      if (menu.kind === "MIX") {
+        const sp = menu.specialProduct;
+        if (!sp) throw new BadRequestException(`${menu.name} is not linked to a special pot`);
+        assertMenuQty(menu, line.quantity);
+        const plateGrams = toNumber(sp.plateGrams) || 1;
+        const mixPlates = toNumber(menu.mixSpecialPlates) || 1;
+        const plates = line.quantity * mixPlates;
+        const grams = plates * plateGrams;
+        const planned = plannedTake.get(sp.id) ?? 0;
+        let saleMode: "MIX" | "MIX_SOLO_STORE" = "MIX";
+        let batchGrams = grams;
+        let useBatch = true;
+        try {
+          await this.specials.assertAvailable(sp.id, grams + planned);
+        } catch (e) {
+          if (line.soloStoreFallback) {
+            saleMode = "MIX_SOLO_STORE";
+            batchGrams = 0;
+            useBatch = false;
+          } else {
+            throw e;
+          }
+        }
+        if (useBatch) plannedTake.set(sp.id, planned + grams);
+
+        const rate = toNumber(menu.sellingPrice);
+        const amount = rate * line.quantity;
+        let unitCost = 0;
+        if (menu.recipeId) {
+          unitCost = (await this.costing.recipeUnitCost(menu.recipeId)).costPerBase;
+        }
+        let specialCost = 0;
+        if (useBatch && sp.cookRecipeId) {
+          const { costPerBase, recipe } = await this.costing.recipeUnitCost(sp.cookRecipeId);
+          specialCost =
+            costPerBase *
+            this.costing.cookedGramsToRecipeQty({
+              baseUnit: recipe.baseUnit,
+              cookedGrams: grams,
+              plateGrams,
+            });
+          unitCost += specialCost / Math.max(line.quantity, 1e-9);
+        }
+        const costAmount = unitCost * line.quantity;
+        subtotal += amount;
+        costTotal += costAmount;
+        lines.push({
+          lineKind: "MENU",
+          menuItemId: menu.id,
+          name: saleMode === "MIX_SOLO_STORE" ? `${menu.name} (store only)` : menu.name,
+          sellUnit: menu.sellUnit,
+          quantity: line.quantity,
+          ratePerUnit: rate,
+          amount,
+          unitCost,
+          costAmount,
+          notes: line.notes?.trim() || undefined,
+          recipeId: menu.recipeId,
+          batchGrams,
+          specialProductId: sp.id,
+          saleMode,
+        });
+        continue;
+      }
+
+      assertMenuQty(menu, line.quantity);
       const rate = toNumber(menu.sellingPrice);
       const amount = rate * line.quantity;
       const unitCost = menu.recipeId ? (await this.costing.recipeUnitCost(menu.recipeId)).costPerBase : 0;
@@ -916,6 +1422,9 @@ export class OrdersService {
         costAmount,
         notes: line.notes?.trim() || undefined,
         recipeId: menu.recipeId,
+        batchGrams: 0,
+        specialProductId: null,
+        saleMode: null,
       });
     }
     return { lines, subtotal, costTotal };
@@ -929,13 +1438,17 @@ export class OrdersService {
 
   private async deductStock(lines: Line[], orderNo: number, tableNo: string | null, orderId: string) {
     for (const line of lines) {
-      if (!line.recipeId) continue;
-      await this.costing.deductRecipeStock(
-        line.recipeId,
-        line.quantity,
-        `Order #${orderNo}${tableNo ? ` · Table ${tableNo}` : ""} · auto sale`,
-        orderId
-      );
+      if (line.recipeId) {
+        await this.costing.deductRecipeStock(
+          line.recipeId,
+          line.quantity,
+          `Order #${orderNo}${tableNo ? ` · Table ${tableNo}` : ""} · auto sale`,
+          orderId
+        );
+      }
+      if (line.specialProductId && line.batchGrams > 0) {
+        await this.specials.assertAndTake(line.specialProductId, line.batchGrams);
+      }
     }
   }
 
@@ -962,6 +1475,12 @@ export class OrdersService {
           orderId,
         },
       });
+    }
+    const items = await this.prisma.orderItem.findMany({ where: { orderId } });
+    for (const it of items) {
+      if (it.specialProductId && toNumber(it.batchGrams) > 0) {
+        await this.specials.restoreGrams(it.specialProductId, toNumber(it.batchGrams));
+      }
     }
   }
 
@@ -1045,11 +1564,15 @@ export class OrdersService {
       items: o.items.map((i) => ({
         id: i.id,
         lineKind: i.lineKind,
+        menuItemId: i.menuItemId,
         name: i.name,
         sellUnit: i.sellUnit,
         quantity: toNumber(i.quantity),
         ratePerUnit: toNumber(i.ratePerUnit),
         amount: toNumber(i.amount),
+        batchGrams: toNumber(i.batchGrams),
+        specialProductId: i.specialProductId,
+        saleMode: i.saleMode,
         notes: i.notes,
         kotRound: i.kotRound,
         addedBy: i.addedBy?.name ?? null,

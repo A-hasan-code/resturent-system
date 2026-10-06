@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Module, Param, Patch, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Module, Param, Patch, Post, UseGuards } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
@@ -21,6 +21,11 @@ export class UsersController {
     return this.users.roles();
   }
 
+  @Get(":id")
+  get(@Param("id") id: string) {
+    return this.users.get(id);
+  }
+
   @Post()
   create(@CurrentUser() actor: AuthUser, @Body() dto: CreateUserDto) {
     return this.users.create(actor, dto);
@@ -29,6 +34,11 @@ export class UsersController {
   @Patch(":id")
   update(@CurrentUser() actor: AuthUser, @Param("id") id: string, @Body() dto: UpdateUserDto) {
     return this.users.update(actor, id, dto);
+  }
+
+  @Delete(":id")
+  remove(@CurrentUser() actor: AuthUser, @Param("id") id: string) {
+    return this.users.remove(actor, id);
   }
 }
 

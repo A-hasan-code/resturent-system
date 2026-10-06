@@ -2,7 +2,7 @@ const { app, BrowserWindow, Menu, ipcMain, dialog } = require("electron");
 const fs = require("fs");
 const path = require("path");
 const { discover, probe } = require("./discovery");
-const { PrintAgent } = require("./print-agent");
+const { PrintAgent, resetAgentIdentity } = require("./print-agent");
 
 const HEALTH_EVERY_MS = 8000;
 const RETRY_MS = 3000;
@@ -96,10 +96,14 @@ function startPrintAgent() {
       loadConfig,
       saveConfig,
       userDataDir: app.getPath("userData"),
-      onStatus: (text) => status(text),
+      onStatus: (text) => {
+        status(text);
+        refreshMenu();
+      },
     });
   }
   printAgent.start();
+  refreshMenu();
 }
 
 function stopPrintAgent() {
@@ -119,6 +123,9 @@ async function forgetServer() {
 }
 
 function buildMenu() {
+  const agentLabel = printAgent?.lastStatus
+    ? printAgent.lastStatus.slice(0, 80)
+    : "Print agent: starting…";
   return Menu.buildFromTemplate([
     {
       label: "PixalBotics Restaurant",
@@ -127,6 +134,40 @@ function buildMenu() {
         { label: "Reconnect to server", click: () => connect() },
         { label: "Change server…", click: () => forgetServer() },
         { type: "separator" },
+        {
+          label: agentLabel,
+          enabled: false,
+        },
+        {
+          label: "Refresh print agent now",
+          click: () => {
+            if (printAgent) {
+              printAgent.token = null;
+              printAgent.lastListAt = 0;
+              void printAgent.tick();
+            }
+          },
+        },
+        {
+          label: "Reset this PC as new counter (print agent)",
+          click: async () => {
+            const { response } = await dialog.showMessageBox(win, {
+              type: "warning",
+              buttons: ["Reset and reconnect", "Cancel"],
+              defaultId: 1,
+              message:
+                "Use this if this cashier PC was copied from another PC and the wrong USB printer appears on the server.",
+            });
+            if (response !== 0) return;
+            resetAgentIdentity(app.getPath("userData"), saveConfig, loadConfig);
+            if (printAgent) {
+              printAgent.token = null;
+              printAgent.lastListAt = 0;
+            }
+            void connect();
+          },
+        },
+        { type: "separator" },
         { label: "Full screen", accelerator: "F11", click: () => win.setFullScreen(!win.isFullScreen()) },
         { label: "Developer tools", accelerator: "Ctrl+Shift+I", click: () => win.webContents.toggleDevTools() },
         { type: "separator" },
@@ -134,6 +175,10 @@ function buildMenu() {
       ],
     },
   ]);
+}
+
+function refreshMenu() {
+  Menu.setApplicationMenu(buildMenu());
 }
 
 function createWindow() {
