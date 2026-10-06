@@ -57,6 +57,11 @@ export class MenuService {
       where: { active: true },
       include: {
         recipe: true,
+        modifiers: {
+          where: { active: true },
+          orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+          select: { id: true, name: true, priceDelta: true, sortOrder: true },
+        },
         specialProduct: {
           select: {
             id: true,
@@ -66,6 +71,7 @@ export class MenuService {
             category: true,
             servingLabel: true,
             sellMode: true,
+            cookRecipeId: true,
           },
         },
       },
@@ -103,6 +109,12 @@ export class MenuService {
               plateGrams: toNumber(m.specialProduct.plateGrams),
             }
           : null,
+        modifiers: m.modifiers.map((x) => ({
+          id: x.id,
+          name: x.name,
+          priceDelta: toNumber(x.priceDelta),
+          sortOrder: x.sortOrder,
+        })),
         ...menuQtyDto(m),
       };
     };
@@ -115,12 +127,40 @@ export class MenuService {
     for (const m of items) {
       let cost = 0;
       if (m.recipeId) {
-        const c = await this.costing.recipeUnitCost(m.recipeId);
-        cost = c.costPerBase;
+        try {
+          const c = await this.costing.recipeUnitCost(m.recipeId);
+          cost = c.costPerBase;
+        } catch {
+          cost = 0;
+        }
+      }
+      const sp = m.specialProduct;
+      if (sp?.cookRecipeId) {
+        try {
+          const plateGrams = toNumber(sp.plateGrams) || 1;
+          const plates =
+            m.kind === "MIX" ? Math.max(0.001, toNumber(m.mixSpecialPlates) || 1) : 1;
+          const grams = plates * plateGrams;
+          const { costPerBase, recipe } = await this.costing.recipeUnitCost(sp.cookRecipeId);
+          const specialCost =
+            costPerBase *
+            this.costing.cookedGramsToRecipeQty({
+              baseUnit: recipe.baseUnit,
+              cookedGrams: grams,
+              plateGrams,
+            });
+          if (m.kind === "SPECIAL") {
+            cost = specialCost;
+          } else if (m.kind === "MIX") {
+            cost += specialCost;
+          }
+        } catch {
+          /* inactive cook recipe — leave store-only cost */
+        }
       }
       out.push({
         ...mapBase(m),
-        costPerUnit: cost,
+        costPerUnit: Math.round(cost * 100) / 100,
       });
     }
     return out;
@@ -212,5 +252,42 @@ export class MenuService {
     } catch {
       throw new NotFoundException("Menu item not found");
     }
+  }
+
+  /** Replace active modifiers for a menu item (manage UI). */
+  async setModifiers(
+    menuItemId: string,
+    rows: { name: string; priceDelta: number; sortOrder?: number }[]
+  ) {
+    const item = await this.prisma.menuItem.findUnique({ where: { id: menuItemId } });
+    if (!item || !item.active) throw new NotFoundException("Menu item not found");
+    const cleaned = rows
+      .map((r, i) => ({
+        name: (r.name || "").trim(),
+        priceDelta: Math.round(Number(r.priceDelta) * 100) / 100,
+        sortOrder: r.sortOrder ?? i,
+      }))
+      .filter((r) => r.name);
+    await this.prisma.$transaction(async (tx) => {
+      await tx.menuModifier.updateMany({
+        where: { menuItemId },
+        data: { active: false },
+      });
+      for (const r of cleaned) {
+        await tx.menuModifier.create({
+          data: {
+            menuItemId,
+            name: r.name,
+            priceDelta: r.priceDelta,
+            sortOrder: r.sortOrder,
+            active: true,
+          },
+        });
+      }
+    });
+    return this.prisma.menuModifier.findMany({
+      where: { menuItemId, active: true },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    });
   }
 }

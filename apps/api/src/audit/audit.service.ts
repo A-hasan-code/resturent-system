@@ -22,6 +22,8 @@ export type AuditDay = {
   purchasesOut: number;
   billsPaid: number;
   sales: number;
+  discounts: number;
+  tax: number;
   tips: number;
   stockUsed: number;
   profit: number;
@@ -36,7 +38,7 @@ export type AuditReport = {
     orders: number;
     cancelled: number;
     billsPaid: number;
-    /** Food sale on paid bills in the selected range (tip excluded). */
+    /** Food sale on paid bills in the selected range (tip excluded, after discount). */
     salesTotal: number;
     /** Paid food sales for the current business day (independent of filter range). */
     salesToday: number;
@@ -44,9 +46,14 @@ export type AuditReport = {
     salesMonth: number;
     /** Paid food sales for the current calendar year so far. */
     salesYear: number;
+    discountsTotal: number;
+    taxTotal: number;
     tipsTotal: number;
     paymentsIn: number;
     paymentCount: number;
+    byMethod: { CASH: number; CARD: number; WALLET: number; BANK: number };
+    creditSales: number;
+    creditCount: number;
     purchasesOut: number;
     purchaseCount: number;
     foodCost: number;
@@ -63,11 +70,15 @@ export type AuditReport = {
     orderNo: number;
     tableNo: string | null;
     total: number;
+    discountAmount: number;
+    taxAmount: number;
     tipAmount: number;
     orderedBy: string | null;
     servedBy: string | null;
     cashier: string | null;
     paymentStatus: string;
+    isCredit: boolean;
+    creditName: string | null;
   }[];
   payments: {
     time: string;
@@ -75,6 +86,7 @@ export type AuditReport = {
     tableNo: string | null;
     amount: number;
     tipAmount: number;
+    method: string;
     collectedBy: string;
     role: string;
     handedTo: string | null;
@@ -199,7 +211,17 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
       ],
     });
 
-    const [orders, payments, purchases, firstSaleDate, salesTodayAgg, salesMonthAgg, salesYearAgg] =
+    const sumPaidFood = async (fromAt: Date, toAt: Date) => {
+      const rows = await this.prisma.order.findMany({
+        where: paidSalesWhere(fromAt, toAt),
+        select: { total: true, discountAmount: true },
+      });
+      return Math.round(
+        rows.reduce((s, o) => s + Math.max(0, toNumber(o.total) - toNumber(o.discountAmount)), 0) * 100
+      ) / 100;
+    };
+
+    const [orders, payments, purchases, firstSaleDate, salesToday, salesMonth, salesYear] =
       await Promise.all([
       this.prisma.order.findMany({
         where: {
@@ -213,6 +235,7 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
           paymentStatus: true,
           total: true,
           discountAmount: true,
+          taxAmount: true,
           tipAmount: true,
           paidAmount: true,
           costTotal: true,
@@ -221,6 +244,7 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
           servedByName: true,
           waiter: { select: { name: true, role: { select: { name: true } } } },
           cashier: { select: { name: true } },
+          creditCustomer: { select: { name: true } },
         },
         orderBy: { createdAt: "asc" },
         take: 20000,
@@ -254,18 +278,9 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         take: 8000,
       }),
       this.firstSaleDate(),
-      this.prisma.order.aggregate({
-        where: paidSalesWhere(todayWin.from, todayWin.to),
-        _sum: { total: true },
-      }),
-      this.prisma.order.aggregate({
-        where: paidSalesWhere(monthWin.from, monthWin.to),
-        _sum: { total: true },
-      }),
-      this.prisma.order.aggregate({
-        where: paidSalesWhere(yearWin.from, yearWin.to),
-        _sum: { total: true },
-      }),
+      sumPaidFood(todayWin.from, todayWin.to),
+      sumPaidFood(monthWin.from, monthWin.to),
+      sumPaidFood(yearWin.from, yearWin.to),
     ]);
 
     const days = new Map<string, AuditDay>();
@@ -279,6 +294,8 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         purchasesOut: 0,
         billsPaid: 0,
         sales: 0,
+        discounts: 0,
+        tax: 0,
         tips: 0,
         stockUsed: 0,
         profit: 0,
@@ -292,45 +309,60 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
     let foodCost = 0;
     let billsPaid = 0;
     let salesTotal = 0;
+    let discountsTotal = 0;
+    let taxTotal = 0;
     let tipsTotal = 0;
+    let creditSales = 0;
+    let creditCount = 0;
     const takers = new Map<string, { name: string; role: string; orders: number; sales: number; tips: number }>();
     const salesRows: AuditReport["sales"] = [];
 
     for (const o of orders) {
-      const day = bucket(o.createdAt);
+      const dayRow = bucket(o.createdAt);
       if (o.status === "CANCELLED" || o.paymentStatus === "VOID") {
         cancelled += 1;
-        if (day) day.cancelled += 1;
+        if (dayRow) dayRow.cancelled += 1;
         continue;
       }
-      if (day) day.orders += 1;
+      if (dayRow) dayRow.orders += 1;
       const gross = toNumber(o.total);
       const discount = toNumber(o.discountAmount);
+      const tax = toNumber(o.taxAmount);
       const total = Math.max(0, gross - discount);
       const tip = toNumber(o.tipAmount);
+      const due = Math.max(0, total + tax - toNumber(o.paidAmount));
+      const isCredit = !!o.creditCustomerId;
       const takerName = o.waiter?.name ?? "—";
       const takerRole = o.waiter?.role.name ?? "";
       const taker = takers.get(takerName) ?? { name: takerName, role: takerRole, orders: 0, sales: 0, tips: 0 };
       taker.orders += 1;
 
-      if (o.paymentStatus === "PAID" || o.creditCustomerId) {
+      if (o.paymentStatus === "PAID" || isCredit) {
         billsPaid += 1;
         const cost = toNumber(o.costTotal);
         foodCost += cost;
         salesTotal += total;
+        discountsTotal += discount;
+        taxTotal += tax;
         tipsTotal += tip;
         taker.sales += total;
         taker.tips += tip;
-        if (day) {
-          day.billsPaid += 1;
-          day.sales += total;
-          day.tips += tip;
-          day.stockUsed += cost;
-          day.profit = Math.round((day.sales - day.stockUsed) * 100) / 100;
+        if (isCredit) {
+          creditCount += 1;
+          creditSales += total;
+        }
+        if (dayRow) {
+          dayRow.billsPaid += 1;
+          dayRow.sales += total;
+          dayRow.discounts += discount;
+          dayRow.tax += tax;
+          dayRow.tips += tip;
+          dayRow.stockUsed += cost;
+          dayRow.profit = Math.round((dayRow.sales - dayRow.stockUsed) * 100) / 100;
         }
       } else if (o.paymentStatus === "UNPAID" || o.paymentStatus === "PARTIAL") {
         unpaidCount += 1;
-        unpaidAmount += Math.max(0, total - toNumber(o.paidAmount));
+        unpaidAmount += due;
       }
       takers.set(takerName, taker);
 
@@ -339,21 +371,28 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         orderNo: o.orderNo,
         tableNo: o.tableNo,
         total,
+        discountAmount: discount,
+        taxAmount: tax,
         tipAmount: tip,
         orderedBy: o.waiter ? `${o.waiter.name} (${o.waiter.role.name})` : null,
         servedBy: o.servedByName,
         cashier: o.cashier?.name ?? null,
         paymentStatus: o.paymentStatus,
+        isCredit,
+        creditName: o.creditCustomer?.name ?? null,
       });
     }
 
     let paymentsIn = 0;
+    const byMethod = { CASH: 0, CARD: 0, WALLET: 0, BANK: 0 };
     const collectors = new Map<string, { name: string; role: string; amount: number; count: number }>();
     for (const p of payments) {
       const amount = toNumber(p.amount);
       paymentsIn += amount;
-      const day = bucket(p.createdAt);
-      if (day) day.paymentsIn += amount;
+      const method = (p.method || "CASH") as keyof typeof byMethod;
+      if (method in byMethod) byMethod[method] = Math.round((byMethod[method] + amount) * 100) / 100;
+      const dayRow = bucket(p.createdAt);
+      if (dayRow) dayRow.paymentsIn += amount;
       const key = p.collectedBy.name;
       const s = collectors.get(key) ?? { name: p.collectedBy.name, role: p.collectedBy.role.name, amount: 0, count: 0 };
       s.amount += amount;
@@ -365,8 +404,8 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
     const purchaseRows = purchases.map((m) => {
       const amount = Math.abs(toNumber(m.quantity)) * toNumber(m.ratePerUnit);
       purchasesOut += amount;
-      const day = bucket(m.createdAt);
-      if (day) day.purchasesOut += amount;
+      const dayRow = bucket(m.createdAt);
+      if (dayRow) dayRow.purchasesOut += amount;
       return {
         time: m.createdAt.toISOString(),
         item: m.storeItem.name,
@@ -386,19 +425,24 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         orders: orders.length - cancelled,
         cancelled,
         billsPaid,
-        salesTotal,
-        salesToday: Math.round(toNumber(salesTodayAgg._sum.total ?? 0) * 100) / 100,
-        salesMonth: Math.round(toNumber(salesMonthAgg._sum.total ?? 0) * 100) / 100,
-        salesYear: Math.round(toNumber(salesYearAgg._sum.total ?? 0) * 100) / 100,
-        tipsTotal,
-        paymentsIn,
+        salesTotal: Math.round(salesTotal * 100) / 100,
+        salesToday,
+        salesMonth,
+        salesYear,
+        discountsTotal: Math.round(discountsTotal * 100) / 100,
+        taxTotal: Math.round(taxTotal * 100) / 100,
+        tipsTotal: Math.round(tipsTotal * 100) / 100,
+        paymentsIn: Math.round(paymentsIn * 100) / 100,
         paymentCount: payments.length,
-        purchasesOut,
+        byMethod,
+        creditSales: Math.round(creditSales * 100) / 100,
+        creditCount,
+        purchasesOut: Math.round(purchasesOut * 100) / 100,
         purchaseCount: purchases.length,
-        foodCost,
-        stockUsed: foodCost,
+        foodCost: Math.round(foodCost * 100) / 100,
+        stockUsed: Math.round(foodCost * 100) / 100,
         profit: Math.round((salesTotal - foodCost) * 100) / 100,
-        unpaidAmount,
+        unpaidAmount: Math.round(unpaidAmount * 100) / 100,
         unpaidCount,
       },
       days: [...days.values()],
@@ -411,6 +455,7 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         tableNo: p.order.tableNo,
         amount: toNumber(p.amount),
         tipAmount: toNumber(p.tipAmount),
+        method: p.method || "CASH",
         collectedBy: p.collectedBy.name,
         role: p.collectedBy.role.name,
         handedTo: p.handedTo?.name ?? null,

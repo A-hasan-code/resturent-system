@@ -19,6 +19,8 @@ enum OrderStatus {
   PENDING
   PREPARING
   READY
+  /// Kitchen bumped / food out — not the same as billing COMPLETED.
+  SERVED
   COMPLETED
   CANCELLED
 }
@@ -36,18 +38,31 @@ enum StockMoveType {
   OUT
   ADJUST
   SALE
+  /// Morning special cook (recipe OUT) — not plate sales.
+  COOK
+  /// Order cancel / qty-down put-back (offsets SALE for net usage).
+  RESTORE
 }
 
-/// Cash = paid with the invoice. Credit = some or all still outstanding.
-enum PurchasePayKind {
+/// How the guest paid (offline label — no card gateway).
+enum PaymentMethod {
   CASH
-  CREDIT
+  CARD
+  WALLET
+  BANK
 }
+
 
 /// Who covered travel / loading / other costs on a purchase.
 enum ExtraExpensePaidBy {
   SUPPLIER
   SELF
+}
+
+/// Purchase paid now (cash) or later (credit).
+enum PurchasePayKind {
+  CASH
+  CREDIT
 }
 
 /// Hotel / ops expense sheet (salary, utilities, etc.) — separate from store purchases.
@@ -336,12 +351,16 @@ model Purchase {
   note        String?
   /// Relative file name under data/purchase-bills (e.g. cuid.jpg). Optional supplier invoice photo.
   billImagePath String?
+  /// When set, purchase is voided — stock reversed, excluded from supplier balance.
+  voidedAt    DateTime?
+  voidNote    String?
   lines       PurchaseLine[]
   movements   StockMovement[]
   createdAt   DateTime        @default(now())
 
   @@index([purchasedAt])
   @@index([supplierId])
+  @@index([voidedAt])
 }
 
 model PurchaseLine {
@@ -487,8 +506,23 @@ model MenuItem {
   mixSpecialPlates Decimal?     @db.Decimal(14, 3)
   active         Boolean        @default(true)
   orderItems     OrderItem[]
+  modifiers      MenuModifier[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
+}
+
+/// Optional add-on on a menu item (e.g. Extra cheese +50).
+model MenuModifier {
+  id          String   @id @default(cuid())
+  menuItemId  String
+  menuItem    MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  name        String
+  priceDelta  Decimal  @db.Decimal(14, 2)
+  active      Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([menuItemId, active])
 }
 
 /// Master for a daily-cooked pot (e.g. Daal Special). Cook once → sell all day from remaining.
@@ -507,6 +541,8 @@ model SpecialProduct {
   /// Recipe used when System Manager logs morning cook (store OUT once).
   cookRecipeId String?
   cookRecipe   Recipe?         @relation("SpecialCookRecipe", fields: [cookRecipeId], references: [id])
+  /// KOT station for the synced SPECIAL menu row (Beverages / Cooking / BBQ).
+  kitchenStation KitchenStation @default(COOKING)
   active       Boolean         @default(true)
   menuItems    MenuItem[]
   batches      DailyBatch[]
@@ -596,8 +632,12 @@ model Order {
   notes         String?
   subtotal      Decimal         @default(0) @db.Decimal(14, 2)
   total         Decimal         @default(0) @db.Decimal(14, 2)
-  /// Discount taken off the food total (gross − discount = net due).
+  /// Discount taken off the food total (gross − discount = net food).
   discountAmount Decimal        @default(0) @db.Decimal(14, 2)
+  /// Sales tax on (gross − discount). 0 when tax disabled.
+  taxAmount     Decimal         @default(0) @db.Decimal(14, 2)
+  /// Tax % applied when taxAmount was set (snapshot).
+  taxPercent    Decimal         @default(0) @db.Decimal(8, 4)
   paidAmount    Decimal         @default(0) @db.Decimal(14, 2)
   /// Cash the guest handed over (may be more than paidAmount; change = tendered − paid − tip).
   tenderedAmount Decimal        @default(0) @db.Decimal(14, 2)
@@ -671,23 +711,25 @@ model OrderBillEdit {
 /// One payment taken for an order. Staff without a cash drawer (managers) hand the cash
 /// to a cashier: handedTo is that cashier, who confirms when the money is received.
 model Payment {
-  id            String    @id @default(cuid())
+  id            String         @id @default(cuid())
   orderId       String
-  order         Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  amount        Decimal   @db.Decimal(14, 2)
-  /// Cash the guest gave for this payment (may exceed amount; change returned).
-  tenderedAmount Decimal  @default(0) @db.Decimal(14, 2)
+  order         Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amount        Decimal        @db.Decimal(14, 2)
+  /// Cash the guest gave for this payment (may exceed amount; change returned). Card/wallet often equals amount.
+  tenderedAmount Decimal       @default(0) @db.Decimal(14, 2)
   /// Tip collected with this payment (not part of order.total / amount).
-  tipAmount     Decimal   @default(0) @db.Decimal(14, 2)
+  tipAmount     Decimal        @default(0) @db.Decimal(14, 2)
+  method        PaymentMethod  @default(CASH)
   collectedById String
-  collectedBy   User      @relation("PaymentCollectedBy", fields: [collectedById], references: [id])
+  collectedBy   User           @relation("PaymentCollectedBy", fields: [collectedById], references: [id])
   handedToId    String?
-  handedTo      User?     @relation("PaymentHandedTo", fields: [handedToId], references: [id])
+  handedTo      User?          @relation("PaymentHandedTo", fields: [handedToId], references: [id])
   confirmedAt   DateTime?
-  createdAt     DateTime  @default(now())
+  createdAt     DateTime       @default(now())
 
   @@index([createdAt])
   @@index([handedToId, confirmedAt])
+  @@index([method, createdAt])
 }
 
 /// Tip allocated to a staff member for an order (split by restaurant tip policy).
@@ -727,6 +769,8 @@ model OrderItem {
   specialProductId String?
   saleMode        SpecialSaleMode?
   notes           String?
+  /// Selected modifiers snapshot: [{ id?, name, priceDelta }]
+  modifiersJson   Json?
   kotRound        Int           @default(1)
   addedById       String?
   addedBy         User?         @relation("OrderItemAddedBy", fields: [addedById], references: [id])
@@ -752,6 +796,13 @@ model DayCashClose {
   closedById     String?
   closedBy       User?                 @relation(fields: [closedById], references: [id], onDelete: SetNull)
   closedByName   String?
+  /// When set, that business day's sales edits/payments are locked (admin can unlock).
+  lockedAt       DateTime?
+  /// Non-cash tender totals (not in drawer).
+  cardTotal      Decimal               @default(0) @db.Decimal(14, 2)
+  walletTotal    Decimal               @default(0) @db.Decimal(14, 2)
+  bankTotal      Decimal               @default(0) @db.Decimal(14, 2)
+  openingFloat   Decimal               @default(0) @db.Decimal(14, 2)
   counters       DayCashCloseCounter[]
   soldItems      DayCashCloseSoldItem[]
   createdAt      DateTime              @default(now())

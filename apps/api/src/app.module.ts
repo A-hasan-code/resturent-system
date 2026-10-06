@@ -18,6 +18,7 @@ import { ExpensesModule } from "./expenses/expenses.controller";
 import { CloseModule } from "./close/close.controller";
 import { CreditModule } from "./credit/credit.module";
 import { SpecialsModule } from "./specials/specials.module";
+import { FinanceModule } from "./finance/finance.module";
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { SpecialsModule } from "./specials/specials.module";
     CloseModule,
     CreditModule,
     SpecialsModule,
+    FinanceModule,
   ],
 })
 export class AppModule {}

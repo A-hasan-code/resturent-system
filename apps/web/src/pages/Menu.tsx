@@ -43,7 +43,10 @@ type MenuItem = {
   maxQty?: number | null;
   qtyStep?: number | null;
   allowCustomQty?: boolean;
+  modifiers?: { id: string; name: string; priceDelta: number; sortOrder?: number }[];
 };
+
+type ModDraft = { name: string; priceDelta: string };
 
 type Recipe = { id: string; name: string; category: string; baseUnit: string };
 type RecipeCat = { id: string; name: string };
@@ -107,6 +110,7 @@ export function MenuPage() {
   const [specialProductId, setSpecialProductId] = useState("");
   const [mixPlates, setMixPlates] = useState("1");
   const [recipeQ, setRecipeQ] = useState("");
+  const [modDrafts, setModDrafts] = useState<ModDraft[]>([]);
 
   async function load() {
     try {
@@ -195,6 +199,20 @@ export function MenuPage() {
 
   const pageRows = paginate(shown, page, PAGE_SIZE);
 
+  async function saveModifiers(menuItemId: string) {
+    const rows = modDrafts
+      .map((r, i) => ({
+        name: r.name.trim(),
+        priceDelta: Math.round((Number(r.priceDelta) || 0) * 100) / 100,
+        sortOrder: i,
+      }))
+      .filter((r) => r.name);
+    await api(`/menu/${menuItemId}/modifiers`, {
+      method: "PUT",
+      body: JSON.stringify({ modifiers: rows }),
+    });
+  }
+
   const groupedPage = useMemo(() => {
     if (kindFilter !== "ALL") return null;
     const order: MenuKind[] = ["NORMAL", "SPECIAL", "MIX"];
@@ -251,6 +269,7 @@ export function MenuPage() {
     setSpecialProductId("");
     setMixPlates("1");
     setRecipeQ("");
+    setModDrafts([]);
     setEditId(null);
     setFormKind("NORMAL");
   }
@@ -294,6 +313,9 @@ export function MenuPage() {
     setMaxQty(m.maxQty == null ? "" : String(m.maxQty));
     setQtyStep(m.qtyStep == null ? "" : String(m.qtyStep));
     setAllowCustomQty(m.allowCustomQty !== false);
+    setModDrafts(
+      (m.modifiers ?? []).map((x) => ({ name: x.name, priceDelta: String(x.priceDelta) }))
+    );
 
     if (kind === "MIX") {
       setPrice(String(m.sellingPrice));
@@ -364,9 +386,11 @@ export function MenuPage() {
         };
         if (editId) {
           await api(`/menu/${editId}`, { method: "PATCH", body: JSON.stringify(body) });
+          await saveModifiers(editId);
           toast.push(t("menu.updated"), "ok");
         } else {
-          await api("/menu", { method: "POST", body: JSON.stringify(body) });
+          const created = await api<{ id: string }>("/menu", { method: "POST", body: JSON.stringify(body) });
+          await saveModifiers(created.id);
           toast.push(t("menu.mixAdded"), "ok");
         }
         setOpen(false);
@@ -419,15 +443,17 @@ export function MenuPage() {
       };
       if (editId) {
         await api(`/menu/${editId}`, { method: "PATCH", body: JSON.stringify(body) });
+        await saveModifiers(editId);
         toast.push(t("menu.updated"), "ok");
       } else {
-        await api("/menu", {
+        const created = await api<{ id: string }>("/menu", {
           method: "POST",
           body: JSON.stringify({
             ...body,
             recipeId: recipeId || undefined,
           }),
         });
+        await saveModifiers(created.id);
         toast.push(t("menu.added"), "ok");
       }
       setOpen(false);
@@ -495,6 +521,11 @@ export function MenuPage() {
           <strong>{m.name}</strong>
           <div className="tiny muted">
             <span className="badge">{kindLabel(kind)}</span>
+            {(m.modifiers?.length ?? 0) > 0 && (
+              <span className="badge" style={{ marginLeft: "0.35rem" }}>
+                {t("menu.extrasBadge", { n: String(m.modifiers!.length) })}
+              </span>
+            )}
             {m.specialProduct && (
               <span style={{ marginLeft: "0.35rem" }}>
                 · {t("menu.mixPartCooked")}: {m.specialProduct.name}
@@ -1065,6 +1096,58 @@ export function MenuPage() {
                 </div>
               </>
             )}
+
+            <div className="field">
+              <label>{t("menu.modifiers")}</label>
+              <p className="tiny muted" style={{ margin: "0 0 0.5rem" }}>
+                {t("menu.modifiersHint")}
+              </p>
+              {modDrafts.map((row, idx) => (
+                <div key={idx} className="grid-2" style={{ marginBottom: "0.4rem", alignItems: "end" }}>
+                  <div className="field" style={{ margin: 0 }}>
+                    <label>{t("menu.modName")}</label>
+                    <input
+                      value={row.name}
+                      onChange={(e) =>
+                        setModDrafts((prev) =>
+                          prev.map((p, i) => (i === idx ? { ...p, name: e.target.value } : p))
+                        )
+                      }
+                      maxLength={60}
+                    />
+                  </div>
+                  <div className="field" style={{ margin: 0 }}>
+                    <label>{t("menu.modPrice")}</label>
+                    <div className="row" style={{ gap: 6 }}>
+                      <input
+                        type="number"
+                        step="any"
+                        value={row.priceDelta}
+                        onChange={(e) =>
+                          setModDrafts((prev) =>
+                            prev.map((p, i) => (i === idx ? { ...p, priceDelta: e.target.value } : p))
+                          )
+                        }
+                      />
+                      <button
+                        type="button"
+                        className="btn ghost sm"
+                        onClick={() => setModDrafts((prev) => prev.filter((_, i) => i !== idx))}
+                      >
+                        {t("menu.modRemove")}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="btn ghost sm"
+                onClick={() => setModDrafts((prev) => [...prev, { name: "", priceDelta: "0" }])}
+              >
+                {t("menu.modAdd")}
+              </button>
+            </div>
           </div>
           <div className="form-actions">
             <button className="btn" type="submit" disabled={busy}>

@@ -15,6 +15,7 @@ type StaffUser = {
   name: string;
   username: string;
   active: boolean;
+  protected?: boolean;
   hasPin: boolean;
   billPrinterId: string | null;
   billPrinterName: string | null;
@@ -273,6 +274,10 @@ export function UsersPage() {
   }
 
   async function removeUser(u: StaffUser) {
+    if (u.protected) {
+      toast.push(t("users.protectedCannotDelete"), "err");
+      return;
+    }
     if (
       !(await ask({
         title: t("users.deleteTitle"),
@@ -295,6 +300,7 @@ export function UsersPage() {
   }
 
   const locked = (u: StaffUser) => u.roleCode === "ADMIN" && !isAdmin;
+  const canDelete = (u: StaffUser) => !u.protected && u.id !== user?.id && !locked(u);
 
   function roleLabel(code: string, fallback: string) {
     const key = roleKey(code);
@@ -376,15 +382,21 @@ export function UsersPage() {
                       >
                         {u.active ? t("users.disable") : t("users.enable")}
                       </button>
-                      <button
-                        type="button"
-                        className="btn sm danger"
-                        disabled={locked(u)}
-                        onClick={() => void removeUser(u)}
-                      >
-                        {t("common.delete")}
-                      </button>
+                      {canDelete(u) && (
+                        <button
+                          type="button"
+                          className="btn sm danger"
+                          onClick={() => void removeUser(u)}
+                        >
+                          {t("common.delete")}
+                        </button>
+                      )}
                     </>
+                  )}
+                  {u.protected && (
+                    <span className="tiny muted" title={t("users.protectedHint")}>
+                      {t("users.protectedBadge")}
+                    </span>
                   )}
                 </td>
               </tr>
@@ -548,15 +560,19 @@ export function UsersPage() {
                   >
                     {detail.active ? t("users.disable") : t("users.enable")}
                   </button>
-                  <button
-                    type="button"
-                    className="btn danger"
-                    disabled={locked(detail)}
-                    onClick={() => void removeUser(detail)}
-                  >
-                    {t("common.delete")}
-                  </button>
+                  {canDelete(detail) && (
+                    <button
+                      type="button"
+                      className="btn danger"
+                      onClick={() => void removeUser(detail)}
+                    >
+                      {t("common.delete")}
+                    </button>
+                  )}
                 </>
+              )}
+              {detail.protected && (
+                <span className="tiny muted">{t("users.protectedHint")}</span>
               )}
             </div>
           </div>
@@ -599,8 +615,13 @@ export function UsersPage() {
                     autoCapitalize="none"
                     required
                     minLength={3}
+                    disabled={!!draft.id && !!users.find((u) => u.id === draft.id)?.protected}
                   />
-                  <span className="hint">{t("users.usernameHint")}</span>
+                  <span className="hint">
+                    {draft.id && users.find((u) => u.id === draft.id)?.protected
+                      ? t("users.protectedUsernameHint")
+                      : t("users.usernameHint")}
+                  </span>
                 </div>
               </div>
             </section>

@@ -17,6 +17,7 @@ import { AuditPage } from "./pages/Audit";
 import { HotelExpensesPage } from "./pages/HotelExpenses";
 import { CloseReportPage } from "./pages/CloseReport";
 import { CreditCustomersPage } from "./pages/CreditCustomers";
+import { FinancePage } from "./pages/Finance";
 import { SpecialsPage } from "./pages/Specials";
 
 function Private({ children }: { children: React.ReactNode }) {
@@ -57,6 +58,7 @@ export function App() {
         <Route path="table-settings" element={<TableSettingsPage />} />
         <Route path="users" element={<UsersPage />} />
         <Route path="payments" element={<PaymentsPage />} />
+        <Route path="finance" element={<FinancePage />} />
         <Route path="audit" element={<AuditPage />} />
         <Route path="expenses" element={<HotelExpensesPage />} />
         <Route path="close" element={<CloseReportPage />} />

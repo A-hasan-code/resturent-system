@@ -39,6 +39,13 @@ export class OrdersController {
     return this.orders.list(user, paymentStatus, status, view === "billing");
   }
 
+  /** Active kitchen tickets (PENDING / PREPARING / READY) — not capped by general list take:100. */
+  @Get("kitchen")
+  @RequirePerms("kitchen.view")
+  listKitchen(@CurrentUser() user: AuthUser) {
+    return this.orders.listKitchen(user);
+  }
+
   @Get("per-head")
   @RequirePerms("order.create")
   perHead() {

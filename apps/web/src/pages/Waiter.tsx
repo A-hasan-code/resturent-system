@@ -96,6 +96,7 @@ type MenuItem = {
   maxQty?: number | null;
   qtyStep?: number | null;
   allowCustomQty?: boolean;
+  modifiers?: { id: string; name: string; priceDelta: number }[];
 };
 
 type TodaySpecial = {
@@ -132,6 +133,9 @@ type Order = {
   paymentStatus: string;
   total: number;
   paidAmount: number;
+  discountAmount?: number;
+  taxAmount?: number;
+  taxPercent?: number;
   tipAmount?: number;
   kotRounds: number;
   billRequestedAt: string | null;
@@ -168,6 +172,7 @@ type CartLine = {
   fromPerHead?: boolean;
   /** Fixed package line — cart shows name only, no qty/remove. */
   perHeadLocked?: boolean;
+  modifiers?: { id?: string; name: string; priceDelta: number }[];
 };
 
 type PerHeadPkgItem = {
@@ -251,6 +256,14 @@ export function WaiterPage() {
   const [specialPick, setSpecialPick] = useState<MenuItem | null>(null);
   const [specialMode, setSpecialMode] = useState<"PLATE" | "RS">("PLATE");
   const [specialRs, setSpecialRs] = useState("");
+  const [modPick, setModPick] = useState<MenuItem | null>(null);
+  const [modSelected, setModSelected] = useState<Record<string, boolean>>({});
+  const [modExtras, setModExtras] = useState<{
+    saleMode?: "MIX";
+    soloStoreFallback?: boolean;
+    name?: string;
+    cartKey?: string;
+  } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [walkInName, setWalkInName] = useState("");
   const [order, setOrder] = useState<Order | null>(null);
@@ -477,7 +490,7 @@ export function WaiterPage() {
     const rules = rulesOf(m);
     const cartKey = extras?.cartKey || m.id;
     const hit = cart.find((p) => p.cartKey === cartKey);
-    if (hit && !extras?.saleMode) {
+    if (hit && !extras?.saleMode && !extras?.modifiers?.length) {
       const base = Number(qtyDraft[cartKey] ?? hit.quantity);
       const from = Number.isFinite(base) && base > 0 ? base : hit.quantity;
       const next = bumpQty(rules, from, 1);
@@ -505,6 +518,7 @@ export function WaiterPage() {
         amountRs: extras?.amountRs,
         specialGrams: extras?.specialGrams,
         soloStoreFallback: extras?.soloStoreFallback,
+        modifiers: extras?.modifiers,
         minQty: rules.minQty ?? undefined,
         maxQty: rules.maxQty ?? null,
         qtyStep: rules.qtyStep ?? null,
@@ -544,24 +558,66 @@ export function WaiterPage() {
       const batch = m.specialProductId ? specialById.get(m.specialProductId) : null;
       const platesPer = m.mixSpecialPlates || 1;
       const needGrams = (m.specialProduct?.plateGrams || batch?.plateGrams || 1) * platesPer * startQtyOf(rulesOf(m));
+      let mixOpts: {
+        saleMode: "MIX";
+        soloStoreFallback?: boolean;
+        name?: string;
+        cartKey?: string;
+      } = { saleMode: "MIX" };
       if (!batch || batch.remainingGrams + 0.0005 < needGrams) {
         const ok = await ask({
           title: t("waiter.mixFallbackTitle"),
           body: t("waiter.mixFallbackBody", { name: m.name }),
         });
         if (!ok) return;
-        addNormal(m, {
+        mixOpts = {
           cartKey: `${m.id}:solo`,
           saleMode: "MIX",
           soloStoreFallback: true,
           name: `${m.name} (${t("waiter.storeOnly")})`,
-        });
+        };
+      }
+      if (m.modifiers && m.modifiers.length > 0) {
+        setModPick(m);
+        setModSelected({});
+        setModExtras(mixOpts);
         return;
       }
-      addNormal(m, { saleMode: "MIX" });
+      addNormal(m, mixOpts);
+      return;
+    }
+    if (m.modifiers && m.modifiers.length > 0) {
+      setModPick(m);
+      setModSelected({});
+      setModExtras(null);
       return;
     }
     addNormal(m);
+  }
+
+  function confirmModAdd(skipExtras = false) {
+    if (!modPick) return;
+    const m = modPick;
+    const picked = skipExtras
+      ? []
+      : (m.modifiers || []).filter((x) => modSelected[x.id]);
+    const extra = picked.reduce((s, x) => s + x.priceDelta, 0);
+    const modKey = picked.map((x) => x.id).sort().join("+") || "plain";
+    const baseName = modExtras?.name || m.name;
+    const label =
+      picked.length > 0 ? `${baseName} (+${picked.map((x) => x.name).join(", ")})` : baseName;
+    const cartKeyBase = modExtras?.cartKey || m.id;
+    addNormal(m, {
+      cartKey: `${cartKeyBase}:${modKey}`,
+      name: label,
+      rate: Math.round((m.sellingPrice + extra) * 100) / 100,
+      modifiers: picked.map((x) => ({ id: x.id, name: x.name, priceDelta: x.priceDelta })),
+      ...(modExtras?.saleMode ? { saleMode: modExtras.saleMode } : {}),
+      ...(modExtras?.soloStoreFallback ? { soloStoreFallback: true } : {}),
+    });
+    setModPick(null);
+    setModSelected({});
+    setModExtras(null);
   }
 
   function confirmSpecialAdd() {
@@ -923,6 +979,7 @@ export function WaiterPage() {
               ...(c.saleMode ? { saleMode: c.saleMode } : {}),
               ...(c.amountRs != null ? { amountRs: c.amountRs } : {}),
               ...(c.soloStoreFallback ? { soloStoreFallback: true } : {}),
+              ...(c.modifiers?.length ? { modifiers: c.modifiers } : {}),
             }
       );
     const preview = hasMenu && previewFirst && canReprintKot;
@@ -1137,10 +1194,11 @@ export function WaiterPage() {
     }
   }
 
-  function paid() {
+  function paid(fullyPaid = true) {
     setPaying(false);
     void loadTables();
-    back();
+    if (fullyPaid) back();
+    else if (order) void loadOrder(order.id);
   }
 
   function catLabel(c: string) {
@@ -1399,6 +1457,7 @@ export function WaiterPage() {
                     {m.minQty ? ` · ≥${m.minQty}` : ""}
                     {m.maxQty != null ? ` · ≤${m.maxQty}` : ""}
                     {remHint}
+                    {(m.modifiers?.length ?? 0) > 0 ? ` · ${t("waiter.extrasHint")}` : ""}
                   </span>
                   {inCart && (
                     <span className="waiter-item-qty">
@@ -1868,7 +1927,10 @@ export function WaiterPage() {
                 {t("waiter.onCredit")}: {order.creditCustomer.name}
               </strong>
               <div className="tiny muted">{order.creditCustomer.phone}</div>
-              {order.status !== "COMPLETED" && order.paymentStatus !== "PAID" && (
+              {can("order.pay") &&
+                order.status !== "COMPLETED" &&
+                order.paymentStatus !== "PAID" &&
+                (order.status === "READY" || order.status === "SERVED") && (
                 <button type="button" className="btn ghost sm" style={{ marginTop: "0.4rem" }} disabled={busy} onClick={() => void releaseCreditTable()}>
                   {t("waiter.guestLeft")}
                 </button>
@@ -1903,7 +1965,7 @@ export function WaiterPage() {
                   {t("waiter.reprintFull")}
                 </button>
               )}
-              {can("bill.request") && showTakeawayCashierBillActions && (
+              {can("bill.request") && showTakeawayCashierBillActions && !order.creditCustomer && (
                 <button
                   type="button"
                   className="btn warn"
@@ -1929,13 +1991,58 @@ export function WaiterPage() {
               )}
               {can("order.pay") && !order.creditCustomer && (
                 <button type="button" className="btn ok" style={{ flex: 1 }} onClick={() => setPaying(true)}>
-                  {t("waiter.takePayment")} {money(order.total - (order.paidAmount ?? 0))}
+                  {t("waiter.takePayment")}{" "}
+                  {money(
+                    Math.max(
+                      0,
+                      order.total -
+                        (order.discountAmount ?? 0) +
+                        (order.taxAmount ?? 0) -
+                        (order.paidAmount ?? 0)
+                    )
+                  )}
                 </button>
               )}
             </div>
           )}
         </aside>
       </div>
+
+      <Modal
+        open={!!modPick}
+        title={modPick ? `${modPick.name} · ${t("waiter.modPickTitle")}` : t("waiter.modPickTitle")}
+        onClose={() => {
+          setModPick(null);
+          setModExtras(null);
+        }}
+      >
+        {modPick && (
+          <div className="modal-scroll">
+            <p className="muted tiny">{t("waiter.modPickHint")}</p>
+            <div className="chips" style={{ flexWrap: "wrap", gap: 8 }}>
+              {(modPick.modifiers || []).map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className={`btn sm ${modSelected[m.id] ? "" : "ghost"}`}
+                  onClick={() => setModSelected((s) => ({ ...s, [m.id]: !s[m.id] }))}
+                >
+                  {m.name}
+                  {m.priceDelta > 0 ? ` +${money(m.priceDelta)}` : m.priceDelta < 0 ? ` ${money(m.priceDelta)}` : ""}
+                </button>
+              ))}
+            </div>
+            <div className="form-footer" style={{ marginTop: "1rem" }}>
+              <button type="button" className="btn ghost" onClick={() => confirmModAdd(true)}>
+                {t("waiter.modNone")}
+              </button>
+              <button type="button" className="btn ok" onClick={() => confirmModAdd(false)}>
+                {t("waiter.modAdd")}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       <Modal
         open={!!specialPick}

@@ -90,7 +90,14 @@ const ROLE_PERMS: Record<string, string[]> = {
   ],
   STORE: ["store.view", "store.manage"],
   KITCHEN: ["kitchen.view", "kitchen.update", "print.kot"],
-  WAITER: ["order.viewOwn", "bill.request", "kitchen.view"],
+  WAITER: [
+    "order.create",
+    "order.addItems",
+    "order.viewOwn",
+    "bill.request",
+    "print.kot",
+    "kitchen.view",
+  ],
 };
 
 const ROLES = [

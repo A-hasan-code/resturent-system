@@ -128,11 +128,98 @@ export function SettingsPage() {
       </div>
       <ServerSection canEdit={can("system.manage")} />
       {can("system.manage") && <BillDesignSection />}
+      {can("system.manage") && <TaxBillingSection />}
       {can("system.manage") && <TipPrintSection />}
       {can("printers.manage") && <PrintersSection />}
       {can("printers.manage") && <JobsSection />}
       {can("system.manage") && <BackupSection />}
     </div>
+  );
+}
+
+function TaxBillingSection() {
+  const toast = useToast();
+  const t = useT();
+  const [taxEnabled, setTaxEnabled] = useState(false);
+  const [taxPercent, setTaxPercent] = useState("0");
+  const [ntn, setNtn] = useState("");
+  const [strn, setStrn] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api<{
+      billing?: { taxEnabled?: boolean; taxPercent?: number };
+      legal?: { ntn?: string; strn?: string };
+    }>("/system/settings")
+      .then((s) => {
+        setTaxEnabled(!!s.billing?.taxEnabled);
+        setTaxPercent(String(s.billing?.taxPercent ?? 0));
+        setNtn(s.legal?.ntn || "");
+        setStrn(s.legal?.strn || "");
+      })
+      .catch(() => undefined);
+  }, []);
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const pct = Math.max(0, Number(taxPercent) || 0);
+      await api("/system/settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          taxEnabled: taxEnabled ? "1" : "0",
+          taxPercent: pct,
+          ntn: ntn.trim(),
+          strn: strn.trim(),
+        }),
+      });
+      toast.push(t("settings.saved"), "ok");
+    } catch (err) {
+      toast.push(errMsg(err, t("settings.saveFailed")), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="panel panel-pad" onSubmit={save} id="tax-billing">
+      <h2 className="settings-h">{t("settings.taxBilling")}</h2>
+      <p className="tiny muted" style={{ marginTop: 0 }}>
+        {t("settings.taxBillingHint")}
+      </p>
+      <label className="switch-row">
+        <input type="checkbox" checked={taxEnabled} onChange={(e) => setTaxEnabled(e.target.checked)} />
+        <span>{t("settings.taxEnabled")}</span>
+      </label>
+      <div className="grid-2">
+        <div className="field">
+          <label htmlFor="tax-percent">{t("settings.taxPercent")}</label>
+          <input
+            id="tax-percent"
+            type="number"
+            min={0}
+            step="any"
+            value={taxPercent}
+            onChange={(e) => setTaxPercent(e.target.value)}
+            disabled={!taxEnabled}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="ntn">{t("settings.ntn")}</label>
+          <input id="ntn" value={ntn} onChange={(e) => setNtn(e.target.value)} maxLength={40} />
+        </div>
+      </div>
+      <div className="field">
+        <label htmlFor="strn">{t("settings.strn")}</label>
+        <input id="strn" value={strn} onChange={(e) => setStrn(e.target.value)} maxLength={40} />
+      </div>
+      <div className="form-actions">
+        <button type="submit" className="btn" disabled={busy}>
+          {busy ? t("common.saving") : t("common.save")}
+        </button>
+      </div>
+    </form>
   );
 }
 

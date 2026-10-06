@@ -32,15 +32,33 @@ export class CostingService {
       where: { id: recipeId },
       include: { ingredients: { include: { storeItem: true } } },
     });
+    if (!recipe.active) {
+      throw new BadRequestException(
+        `Recipe "${recipe.name}" was removed — unlink it from the menu or restore a new recipe`
+      );
+    }
 
     let cost = 0;
     for (const ing of recipe.ingredients) {
-      cost += unitCostFromRate(
-        toNumber(ing.storeItem.ratePerUnit),
-        ing.storeItem.unit,
-        toNumber(ing.quantity),
-        ing.unit
-      );
+      if (!ing.storeItem.active) {
+        throw new BadRequestException(
+          `Ingredient "${ing.storeItem.name}" on recipe "${recipe.name}" is inactive in store`
+        );
+      }
+      try {
+        cost += unitCostFromRate(
+          toNumber(ing.storeItem.ratePerUnit),
+          ing.storeItem.unit,
+          toNumber(ing.quantity),
+          ing.unit
+        );
+      } catch (e) {
+        throw new BadRequestException(
+          e instanceof Error
+            ? `${recipe.name}: ${e.message}`
+            : `Cannot cost recipe "${recipe.name}"`
+        );
+      }
     }
 
     const baseQty = toNumber(recipe.baseQty) || 1;
@@ -59,10 +77,18 @@ export class CostingService {
     }[];
 
     const recipes = await this.prisma.recipe.findMany({
-      where: { id: { in: [...new Set(wanted.map((l) => l.recipeId))] } },
+      where: { id: { in: [...new Set(wanted.map((l) => l.recipeId))] }, active: true },
       include: { ingredients: { include: { storeItem: true } } },
     });
     const byId = new Map(recipes.map((r) => [r.id, r]));
+
+    for (const line of wanted) {
+      if (!byId.has(line.recipeId)) {
+        throw new BadRequestException(
+          `Cannot sell "${line.name}" — its recipe was removed or is inactive`
+        );
+      }
+    }
 
     type Need = {
       name: string;
@@ -74,11 +100,22 @@ export class CostingService {
     const needs = new Map<string, Need>();
 
     for (const line of wanted) {
-      const recipe = byId.get(line.recipeId);
-      if (!recipe) continue;
+      const recipe = byId.get(line.recipeId)!;
       const scale = line.quantity / (toNumber(recipe.baseQty) || 1);
       for (const ing of recipe.ingredients) {
-        const deduct = convertQty(toNumber(ing.quantity) * scale, ing.unit, ing.storeItem.unit);
+        if (!ing.storeItem.active) {
+          throw new BadRequestException(
+            `Cannot sell "${line.name}" — store item "${ing.storeItem.name}" is inactive`
+          );
+        }
+        let deduct: number;
+        try {
+          deduct = convertQty(toNumber(ing.quantity) * scale, ing.unit, ing.storeItem.unit);
+        } catch (e) {
+          throw new BadRequestException(
+            e instanceof Error ? `${line.name}: ${e.message}` : `Unit mismatch on ${line.name}`
+          );
+        }
         const row = needs.get(ing.storeItemId) ?? {
           name: ing.storeItem.name,
           unit: ing.storeItem.unit,
@@ -192,7 +229,8 @@ export class CostingService {
     recipeId: string,
     orderQty: number,
     note: string,
-    orderId?: string
+    orderId?: string,
+    moveType: "SALE" | "COOK" = "SALE"
   ) {
     if (!(orderQty > 0)) return 0;
 
@@ -201,6 +239,11 @@ export class CostingService {
         where: { id: recipeId },
         include: { ingredients: { include: { storeItem: true } } },
       });
+      if (!recipe.active) {
+        throw new BadRequestException(
+          `Recipe "${recipe.name}" was removed — cannot deduct stock`
+        );
+      }
       const baseQty = toNumber(recipe.baseQty) || 1;
       const scale = orderQty / baseQty;
 
@@ -214,11 +257,23 @@ export class CostingService {
       const needByItem = new Map<string, Plan>();
 
       for (const ing of recipe.ingredients) {
-        const deduct = convertQty(
-          toNumber(ing.quantity) * scale,
-          ing.unit,
-          ing.storeItem.unit
-        );
+        if (!ing.storeItem.active) {
+          throw new BadRequestException(
+            `Store item "${ing.storeItem.name}" is inactive on recipe "${recipe.name}"`
+          );
+        }
+        let deduct: number;
+        try {
+          deduct = convertQty(
+            toNumber(ing.quantity) * scale,
+            ing.unit,
+            ing.storeItem.unit
+          );
+        } catch (e) {
+          throw new BadRequestException(
+            e instanceof Error ? `${recipe.name}: ${e.message}` : "Unit conversion failed"
+          );
+        }
         const prev = needByItem.get(ing.storeItemId);
         if (prev) {
           prev.deduct += deduct;
@@ -267,7 +322,7 @@ export class CostingService {
         await tx.stockMovement.create({
           data: {
             storeItemId: plan.storeItemId,
-            type: "SALE",
+            type: moveType,
             quantity: -plan.deduct,
             ratePerUnit: plan.ratePerUnit,
             note,
@@ -297,32 +352,71 @@ export class CostingService {
     orderId?: string
   ) {
     if (orderQty <= 0) return 0;
-    const { recipe, costPerBase } = await this.recipeUnitCost(recipeId);
-    const scale = orderQty / (toNumber(recipe.baseQty) || 1);
 
-    for (const ing of recipe.ingredients) {
-      const restore = convertQty(
-        toNumber(ing.quantity) * scale,
-        ing.unit,
-        ing.storeItem.unit
-      );
-
-      await this.prisma.storeItem.update({
-        where: { id: ing.storeItemId },
-        data: { quantityOnHand: { increment: restore } },
+    return this.prisma.$transaction(async (tx) => {
+      const recipe = await tx.recipe.findUniqueOrThrow({
+        where: { id: recipeId },
+        include: { ingredients: { include: { storeItem: true } } },
       });
-      await this.prisma.stockMovement.create({
-        data: {
-          storeItemId: ing.storeItemId,
-          type: "ADJUST",
-          quantity: restore,
-          ratePerUnit: ing.storeItem.ratePerUnit,
-          note,
-          orderId: orderId ?? null,
-        },
-      });
-    }
+      const baseQty = toNumber(recipe.baseQty) || 1;
+      const scale = orderQty / baseQty;
 
-    return costPerBase * orderQty;
+      type Plan = {
+        storeItemId: string;
+        restore: number;
+        ratePerUnit: (typeof recipe.ingredients)[number]["storeItem"]["ratePerUnit"];
+      };
+      const byItem = new Map<string, Plan>();
+      let totalForBase = 0;
+
+      for (const ing of recipe.ingredients) {
+        let restore: number;
+        try {
+          restore = convertQty(
+            toNumber(ing.quantity) * scale,
+            ing.unit,
+            ing.storeItem.unit
+          );
+          totalForBase += unitCostFromRate(
+            toNumber(ing.storeItem.ratePerUnit),
+            ing.storeItem.unit,
+            toNumber(ing.quantity),
+            ing.unit
+          );
+        } catch (e) {
+          throw new BadRequestException(
+            e instanceof Error ? `${recipe.name}: ${e.message}` : "Unit conversion failed"
+          );
+        }
+        const prev = byItem.get(ing.storeItemId);
+        if (prev) prev.restore += restore;
+        else {
+          byItem.set(ing.storeItemId, {
+            storeItemId: ing.storeItemId,
+            restore,
+            ratePerUnit: ing.storeItem.ratePerUnit,
+          });
+        }
+      }
+
+      for (const plan of byItem.values()) {
+        await tx.storeItem.update({
+          where: { id: plan.storeItemId },
+          data: { quantityOnHand: { increment: plan.restore } },
+        });
+        await tx.stockMovement.create({
+          data: {
+            storeItemId: plan.storeItemId,
+            type: "RESTORE",
+            quantity: plan.restore,
+            ratePerUnit: plan.ratePerUnit,
+            note,
+            orderId: orderId ?? null,
+          },
+        });
+      }
+
+      return (totalForBase / baseQty) * orderQty;
+    });
   }
 }

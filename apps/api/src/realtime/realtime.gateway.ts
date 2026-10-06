@@ -12,10 +12,14 @@ type TokenPayload = { sub: string; roleCode: string; permissions: string[] };
 export const ROOM = {
   all: "all",
   kitchen: "kitchen",
+  /** Floor staff who pick up READY food (waiter + supervisor). */
+  floor: "floor",
   cashier: "cashier",
   print: "print",
   user: (id: string) => `user:${id}`,
 };
+
+const FLOOR_ROLES = new Set(["WAITER", "SUPERVISOR"]);
 
 @WebSocketGateway({ cors: { origin: true } })
 export class RealtimeGateway implements OnGatewayConnection {
@@ -34,6 +38,7 @@ export class RealtimeGateway implements OnGatewayConnection {
       const perms = new Set(p.permissions || []);
       const rooms = [ROOM.all, ROOM.user(p.sub)];
       if (perms.has("kitchen.view")) rooms.push(ROOM.kitchen);
+      if (FLOOR_ROLES.has(p.roleCode)) rooms.push(ROOM.floor);
       if (perms.has("order.pay") || perms.has("bill.view")) rooms.push(ROOM.cashier);
       if (perms.has("order.pay") || perms.has("printers.manage") || perms.has("print.bill")) {
         rooms.push(ROOM.print);

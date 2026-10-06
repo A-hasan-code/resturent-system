@@ -16,13 +16,14 @@ export class RealtimeService {
 
   orderChanged(o: OrderEvent, reason: string) {
     this.gw.emit(ROOM.all, "orders.changed", { ...o, reason });
-    if (reason === "created" || reason === "items-added" || reason === "cancelled" || reason === "reversed") {
+    if (reason === "created" || reason === "items-added" || reason === "cancelled" || reason === "reversed" || reason === "edited") {
       this.gw.emit(ROOM.kitchen, "kitchen.new", { ...o, reason });
     }
-    if (o.status === "READY" && reason === "status") {
+    if ((o.status === "READY" || o.status === "SERVED") && reason === "status") {
       const rooms = [ROOM.cashier];
+      if (o.status === "READY") rooms.push(ROOM.floor);
       if (o.waiterId) rooms.push(ROOM.user(o.waiterId));
-      this.gw.emit(rooms, "order.ready", o);
+      this.gw.emit(rooms, o.status === "READY" ? "order.ready" : "order.served", o);
     }
   }
 

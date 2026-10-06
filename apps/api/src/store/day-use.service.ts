@@ -9,6 +9,7 @@ import { SettingsService } from "../system/settings.service";
 import { toNumber } from "../common/units";
 import { businessDateOf, businessWindow } from "../common/business-day";
 import { AuthUser } from "../common/decorators";
+import { applySaleRestoreNet } from "./store.service";
 import { SaveDayUseDto } from "./dto";
 
 const money2 = (n: number) => Math.round(n * 100) / 100;
@@ -77,8 +78,11 @@ export class DayUseService {
         orderBy: [{ category: { sortOrder: "asc" } }, { name: "asc" }],
       }),
       this.prisma.stockMovement.findMany({
-        where: { type: "SALE", createdAt: { gte: clock.from, lt: clock.to } },
-        select: { storeItemId: true, quantity: true },
+        where: {
+          type: { in: ["SALE", "RESTORE"] },
+          createdAt: { gte: clock.from, lt: clock.to },
+        },
+        select: { storeItemId: true, quantity: true, type: true },
       }),
       this.prisma.dayStockClose.findUnique({
         where: { businessDate: clock.businessDate },
@@ -103,7 +107,10 @@ export class DayUseService {
 
     const auto = new Map<string, number>();
     for (const m of salesMoves) {
-      auto.set(m.storeItemId, (auto.get(m.storeItemId) ?? 0) + Math.abs(toNumber(m.quantity)));
+      applySaleRestoreNet(auto, m.type, m.storeItemId, toNumber(m.quantity));
+    }
+    for (const [id, qty] of [...auto.entries()]) {
+      auto.set(id, Math.max(0, qty3(qty)));
     }
     const extra = new Map(close?.lines.map((l) => [l.storeItemId, l]) ?? []);
 
@@ -195,12 +202,18 @@ export class DayUseService {
       }
 
       const salesMoves = await tx.stockMovement.findMany({
-        where: { type: "SALE", createdAt: { gte: clock.from, lt: clock.to } },
-        select: { storeItemId: true, quantity: true },
+        where: {
+          type: { in: ["SALE", "RESTORE"] },
+          createdAt: { gte: clock.from, lt: clock.to },
+        },
+        select: { storeItemId: true, quantity: true, type: true },
       });
       const auto = new Map<string, number>();
       for (const m of salesMoves) {
-        auto.set(m.storeItemId, (auto.get(m.storeItemId) ?? 0) + Math.abs(toNumber(m.quantity)));
+        applySaleRestoreNet(auto, m.type, m.storeItemId, toNumber(m.quantity));
+      }
+      for (const [id, qty] of [...auto.entries()]) {
+        auto.set(id, Math.max(0, qty3(qty)));
       }
 
       const existing = await tx.dayStockClose.findUnique({

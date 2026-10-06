@@ -21,6 +21,8 @@ import {
 import { TipService } from "../system/tip.service";
 import { SettingsService } from "../system/settings.service";
 import { SpecialsService } from "../specials/specials.service";
+import { FinanceService } from "../finance/finance.service";
+import { PaymentMethod } from "@prisma/client";
 
 const staffSelect = { id: true, name: true, role: { select: { code: true, name: true } } } as const;
 
@@ -70,6 +72,7 @@ type Line = {
   batchGrams: number;
   specialProductId: string | null;
   saleMode: "PLATE" | "RS" | "MIX" | "MIX_SOLO_STORE" | null;
+  modifiersJson?: { id?: string; name: string; priceDelta: number }[] | null;
 };
 
 const canSeeCost = (u: AuthUser) => u.permissions.includes("reports.view");
@@ -86,9 +89,18 @@ const paidBillsScope = (u: AuthUser): Prisma.OrderWhereInput =>
 const seesAllOrders = (u: AuthUser) =>
   ["bill.view", "kitchen.view", "order.pay"].some((p) => u.permissions.includes(p));
 
-/** Floor roles: kitchen/list shows only orders they placed (not the whole kitchen queue). */
+/** Floor roles: own orders only on general list — kitchen.update staff see the full queue. */
 const floorOwnOrdersOnly = (u: AuthUser, billing: boolean) =>
-  !billing && (u.roleCode === "SUPERVISOR" || u.roleCode === "WAITER");
+  !billing &&
+  (u.roleCode === "SUPERVISOR" || u.roleCode === "WAITER") &&
+  !u.permissions.includes("kitchen.update");
+
+const KITCHEN_ACTIVE: OrderStatus[] = ["PENDING", "PREPARING", "READY"];
+const KITCHEN_NEXT: Record<string, OrderStatus[]> = {
+  PENDING: ["PREPARING", "READY"],
+  PREPARING: ["READY"],
+  READY: ["SERVED"],
+};
 
 @Injectable()
 export class OrdersService {
@@ -101,7 +113,8 @@ export class OrdersService {
     private readonly realtime: RealtimeService,
     private readonly tips: TipService,
     private readonly settings: SettingsService,
-    private readonly specials: SpecialsService
+    private readonly specials: SpecialsService,
+    private readonly finance: FinanceService
   ) {}
 
   perHeadConfig() {
@@ -149,6 +162,20 @@ export class OrdersService {
     return orders.map((o) => this.toDto(o, canSeeCost(user)));
   }
 
+  /** Full kitchen board — all active tickets, no floor own-filter, high ceiling. */
+  async listKitchen(user: AuthUser) {
+    if (!user.permissions.includes("kitchen.view")) {
+      throw new ForbiddenException("Kitchen view required");
+    }
+    const orders = await this.prisma.order.findMany({
+      where: { status: { in: KITCHEN_ACTIVE } },
+      include: orderInclude,
+      orderBy: { createdAt: "asc" },
+      take: 500,
+    });
+    return orders.map((o) => this.toDto(o, false));
+  }
+
   async get(user: AuthUser, id: string) {
     const o = await this.prisma.order.findUnique({ where: { id }, include: orderInclude });
     if (!o) throw new NotFoundException("Order not found");
@@ -176,6 +203,9 @@ export class OrdersService {
           throw new BadRequestException("This table is already on another credit account");
         }
         if (dto.creditCustomerId && !open.creditCustomerId) {
+          if (toNumber(open.paidAmount) > 0 || open.paymentStatus === "PARTIAL") {
+            throw new BadRequestException("Cannot put a partially paid bill on credit — reverse payment first");
+          }
           const customerId = await this.resolveCreditCustomer(user, dto.creditCustomerId);
           await this.prisma.order.update({ where: { id: open.id }, data: { creditCustomerId: customerId } });
         }
@@ -225,6 +255,7 @@ export class OrdersService {
             specialProductId: rest.specialProductId,
             saleMode: rest.saleMode,
             notes: rest.notes,
+            modifiersJson: rest.modifiersJson ?? undefined,
             kotRound: rest.lineKind === "MENU" ? 1 : 0,
             addedById: user.id,
           })),
@@ -232,12 +263,17 @@ export class OrdersService {
       },
     });
 
-    await this.deductStock(
-      lines.filter((l) => l.lineKind === "MENU"),
-      order.orderNo,
-      order.tableNo,
-      order.id
-    );
+    try {
+      await this.deductStock(
+        lines.filter((l) => l.lineKind === "MENU"),
+        order.orderNo,
+        order.tableNo,
+        order.id
+      );
+    } catch (e) {
+      await this.rollbackFailedCreate(order.id, order.orderNo);
+      throw e;
+    }
     if (dto.printKot !== false && hasKitchen) await this.queueKot(order.id, 1, user.id);
     const full = await this.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
     this.realtime.orderChanged(this.event(full), "created");
@@ -261,6 +297,9 @@ export class OrdersService {
       throw new BadRequestException("This table is already on another credit account");
     }
     if (dto.creditCustomerId && !order.creditCustomerId) {
+      if (toNumber(order.paidAmount) > 0 || order.paymentStatus === "PARTIAL") {
+        throw new BadRequestException("Cannot put a partially paid bill on credit — reverse payment first");
+      }
       const customerId = await this.resolveCreditCustomer(user, dto.creditCustomerId, !order.tableId);
       await this.prisma.order.update({ where: { id }, data: { creditCustomerId: customerId } });
     }
@@ -321,6 +360,7 @@ export class OrdersService {
           specialProductId: rest.specialProductId,
           saleMode: rest.saleMode,
           notes: rest.notes ?? null,
+          modifiersJson: rest.modifiersJson ?? undefined,
           kotRound: nextRound,
           addedById: user.id,
         })),
@@ -340,14 +380,39 @@ export class OrdersService {
         costTotal: costSum,
         discountAmount: Math.min(toNumber(order.discountAmount), Math.max(0, sum - toNumber(order.paidAmount))),
         billRequestedAt: null,
-        status: order.status === "READY" || order.status === "COMPLETED" ? "PENDING" : order.status,
+        status: order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED" ? "PENDING" : order.status,
         paymentStatus: toNumber(order.paidAmount) > 0 ? "PARTIAL" : order.paymentStatus,
         ...(order.waiterId ? {} : { waiterId: user.id }),
         ...(servedByName !== undefined ? { servedByName } : {}),
       },
     });
 
-    await this.deductStock(menuLines, order.orderNo, order.tableNo, order.id);
+    try {
+      await this.deductStock(menuLines, order.orderNo, order.tableNo, order.id);
+    } catch (e) {
+      // deductStock already restored any partial takes — drop this round's menu lines only.
+      if (menuLines.length) {
+        await this.prisma.orderItem.deleteMany({
+          where: { orderId: id, kotRound: nextRound, lineKind: "MENU" },
+        });
+        const left = await this.prisma.orderItem.findMany({ where: { orderId: id } });
+        const leftSum = left.reduce((s, i) => s + toNumber(i.amount), 0);
+        const leftCost = left.reduce((s, i) => s + toNumber(i.costAmount), 0);
+        await this.prisma.order.update({
+          where: { id },
+          data: {
+            kotRounds: order.kotRounds,
+            subtotal: leftSum,
+            total: leftSum,
+            costTotal: leftCost,
+            status: order.status,
+            paymentStatus: order.paymentStatus,
+            billRequestedAt: order.billRequestedAt,
+          },
+        });
+      }
+      throw e;
+    }
     if (dto.printKot !== false && menuLines.length) await this.queueKot(id, nextRound, user.id);
     const full = await this.prisma.order.findUniqueOrThrow({ where: { id }, include: orderInclude });
     this.realtime.orderChanged(this.event(full), "items-added");
@@ -359,6 +424,9 @@ export class OrdersService {
    * and print a CANCELLED kitchen slip so staff stop preparing.
    */
   async cancel(user: AuthUser, id: string, dto: CancelOrderDto) {
+    const existing = await this.prisma.order.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException("Order not found");
+    await this.finance.assertNotLocked(existing.createdAt);
     if (!user.permissions.includes("order.edit")) {
       throw new ForbiddenException("Only the Main Cashier can cancel orders");
     }
@@ -439,6 +507,7 @@ export class OrdersService {
       },
     });
     if (!order) throw new NotFoundException("Order not found");
+    await this.finance.assertNotLocked(order.createdAt);
     if (order.status === "CANCELLED" || order.paymentStatus === "VOID") {
       throw new BadRequestException("Order is already cancelled");
     }
@@ -513,9 +582,13 @@ export class OrdersService {
       include: { items: true, payments: { orderBy: { createdAt: "desc" } } },
     });
     if (!order) throw new NotFoundException("Order not found");
+    await this.finance.assertNotLocked(order.createdAt);
     if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
     if (order.paymentStatus === "PAID") {
       throw new BadRequestException("Paid bills cannot be edited");
+    }
+    if (order.creditCustomerId && order.status === "COMPLETED") {
+      throw new BadRequestException("This credit visit is closed. Place a new order for the next sitting");
     }
 
     if (!(dto.items?.length) && !(dto.addItems?.length)) {
@@ -666,6 +739,7 @@ export class OrdersService {
             specialProductId: line.specialProductId,
             saleMode: line.saleMode,
             notes: line.notes,
+            modifiersJson: line.modifiersJson ?? undefined,
             kotRound: order.kotRounds,
             addedById: user.id,
           },
@@ -732,12 +806,30 @@ export class OrdersService {
         discountAmount: nextDiscount,
         paidAmount: nextPaid,
         paymentStatus: nextPaymentStatus,
+        ...(growing &&
+        (order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED")
+          ? { status: "PENDING" as const }
+          : {}),
         ...billMeta,
       },
       include: orderInclude,
     });
 
     this.realtime.orderChanged(this.event(updated), "edited");
+    // Qty-down / remove: reprint cancel-style KOT so kitchen stops wrong lines.
+    const shrunkKitchen = (dto.items ?? []).some((change) => {
+      const line = order.items.find((i) => i.id === change.id);
+      return !!line?.menuItemId && change.quantity + 0.0001 < toNumber(line.quantity);
+    });
+    if (shrunkKitchen) {
+      void this.print.enqueueKot(id, {
+        cancelled: true,
+        cancelReason: "Bill edited — check quantities",
+        requestedById: user.id,
+      });
+    } else if (growing) {
+      void this.print.enqueueKot(id, { reprint: true, requestedById: user.id });
+    }
     return this.toDto(updated, canSeeCost(user));
   }
 
@@ -752,6 +844,12 @@ export class OrdersService {
     if (!existing) throw new NotFoundException("Order not found");
     this.assertCanModify(user, existing, true);
     if (existing.paymentStatus === "PAID") throw new BadRequestException("Bill is already paid");
+    if (existing.status === "CANCELLED" || existing.paymentStatus === "VOID") {
+      throw new BadRequestException("Cancelled orders cannot request a bill");
+    }
+    if (existing.creditCustomerId) {
+      throw new BadRequestException("Credit bills are cleared from Credit Customers, not Billing");
+    }
     if (!existing.assignedCashierId) {
       throw new BadRequestException("Assign a cashier first, then request the bill");
     }
@@ -787,6 +885,7 @@ export class OrdersService {
   async pay(user: AuthUser, id: string, dto: PayOrderDto) {
     const order = await this.prisma.order.findUnique({ where: { id } });
     if (!order) throw new NotFoundException("Order not found");
+    await this.finance.assertNotLocked(order.createdAt);
     if (order.status === "CANCELLED" || order.paymentStatus === "VOID") {
       throw new BadRequestException("Cancelled orders cannot be paid");
     }
@@ -796,16 +895,17 @@ export class OrdersService {
     }
 
     const round2 = (n: number) => Math.round(n * 100) / 100;
+    const method = (dto.method || "CASH") as PaymentMethod;
+    const taxCfg = await this.finance.taxSettings();
     const gross = toNumber(order.total);
     const prevPaid = toNumber(order.paidAmount);
-    const prevTendered = toNumber(order.tenderedAmount);
-    const maxDiscount = Math.max(0, round2(gross - prevPaid));
+    const maxDiscount = Math.max(0, round2(gross - Math.max(0, prevPaid - toNumber(order.taxAmount))));
     const discount =
       dto.discount !== undefined
         ? Math.min(maxDiscount, Math.max(0, round2(dto.discount)))
         : Math.min(maxDiscount, Math.max(0, round2(toNumber(order.discountAmount))));
-    const net = Math.max(0, round2(gross - discount));
-    const due = Math.max(0, round2(net - prevPaid));
+    const { taxAmount, taxPercent, dueBase } = this.finance.computeTax(gross, discount, taxCfg.percent);
+    const due = Math.max(0, round2(dueBase - prevPaid));
     const tendered = Math.max(0, round2(dto.amount ?? due));
     const tip = Math.max(0, round2(dto.tip ?? 0));
     const pay = Math.min(tendered, due);
@@ -814,10 +914,10 @@ export class OrdersService {
     if (pay <= 0 && tip > 0 && due > 0) throw new BadRequestException("Pay the bill before collecting tip only");
 
     const paidAmount = round2(prevPaid + pay);
-    const fullyPaid = paidAmount + 0.001 >= net || due <= 0;
+    const fullyPaid = paidAmount + 0.001 >= dueBase || due <= 0;
     const paymentStatus: PaymentStatus = fullyPaid ? "PAID" : pay > 0 ? "PARTIAL" : order.paymentStatus;
     const tipAmount = round2(toNumber(order.tipAmount) + tip);
-    const tenderedAmount = round2(prevTendered + tendered);
+    const tenderedAmount = round2(toNumber(order.tenderedAmount) + tendered);
 
     let servedByName = order.servedByName;
     if (dto.servedByName !== undefined) {
@@ -825,7 +925,8 @@ export class OrdersService {
     }
 
     let handedTo: { id: string; name: string } | null = null;
-    const needsCashHandover = !user.permissions.includes("cash.keep") && (pay > 0 || tip > 0);
+    const needsCashHandover =
+      method === "CASH" && !user.permissions.includes("cash.keep") && (pay > 0 || tip > 0);
     if (needsCashHandover) {
       if (!dto.handedToId) throw new BadRequestException("Select the cashier you handed the cash to");
       handedTo = await this.prisma.user.findFirst({
@@ -847,10 +948,12 @@ export class OrdersService {
               data: {
                 orderId: id,
                 amount: pay,
-                tenderedAmount: tendered,
+                tenderedAmount: method === "CASH" ? tendered : pay,
                 tipAmount: tip,
+                method,
                 collectedById: user.id,
                 handedToId: handedTo?.id ?? null,
+                confirmedAt: method !== "CASH" || !handedTo ? new Date() : null,
               },
             })
           : null;
@@ -858,13 +961,15 @@ export class OrdersService {
         where: { id },
         data: {
           discountAmount: discount,
+          taxAmount,
+          taxPercent,
           paidAmount,
           tenderedAmount,
           tipAmount,
           paymentStatus,
           servedByName,
           cashierId: order.cashierId ?? handedTo?.id ?? user.id,
-          status: fullyPaid && order.status === "READY" ? "COMPLETED" : order.status,
+          status: fullyPaid && (order.status === "READY" || order.status === "SERVED") ? "COMPLETED" : order.status,
         },
         include: orderInclude,
       });
@@ -901,6 +1006,13 @@ export class OrdersService {
     if (order.status === "COMPLETED" || order.paymentStatus === "PAID") {
       return this.toDto(order, canSeeCost(user));
     }
+    await this.finance.assertNotLocked(order.createdAt);
+    // Keep kitchen ticket until food is out — freeing early drops KOT and opens the table for a new sitting.
+    if (order.status !== "READY" && order.status !== "SERVED") {
+      throw new BadRequestException(
+        "Wait until kitchen marks Ready (or Served) before freeing the table for the next guest"
+      );
+    }
     const updated = await this.prisma.order.update({
       where: { id },
       data: { status: "COMPLETED" },
@@ -934,9 +1046,29 @@ export class OrdersService {
   }
 
   async updateStatus(user: AuthUser, id: string, dto: UpdateStatusDto) {
+    if (!user.permissions.includes("kitchen.update")) {
+      throw new ForbiddenException("Kitchen update required");
+    }
+    const existing = await this.prisma.order.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException("Order not found");
+    if (existing.status === "CANCELLED") {
+      throw new BadRequestException("Order is cancelled");
+    }
+
+    const allowed = KITCHEN_NEXT[existing.status] ?? [];
+    if (!allowed.includes(dto.status)) {
+      throw new BadRequestException(
+        `Kitchen cannot set ${dto.status} from ${existing.status}. Use cancel/pay flows for those.`
+      );
+    }
+
+    // Already paid: still allow kitchen flow; SERVED closes the ticket as COMPLETED.
+    const nextStatus: OrderStatus =
+      dto.status === "SERVED" && existing.paymentStatus === "PAID" ? "COMPLETED" : dto.status;
+
     const updated = await this.prisma.order.update({
       where: { id },
-      data: { status: dto.status },
+      data: { status: nextStatus },
       include: orderInclude,
     });
     this.realtime.orderChanged(this.event(updated), "status");
@@ -1363,7 +1495,9 @@ export class OrdersService {
         }
         if (useBatch) plannedTake.set(sp.id, planned + grams);
 
-        const rate = toNumber(menu.sellingPrice);
+        const mods = await this.resolveModifiers(menu.id, line.modifiers);
+        const modExtra = mods.reduce((s, m) => s + m.priceDelta, 0);
+        const rate = Math.round((toNumber(menu.sellingPrice) + modExtra) * 100) / 100;
         const amount = rate * line.quantity;
         let unitCost = 0;
         if (menu.recipeId) {
@@ -1384,10 +1518,13 @@ export class OrdersService {
         const costAmount = unitCost * line.quantity;
         subtotal += amount;
         costTotal += costAmount;
+        const baseName = saleMode === "MIX_SOLO_STORE" ? `${menu.name} (store only)` : menu.name;
+        const displayName =
+          mods.length > 0 ? `${baseName} (+${mods.map((m) => m.name).join(", ")})` : baseName;
         lines.push({
           lineKind: "MENU",
           menuItemId: menu.id,
-          name: saleMode === "MIX_SOLO_STORE" ? `${menu.name} (store only)` : menu.name,
+          name: displayName,
           sellUnit: menu.sellUnit,
           quantity: line.quantity,
           ratePerUnit: rate,
@@ -1399,21 +1536,27 @@ export class OrdersService {
           batchGrams,
           specialProductId: sp.id,
           saleMode,
+          modifiersJson: mods.length ? mods : null,
         });
         continue;
       }
 
       assertMenuQty(menu, line.quantity);
-      const rate = toNumber(menu.sellingPrice);
+      const mods = await this.resolveModifiers(menu.id, line.modifiers);
+      const modExtra = mods.reduce((s, m) => s + m.priceDelta, 0);
+      const baseRate = toNumber(menu.sellingPrice);
+      const rate = Math.round((baseRate + modExtra) * 100) / 100;
       const amount = rate * line.quantity;
       const unitCost = menu.recipeId ? (await this.costing.recipeUnitCost(menu.recipeId)).costPerBase : 0;
       const costAmount = unitCost * line.quantity;
       subtotal += amount;
       costTotal += costAmount;
+      const displayName =
+        mods.length > 0 ? `${menu.name} (+${mods.map((m) => m.name).join(", ")})` : menu.name;
       lines.push({
         lineKind: "MENU",
         menuItemId: menu.id,
-        name: menu.name,
+        name: displayName,
         sellUnit: menu.sellUnit,
         quantity: line.quantity,
         ratePerUnit: rate,
@@ -1425,9 +1568,39 @@ export class OrdersService {
         batchGrams: 0,
         specialProductId: null,
         saleMode: null,
+        modifiersJson: mods.length ? mods : null,
       });
     }
     return { lines, subtotal, costTotal };
+  }
+
+  /** Resolve modifier name/price from DB — never trust client priceDelta. */
+  private async resolveModifiers(
+    menuItemId: string,
+    raw: { id?: string; name?: string; priceDelta?: number }[] | undefined
+  ): Promise<{ id: string; name: string; priceDelta: number }[]> {
+    const ids = [...new Set((raw ?? []).map((m) => (m.id || "").trim()).filter(Boolean))];
+    if (!ids.length) {
+      if ((raw ?? []).length) {
+        throw new BadRequestException("Modifiers must include id");
+      }
+      return [];
+    }
+    const rows = await this.prisma.menuModifier.findMany({
+      where: { menuItemId, active: true, id: { in: ids } },
+    });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const out: { id: string; name: string; priceDelta: number }[] = [];
+    for (const id of ids) {
+      const db = byId.get(id);
+      if (!db) throw new BadRequestException("Modifier not available on this menu item");
+      out.push({
+        id: db.id,
+        name: db.name,
+        priceDelta: Math.round(toNumber(db.priceDelta) * 100) / 100,
+      });
+    }
+    return out;
   }
 
   private ensureStock(lines: { recipeId: string | null; quantity: number; name: string }[]) {
@@ -1437,19 +1610,46 @@ export class OrdersService {
   }
 
   private async deductStock(lines: Line[], orderNo: number, tableNo: string | null, orderId: string) {
-    for (const line of lines) {
-      if (line.recipeId) {
-        await this.costing.deductRecipeStock(
-          line.recipeId,
-          line.quantity,
-          `Order #${orderNo}${tableNo ? ` · Table ${tableNo}` : ""} · auto sale`,
-          orderId
-        );
+    const note = `Order #${orderNo}${tableNo ? ` · Table ${tableNo}` : ""} · auto sale`;
+    const startedAt = new Date();
+    const doneSpecials: { id: string; grams: number }[] = [];
+    try {
+      for (const line of lines) {
+        if (line.recipeId) {
+          await this.costing.deductRecipeStock(line.recipeId, line.quantity, note, orderId);
+        }
       }
-      if (line.specialProductId && line.batchGrams > 0) {
-        await this.specials.assertAndTake(line.specialProductId, line.batchGrams);
+      for (const line of lines) {
+        if (line.specialProductId && line.batchGrams > 0) {
+          await this.specials.assertAndTake(line.specialProductId, line.batchGrams);
+          doneSpecials.push({ id: line.specialProductId, grams: line.batchGrams });
+        }
       }
+    } catch (e) {
+      for (const s of [...doneSpecials].reverse()) {
+        await this.specials.restoreGrams(s.id, s.grams).catch(() => undefined);
+      }
+      // Undo SALE rows from this attempt only (no ADJUST offsets — cancel stays correct).
+      const moves = await this.prisma.stockMovement.findMany({
+        where: { orderId, type: "SALE", createdAt: { gte: startedAt } },
+      });
+      for (const m of moves) {
+        const qty = toNumber(m.quantity);
+        if (qty >= 0) continue;
+        await this.prisma.storeItem.update({
+          where: { id: m.storeItemId },
+          data: { quantityOnHand: { increment: -qty } },
+        });
+        await this.prisma.stockMovement.delete({ where: { id: m.id } });
+      }
+      throw e;
     }
+  }
+
+  /** Create failed after insert — deductStock already rolled stock; drop orphan order. */
+  private async rollbackFailedCreate(orderId: string, _orderNo: number) {
+    await this.prisma.orderItem.deleteMany({ where: { orderId } });
+    await this.prisma.order.delete({ where: { id: orderId } }).catch(() => undefined);
   }
 
   /** Put back ingredients deducted as SALE when the whole order is cancelled. */
@@ -1468,7 +1668,7 @@ export class OrdersService {
       await this.prisma.stockMovement.create({
         data: {
           storeItemId: m.storeItemId,
-          type: "ADJUST",
+          type: "RESTORE",
           quantity: restore,
           ratePerUnit: m.ratePerUnit,
           note: `Order #${orderNo} · cancelled`,
@@ -1522,15 +1722,23 @@ export class OrdersService {
       subtotal: toNumber(o.subtotal),
       total: toNumber(o.total),
       discountAmount: toNumber(o.discountAmount),
+      taxAmount: toNumber(o.taxAmount),
+      taxPercent: toNumber(o.taxPercent),
       paidAmount: toNumber(o.paidAmount),
       tenderedAmount: toNumber(o.tenderedAmount),
       tipAmount,
       netTotal: Math.max(0, toNumber(o.total) - toNumber(o.discountAmount)),
+      dueTotal: Math.max(
+        0,
+        toNumber(o.total) - toNumber(o.discountAmount) + toNumber(o.taxAmount)
+      ),
       changeAmount: Math.max(
         0,
         toNumber(o.tenderedAmount) - toNumber(o.paidAmount) - tipAmount,
       ),
-      grandTotal: Math.max(0, toNumber(o.total) - toNumber(o.discountAmount)) + tipAmount,
+      grandTotal:
+        Math.max(0, toNumber(o.total) - toNumber(o.discountAmount) + toNumber(o.taxAmount)) +
+        tipAmount,
       ...(showCost
         ? {
             costTotal: toNumber(o.costTotal),
@@ -1574,6 +1782,7 @@ export class OrdersService {
         specialProductId: i.specialProductId,
         saleMode: i.saleMode,
         notes: i.notes,
+        modifiers: (i as { modifiersJson?: unknown }).modifiersJson ?? null,
         kotRound: i.kotRound,
         addedBy: i.addedBy?.name ?? null,
         category: i.menuItem?.category ?? (i.lineKind === "PER_HEAD" ? "Per head" : null),
@@ -1584,6 +1793,7 @@ export class OrdersService {
         amount: toNumber(p.amount),
         tenderedAmount: toNumber(p.tenderedAmount),
         tipAmount: toNumber(p.tipAmount),
+        method: p.method ?? "CASH",
         changeAmount: Math.max(0, toNumber(p.tenderedAmount) - toNumber(p.amount) - toNumber(p.tipAmount)),
         collectedBy: p.collectedBy.name,
         handedTo: p.handedTo?.name ?? null,

@@ -103,7 +103,7 @@ export class TipService {
       });
     } else if (split === "POOL") {
       const floor = await tx.user.findMany({
-        where: { active: true, role: { code: { in: ["WAITER", "MANAGER"] } } },
+        where: { active: true, role: { code: { in: ["WAITER", "SUPERVISOR", "MANAGER"] } } },
         select: { id: true },
       });
       if (floor.length) {

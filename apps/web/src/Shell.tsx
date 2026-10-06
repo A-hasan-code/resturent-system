@@ -39,6 +39,7 @@ const GROUPS: { titleKey: MessageKey; tabs: Tab[] }[] = [
     titleKey: "nav.group.admin",
     tabs: [
       { to: "/payments", labelKey: "nav.payments", perms: ["payments.view"] },
+      { to: "/finance", labelKey: "nav.finance", perms: ["payments.view", "close.view", "reports.view"] },
       { to: "/audit", labelKey: "nav.audit", perms: ["payments.view"] },
       { to: "/expenses", labelKey: "nav.expenses", perms: ["expense.view", "expense.manage"] },
       { to: "/close", labelKey: "nav.close", perms: ["close.view", "close.manage"] },
@@ -83,8 +84,8 @@ function LiveAlerts() {
   });
 
   useSocketEvent<OrderEv>("order.ready", (o) => {
-    toast.push(`Food ready: ${o.tableNo || "Walk-in"} · #${o.orderNo}`, "ok");
-    if (user?.roleCode === "WAITER") alertBeep();
+    toast.push(`Order ready — pick up: ${o.tableNo || "Walk-in"} · #${o.orderNo}`, "ok");
+    if (user?.roleCode === "WAITER" || user?.roleCode === "SUPERVISOR") alertBeep();
   });
 
   useSocketEvent<PrintEv>("print.failed", (j) => {

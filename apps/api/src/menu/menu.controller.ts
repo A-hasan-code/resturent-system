@@ -6,13 +6,14 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   UseGuards,
 } from "@nestjs/common";
 import { MenuService } from "./menu.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
-import { CreateMenuItemDto, UpdateMenuItemDto } from "./dto";
+import { CreateMenuItemDto, UpdateMenuItemDto, SetMenuModifiersDto } from "./dto";
 
 @Controller("menu")
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -38,6 +39,12 @@ export class MenuController {
   @RequirePerms("menu.manage")
   update(@Param("id") id: string, @Body() dto: UpdateMenuItemDto) {
     return this.menu.update(id, dto);
+  }
+
+  @Put(":id/modifiers")
+  @RequirePerms("menu.manage")
+  setModifiers(@Param("id") id: string, @Body() dto: SetMenuModifiersDto) {
+    return this.menu.setModifiers(id, dto.modifiers ?? []);
   }
 
   @Delete(":id")

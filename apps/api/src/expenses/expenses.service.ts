@@ -1,20 +1,16 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { ExtraExpensePaidBy, HotelExpensePeriod, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { SettingsService } from "../system/settings.service";
+import { FinanceService } from "../finance/finance.service";
 import { toNumber } from "../common/units";
+import { businessWindow } from "../common/business-day";
 import { CreateExpenseCategoryDto, CreateHotelExpenseDto, UpdateHotelExpenseDto } from "./expenses.dto";
 
 const money2 = (n: number) => Math.round(n * 100) / 100;
 
 function dayStamp(isoDate: string) {
   return new Date(`${isoDate}T12:00:00`);
-}
-
-function dayRange(from: string, to: string) {
-  return {
-    start: new Date(`${from}T00:00:00`),
-    end: new Date(`${to}T23:59:59.999`),
-  };
 }
 
 function localDate(d: Date) {
@@ -71,7 +67,19 @@ function billBalance(p: {
 
 @Injectable()
 export class ExpensesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly settings: SettingsService,
+    private readonly finance: FinanceService
+  ) {}
+
+  /** Inclusive business-day range → [from, to) using restaurant day-start. */
+  private async businessRange(from: string, to: string) {
+    const start = await this.settings.dayStart();
+    const a = businessWindow(from, start.h, start.m);
+    const b = businessWindow(to, start.h, start.m);
+    return { start: a.from, end: b.to };
+  }
 
   private row(e: {
     id: string;
@@ -138,7 +146,7 @@ export class ExpensesService {
   /** One-time style backfill: CASH / initial pays missing from SupplierPayment (note purchase:id). */
   private async syncPurchaseCashPayments() {
     const purchases = await this.prisma.purchase.findMany({
-      where: { paidAmount: { gt: 0 } },
+      where: { paidAmount: { gt: 0 }, voidedAt: null },
       select: {
         id: true,
         supplierId: true,
@@ -197,37 +205,38 @@ export class ExpensesService {
     if (from > to) throw new BadRequestException("from must be on or before to");
     await this.syncPurchaseCashPayments();
 
-    const { start, end } = dayRange(from, to);
+    const { start, end } = await this.businessRange(from, to);
 
-    const [manualAgg, paymentsAgg, selfExtra, salesAgg, purchases] = await Promise.all([
+    const [manualAgg, paymentsAgg, selfExtra, paidOrders, purchases] = await Promise.all([
       this.prisma.hotelExpense.aggregate({
-        where: { spentAt: { gte: start, lte: end } },
+        where: { spentAt: { gte: start, lt: end } },
         _sum: { amount: true },
         _count: true,
       }),
       this.prisma.supplierPayment.aggregate({
-        where: { paidAt: { gte: start, lte: end } },
+        where: { paidAt: { gte: start, lt: end } },
         _sum: { amount: true },
         _count: true,
       }),
       this.prisma.purchase.findMany({
         where: {
-          purchasedAt: { gte: start, lte: end },
+          purchasedAt: { gte: start, lt: end },
+          voidedAt: null,
           extraExpense: { gt: 0 },
           extraExpensePaidBy: ExtraExpensePaidBy.SELF,
         },
         select: { extraExpense: true },
       }),
-      this.prisma.order.aggregate({
+      this.prisma.order.findMany({
         where: {
-          paymentStatus: "PAID",
+          createdAt: { gte: start, lt: end },
           status: { not: "CANCELLED" },
-          updatedAt: { gte: start, lte: end },
+          OR: [{ paymentStatus: "PAID" }, { creditCustomerId: { not: null } }],
         },
-        _sum: { total: true },
+        select: { total: true, discountAmount: true },
       }),
       this.prisma.purchase.findMany({
-        where: { purchasedAt: { gte: start, lte: end } },
+        where: { purchasedAt: { gte: start, lt: end }, voidedAt: null },
         select: { total: true, paidAmount: true, extraExpense: true, extraExpensePaidBy: true },
       }),
     ]);
@@ -240,7 +249,9 @@ export class ExpensesService {
       purchases.reduce((s, p) => s + billBalance(p).balance, 0)
     );
     const totalExpense = money2(manualExpenses + supplierPaid + selfExtraTotal);
-    const sales = money2(toNumber(salesAgg._sum.total ?? 0));
+    const sales = money2(
+      paidOrders.reduce((s, o) => s + Math.max(0, toNumber(o.total) - toNumber(o.discountAmount)), 0)
+    );
     const netProfit = money2(sales - totalExpense);
 
     return {
@@ -267,25 +278,25 @@ export class ExpensesService {
     if (from > to) throw new BadRequestException("from must be on or before to");
     await this.syncPurchaseCashPayments();
 
-    const { start, end } = dayRange(from, to);
+    const { start, end } = await this.businessRange(from, to);
     const cat = category?.trim();
 
     const [manual, payments, purchases] = await Promise.all([
       this.prisma.hotelExpense.findMany({
         where: {
-          spentAt: { gte: start, lte: end },
+          spentAt: { gte: start, lt: end },
           ...(cat ? { category: { equals: cat, mode: "insensitive" } } : {}),
         },
         orderBy: [{ spentAt: "desc" }, { createdAt: "desc" }],
         include: { createdBy: { select: { id: true, name: true } } },
       }),
       this.prisma.supplierPayment.findMany({
-        where: { paidAt: { gte: start, lte: end } },
+        where: { paidAt: { gte: start, lt: end } },
         orderBy: [{ paidAt: "desc" }, { createdAt: "desc" }],
         include: { supplier: { select: { id: true, name: true } } },
       }),
       this.prisma.purchase.findMany({
-        where: { purchasedAt: { gte: start, lte: end } },
+        where: { purchasedAt: { gte: start, lt: end }, voidedAt: null },
         orderBy: [{ purchasedAt: "desc" }, { createdAt: "desc" }],
         include: {
           supplier: { select: { id: true, name: true } },
@@ -397,6 +408,21 @@ export class ExpensesService {
       byCategory.set(key, money2((byCategory.get(key) ?? 0) + r.amount));
     }
 
+    let manualExpenses = totals.manualExpenses;
+    let supplierPaid = totals.supplierPaid;
+    let selfExtra = totals.selfExtra;
+    let totalExpense = totals.totalExpense;
+    if (cat) {
+      manualExpenses = money2(rows.filter((r) => r.source === "MANUAL" && r.inTotal).reduce((s, r) => s + r.amount, 0));
+      supplierPaid = money2(
+        rows.filter((r) => r.source === "SUPPLIER_PAYMENT" && r.inTotal).reduce((s, r) => s + r.amount, 0)
+      );
+      selfExtra = money2(
+        rows.filter((r) => r.source === "PURCHASE_EXTRA" && r.inTotal).reduce((s, r) => s + r.amount, 0)
+      );
+      totalExpense = money2(manualExpenses + supplierPaid + selfExtra);
+    }
+
     const saved = await this.listCategories();
     const filterCats = [
       ...saved,
@@ -413,14 +439,14 @@ export class ExpensesService {
       rows,
       summary: {
         count: rows.length,
-        total: totals.totalExpense,
-        manualExpenses: totals.manualExpenses,
-        supplierPaid: totals.supplierPaid,
-        selfExtra: totals.selfExtra,
+        total: totalExpense,
+        manualExpenses,
+        supplierPaid,
+        selfExtra,
         inventoryPurchased: totals.inventoryPurchased,
         unpaidSupplierBills: totals.unpaidSupplierBills,
         sales: totals.sales,
-        netProfit: totals.netProfit,
+        netProfit: money2(totals.sales - totalExpense),
         byCategory: [...byCategory.entries()]
           .map(([name, amount]) => ({ name, amount }))
           .sort((a, b) => b.amount - a.amount),
@@ -435,10 +461,12 @@ export class ExpensesService {
     const title = dto.title.trim();
     if (!title) throw new BadRequestException("Title / name required");
     const category = dto.category?.trim() || null;
+    const spentAt = dayStamp(dto.spentOn);
+    await this.finance.assertNotLocked(spentAt);
 
     const created = await this.prisma.hotelExpense.create({
       data: {
-        spentAt: dayStamp(dto.spentOn),
+        spentAt,
         category,
         title,
         amount,
@@ -455,18 +483,21 @@ export class ExpensesService {
   async update(id: string, dto: UpdateHotelExpenseDto) {
     const existing = await this.prisma.hotelExpense.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException("Expense not found");
+    await this.finance.assertNotLocked(existing.spentAt);
 
     if (dto.amount != null && dto.amount <= 0) {
       throw new BadRequestException("Amount must be greater than zero");
     }
 
     const nextCategory = dto.category !== undefined ? dto.category.trim() || null : undefined;
+    const nextSpent = dto.spentOn ? dayStamp(dto.spentOn) : null;
+    if (nextSpent) await this.finance.assertNotLocked(nextSpent);
 
     try {
       const updated = await this.prisma.hotelExpense.update({
         where: { id },
         data: {
-          ...(dto.spentOn ? { spentAt: dayStamp(dto.spentOn) } : {}),
+          ...(nextSpent ? { spentAt: nextSpent } : {}),
           ...(nextCategory !== undefined ? { category: nextCategory } : {}),
           ...(dto.title !== undefined ? { title: dto.title.trim() } : {}),
           ...(dto.amount != null ? { amount: money2(dto.amount) } : {}),
@@ -483,6 +514,9 @@ export class ExpensesService {
   }
 
   async remove(id: string) {
+    const existing = await this.prisma.hotelExpense.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException("Expense not found");
+    await this.finance.assertNotLocked(existing.spentAt);
     try {
       await this.prisma.hotelExpense.delete({ where: { id } });
       return { ok: true };

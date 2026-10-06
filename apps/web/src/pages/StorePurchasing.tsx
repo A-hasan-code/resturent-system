@@ -1,6 +1,7 @@
 import { FormEvent, Fragment, useEffect, useMemo, useState } from "react";
 import { api, authBlobUrl, downloadApi, money, unitLabel, uploadApi } from "../api";
 import { Modal } from "../components/Modal";
+import { useConfirm } from "../components/ConfirmModal";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
 import { DateField } from "../components/DateField";
@@ -42,12 +43,15 @@ type RecentBill = {
   outstanding: number;
   lineCount: number;
   hasBillImage: boolean;
+  voided?: boolean;
+  voidNote?: string | null;
 };
 
 type DailyLine = {
   id: string;
   supplier: string;
   payKind: string;
+  voided?: boolean;
   item: string;
   category: string;
   unit: string;
@@ -70,6 +74,8 @@ type Ledger = SupplierRow & {
     balance: number;
     note: string | null;
     hasBillImage: boolean;
+    voidedAt?: string | null;
+    voidNote?: string | null;
     lines: { id: string; item: string; category: string; unit: string; quantity: number; ratePerUnit: number; amount: number }[];
   }[];
   payments: { id: string; paidOn: string; amount: number; note: string | null }[];
@@ -113,6 +119,7 @@ function BuyView({
 }) {
   const t = useT();
   const toast = useToast();
+  const ask = useConfirm();
   const [suppliers, setSuppliers] = useState<SupplierRow[]>([]);
   const [recent, setRecent] = useState<RecentBill[]>([]);
   const [categories, setCategories] = useState<Cat[]>([]);
@@ -195,6 +202,29 @@ function BuyView({
   useEffect(() => {
     load().catch((e) => toast.push(e instanceof Error ? e.message : t("store.loadFailed"), "err"));
   }, []);
+
+  async function voidPurchase(id: string) {
+    const ok = await ask({
+      title: t("store.voidPurchaseTitle"),
+      body: t("store.voidPurchaseBody"),
+      confirmLabel: t("store.voidPurchaseConfirm"),
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api(`/store/purchases/${id}/void`, {
+        method: "POST",
+        body: JSON.stringify({ note: "Voided from store" }),
+      });
+      toast.push(t("store.voidOk"), "ok");
+      await load();
+      onChanged();
+    } catch (err) {
+      toast.push(err instanceof Error ? err.message : t("store.voidFailed"), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const inventoryTotal = useMemo(
     () => lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0),
@@ -787,7 +817,7 @@ function BuyView({
               </thead>
               <tbody>
                 {pageRecent.map((b) => (
-                  <tr key={b.id}>
+                  <tr key={b.id} style={b.voided ? { opacity: 0.55 } : undefined}>
                     <td>{b.purchasedOn}</td>
                     <td>{b.supplier}</td>
                     <td>{b.lineCount}</td>
@@ -807,7 +837,9 @@ function BuyView({
                     </td>
                     <td>{money(b.paidAmount)}</td>
                     <td>
-                      {b.outstanding > 0.009 ? (
+                      {b.voided ? (
+                        <span className="badge unpaid">{t("store.voided")}</span>
+                      ) : b.outstanding > 0.009 ? (
                         <>
                           <span className="badge unpaid">
                             {b.paidAmount > 0.009 ? t("store.billStatusPartial") : t("store.billStatusUnpaid")}
@@ -819,13 +851,23 @@ function BuyView({
                       )}
                     </td>
                     <td>
-                      {b.hasBillImage ? (
-                        <button type="button" className="btn ghost sm" onClick={() => setViewBillId(b.id)}>
-                          {t("store.viewBillPhoto")}
-                        </button>
-                      ) : (
-                        <span className="tiny muted">—</span>
-                      )}
+                      <div className="row" style={{ gap: "0.35rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                        {b.hasBillImage ? (
+                          <button type="button" className="btn ghost sm" onClick={() => setViewBillId(b.id)}>
+                            {t("store.viewBillPhoto")}
+                          </button>
+                        ) : null}
+                        {canManage && !b.voided ? (
+                          <button
+                            type="button"
+                            className="btn danger sm"
+                            disabled={busy}
+                            onClick={() => void voidPurchase(b.id)}
+                          >
+                            {t("store.voidPurchase")}
+                          </button>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -892,6 +934,7 @@ function SupplierMeta({
 function SuppliersView({ canManage }: { canManage: boolean }) {
   const t = useT();
   const toast = useToast();
+  const ask = useConfirm();
   const [rows, setRows] = useState<SupplierRow[]>([]);
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
@@ -929,6 +972,32 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
 
   async function load() {
     setRows(await api<SupplierRow[]>("/store/suppliers"));
+  }
+
+  async function voidPurchase(id: string) {
+    const ok = await ask({
+      title: t("store.voidPurchaseTitle"),
+      body: t("store.voidPurchaseBody"),
+      confirmLabel: t("store.voidPurchaseConfirm"),
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api(`/store/purchases/${id}/void`, {
+        method: "POST",
+        body: JSON.stringify({ note: "Voided from ledger" }),
+      });
+      toast.push(t("store.voidOk"), "ok");
+      await load();
+      if (ledger) {
+        const next = await api<Ledger>(`/store/suppliers/${ledger.id}/ledger`);
+        setLedger(next);
+      }
+    } catch (err) {
+      toast.push(err instanceof Error ? err.message : t("store.voidFailed"), "err");
+    } finally {
+      setBusy(false);
+    }
   }
 
   useEffect(() => {
@@ -1243,11 +1312,12 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
               <tbody>
                 {pageLedgerPurchases.map((p) => {
                   const due = supplierBillTotal(p);
-                  const status = billStatus(p.paidAmount, p.balance);
+                  const voided = !!p.voidedAt;
+                  const status = voided ? "paid" : billStatus(p.paidAmount, p.balance);
                   const open = openBillId === p.id;
                   return (
                     <Fragment key={p.id}>
-                      <tr>
+                      <tr style={voided ? { opacity: 0.55 } : undefined}>
                         <td>
                           <strong>{p.purchasedOn}</strong>
                           <div className="tiny muted">
@@ -1255,9 +1325,10 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                           </div>
                         </td>
                         <td>
-                          {status === "paid" && <span className="badge paid">{t("store.billStatusPaid")}</span>}
-                          {status === "partial" && <span className="badge pending">{t("store.billStatusPartial")}</span>}
-                          {status === "unpaid" && <span className="badge unpaid">{t("store.billStatusUnpaid")}</span>}
+                          {voided && <span className="badge unpaid">{t("store.voided")}</span>}
+                          {!voided && status === "paid" && <span className="badge paid">{t("store.billStatusPaid")}</span>}
+                          {!voided && status === "partial" && <span className="badge pending">{t("store.billStatusPartial")}</span>}
+                          {!voided && status === "unpaid" && <span className="badge unpaid">{t("store.billStatusUnpaid")}</span>}
                         </td>
                         <td>{money(p.total)}</td>
                         <td>
@@ -1276,7 +1347,9 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                         <td>{money(due)}</td>
                         <td>{money(p.paidAmount)}</td>
                         <td>
-                          {p.balance > 0.009 ? (
+                          {voided ? (
+                            <span className="tiny muted">—</span>
+                          ) : p.balance > 0.009 ? (
                             <span className="badge unpaid">{money(p.balance)}</span>
                           ) : (
                             <span className="badge paid">{money(0)}</span>
@@ -1296,6 +1369,16 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                             >
                               {open ? t("common.close") : t("store.billItems")}
                             </button>
+                            {canManage && !voided && (
+                              <button
+                                type="button"
+                                className="btn danger sm"
+                                disabled={busy}
+                                onClick={() => void voidPurchase(p.id)}
+                              >
+                                {t("store.voidPurchase")}
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>

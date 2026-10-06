@@ -48,11 +48,21 @@ class UpdateTableDto {
   @IsOptional() @IsBoolean() active?: boolean;
 }
 
-/** Cash bills keep the table until paid. A credit meal frees the table once the guest has left (order completed). */
+/** Cash bills keep the table until paid (and kitchen done). Credit frees once guest has left (COMPLETED). */
 export const OPEN_ORDER_WHERE: Prisma.OrderWhereInput = {
   status: { not: "CANCELLED" },
-  paymentStatus: { in: ["UNPAID", "PARTIAL"] },
-  OR: [{ creditCustomerId: null }, { status: { not: "COMPLETED" } }],
+  OR: [
+    {
+      paymentStatus: { in: ["UNPAID", "PARTIAL"] },
+      OR: [{ creditCustomerId: null }, { status: { not: "COMPLETED" } }],
+    },
+    // Cash paid early — still cooking: hold table so a new sitting cannot open on top.
+    {
+      creditCustomerId: null,
+      paymentStatus: "PAID",
+      status: { in: ["PENDING", "PREPARING", "READY"] },
+    },
+  ],
 };
 
 export function tableLabel(partitionName: string | null | undefined, tableName: string) {

@@ -169,7 +169,9 @@ export function CreditCustomersPage() {
       setSlip(paid);
       setPreview(paid);
     } catch (e) {
-      toast.push(e instanceof Error ? e.message : t("credit.settleFailed"), "err");
+      const msg = e instanceof Error ? e.message : "";
+      if (/locked after day close/i.test(msg)) toast.push(t("pay.dayLocked"), "err");
+      else toast.push(msg || t("credit.settleFailed"), "err");
     } finally {
       setBusy(false);
     }

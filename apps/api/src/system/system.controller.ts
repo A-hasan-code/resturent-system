@@ -63,6 +63,10 @@ class UpdateSettingsDto {
   @IsOptional() @IsString() @Matches(/^[01]$/) perHeadEnabled?: string;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) perHeadAmount?: number;
   @IsOptional() @IsString() @MaxLength(40) perHeadLabel?: string;
+  @IsOptional() @IsString() @Matches(/^[01]$/) taxEnabled?: string;
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) taxPercent?: number;
+  @IsOptional() @IsString() @MaxLength(40) ntn?: string;
+  @IsOptional() @IsString() @MaxLength(40) strn?: string;
   /** Menu items included with per-head (kitchen lines at Rs 0). */
   @IsOptional()
   @IsArray()
@@ -151,17 +155,28 @@ export class SystemController {
 
   @Get("settings")
   async getSettings() {
-    const [tipSplit, bill, kot, perHead] = await Promise.all([
+    const [tipSplit, bill, kot, perHead, taxS, legal] = await Promise.all([
       this.tips.tipSplit(),
       this.tips.printBillOpts(),
       this.tips.printKotOpts(),
       this.settings.perHead(),
+      this.settings.getMany("billing."),
+      this.settings.getMany("restaurant."),
     ]);
+    const taxPercent = Math.max(0, Number(taxS["billing.taxPercent"] ?? "0") || 0);
     return {
       serverName: this.identity.name,
       restaurant: await this.settings.restaurant(),
       tip: { split: tipSplit },
-      billing: { perHead },
+      billing: {
+        perHead,
+        taxEnabled: (taxS["billing.taxEnabled"] ?? (taxPercent > 0 ? "1" : "0")) !== "0",
+        taxPercent,
+      },
+      legal: {
+        ntn: (legal["restaurant.ntn"] || "").trim(),
+        strn: (legal["restaurant.strn"] || "").trim(),
+      },
       print: {
         bill: {
           showLogo: bill.showLogo,
@@ -262,6 +277,9 @@ export class SystemController {
       ["kotFooter", "print.kot.footer"],
       ["perHeadEnabled", "billing.perHeadEnabled"],
       ["perHeadLabel", "billing.perHeadLabel"],
+      ["taxEnabled", "billing.taxEnabled"],
+      ["ntn", "restaurant.ntn"],
+      ["strn", "restaurant.strn"],
       ["dayStart", "restaurant.dayStart"],
     ];
     for (const [field, key] of map) {
@@ -273,6 +291,12 @@ export class SystemController {
     }
     if (dto.perHeadAmount != null) {
       await this.settings.set("billing.perHeadAmount", String(dto.perHeadAmount));
+    }
+    if (dto.taxPercent != null) {
+      await this.settings.set("billing.taxPercent", String(dto.taxPercent));
+      if (dto.taxPercent > 0 && dto.taxEnabled == null) {
+        await this.settings.set("billing.taxEnabled", "1");
+      }
     }
     if (dto.perHeadPackage != null) {
       await this.settings.savePerHeadPackage(

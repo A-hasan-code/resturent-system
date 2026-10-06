@@ -13,17 +13,26 @@ import {
   UpdateStoreItemDto,
 } from "./dto";
 
+/** Net plate usage: SALE − RESTORE (COOK excluded — that is pot cook, not bill). */
+function applySaleRestoreNet(
+  map: Map<string, number>,
+  type: string,
+  storeItemId: string,
+  quantity: number
+) {
+  const abs = Math.abs(quantity);
+  if (type === "SALE") {
+    map.set(storeItemId, (map.get(storeItemId) ?? 0) + abs);
+  } else if (type === "RESTORE") {
+    map.set(storeItemId, (map.get(storeItemId) ?? 0) - abs);
+  }
+}
+
 @Injectable()
 export class StoreService {
   constructor(private readonly prisma: PrismaService) {}
 
   async categories() {
-    // Fix any rows that went negative from older forced cook/sales — never show below 0.
-    await this.prisma.storeItem.updateMany({
-      where: { quantityOnHand: { lt: 0 } },
-      data: { quantityOnHand: 0 },
-    });
-
     const rows = await this.prisma.storeCategory.findMany({
       orderBy: { sortOrder: "asc" },
       include: {
@@ -48,6 +57,7 @@ export class StoreService {
           reorderLevel: reorder,
           stockValue: qty * rate,
           lowStock: qty <= reorder,
+          negativeStock: qty < -0.0001,
         };
       }),
     }));
@@ -61,6 +71,7 @@ export class StoreService {
 
     let totalValue = 0;
     let lowCount = 0;
+    let negativeCount = 0;
     const byCategory: Record<string, { count: number; value: number }> = {};
 
     for (const i of items) {
@@ -69,6 +80,7 @@ export class StoreService {
       const value = qty * rate;
       totalValue += value;
       if (qty <= toNumber(i.reorderLevel)) lowCount += 1;
+      if (qty < -0.0001) negativeCount += 1;
       const key = i.category.name;
       if (!byCategory[key]) byCategory[key] = { count: 0, value: 0 };
       byCategory[key].count += 1;
@@ -79,6 +91,7 @@ export class StoreService {
       itemCount: items.length,
       totalValue,
       lowStockCount: lowCount,
+      negativeStockCount: negativeCount,
       byCategory: Object.entries(byCategory).map(([name, v]) => ({
         name,
         ...v,
@@ -86,16 +99,31 @@ export class StoreService {
     };
   }
 
-  createItem(dto: CreateStoreItemDto) {
-    return this.prisma.storeItem.create({
-      data: {
-        name: dto.name,
-        categoryId: dto.categoryId,
-        unit: dto.unit,
-        quantityOnHand: dto.quantityOnHand ?? 0,
-        ratePerUnit: dto.ratePerUnit ?? 0,
-        reorderLevel: dto.reorderLevel ?? 0,
-      },
+  async createItem(dto: CreateStoreItemDto) {
+    const opening = Math.max(0, Number(dto.quantityOnHand ?? 0));
+    return this.prisma.$transaction(async (tx) => {
+      const item = await tx.storeItem.create({
+        data: {
+          name: dto.name,
+          categoryId: dto.categoryId,
+          unit: dto.unit,
+          quantityOnHand: opening,
+          ratePerUnit: dto.ratePerUnit ?? 0,
+          reorderLevel: dto.reorderLevel ?? 0,
+        },
+      });
+      if (opening > 0) {
+        await tx.stockMovement.create({
+          data: {
+            storeItemId: item.id,
+            type: "IN",
+            quantity: opening,
+            ratePerUnit: dto.ratePerUnit ?? 0,
+            note: "Opening stock",
+          },
+        });
+      }
+      return item;
     });
   }
 
@@ -111,85 +139,85 @@ export class StoreService {
   }
 
   async stockIn(id: string, dto: StockInDto) {
-    const item = await this.prisma.storeItem.findUniqueOrThrow({
-      where: { id },
+    return this.prisma.$transaction(async (tx) => {
+      const item = await tx.storeItem.findUniqueOrThrow({ where: { id } });
+      const rate = dto.ratePerUnit ?? toNumber(item.ratePerUnit);
+      const updated = await tx.storeItem.update({
+        where: { id },
+        data: {
+          quantityOnHand: { increment: dto.quantity },
+          ratePerUnit: rate,
+        },
+      });
+      await tx.stockMovement.create({
+        data: {
+          storeItemId: id,
+          type: "IN",
+          quantity: dto.quantity,
+          ratePerUnit: rate,
+          note: dto.note ?? "Purchase / stock in",
+        },
+      });
+      return {
+        id: updated.id,
+        quantityOnHand: toNumber(updated.quantityOnHand),
+        ratePerUnit: toNumber(updated.ratePerUnit),
+      };
     });
-    const rate = dto.ratePerUnit ?? toNumber(item.ratePerUnit);
-    const updated = await this.prisma.storeItem.update({
-      where: { id },
-      data: {
-        quantityOnHand: { increment: dto.quantity },
-        ratePerUnit: rate,
-      },
-    });
-    await this.prisma.stockMovement.create({
-      data: {
-        storeItemId: id,
-        type: "IN",
-        quantity: dto.quantity,
-        ratePerUnit: rate,
-        note: dto.note ?? "Purchase / stock in",
-      },
-    });
-    return {
-      id: updated.id,
-      quantityOnHand: toNumber(updated.quantityOnHand),
-      ratePerUnit: toNumber(updated.ratePerUnit),
-    };
   }
 
   async stockOut(id: string, dto: StockOutDto) {
-    const item = await this.prisma.storeItem.findUniqueOrThrow({
-      where: { id },
+    return this.prisma.$transaction(async (tx) => {
+      const item = await tx.storeItem.findUniqueOrThrow({ where: { id } });
+      const onHand = toNumber(item.quantityOnHand);
+      if (dto.quantity > onHand) {
+        throw new BadRequestException(
+          `Not enough stock. Available: ${onHand} ${item.unit}`
+        );
+      }
+      const updated = await tx.storeItem.update({
+        where: { id },
+        data: { quantityOnHand: { decrement: dto.quantity } },
+      });
+      await tx.stockMovement.create({
+        data: {
+          storeItemId: id,
+          type: "OUT",
+          quantity: -dto.quantity,
+          ratePerUnit: item.ratePerUnit,
+          note: dto.note ?? "Stock out / wastage",
+        },
+      });
+      return {
+        id: updated.id,
+        quantityOnHand: toNumber(updated.quantityOnHand),
+      };
     });
-    const onHand = toNumber(item.quantityOnHand);
-    if (dto.quantity > onHand) {
-      throw new BadRequestException(
-        `Not enough stock. Available: ${onHand} ${item.unit}`
-      );
-    }
-    const updated = await this.prisma.storeItem.update({
-      where: { id },
-      data: { quantityOnHand: { decrement: dto.quantity } },
-    });
-    await this.prisma.stockMovement.create({
-      data: {
-        storeItemId: id,
-        type: "OUT",
-        quantity: -dto.quantity,
-        ratePerUnit: item.ratePerUnit,
-        note: dto.note ?? "Stock out / wastage",
-      },
-    });
-    return {
-      id: updated.id,
-      quantityOnHand: toNumber(updated.quantityOnHand),
-    };
   }
 
   async adjust(id: string, dto: StockAdjustDto) {
-    const item = await this.prisma.storeItem.findUniqueOrThrow({
-      where: { id },
+    return this.prisma.$transaction(async (tx) => {
+      const item = await tx.storeItem.findUniqueOrThrow({ where: { id } });
+      const oldQty = toNumber(item.quantityOnHand);
+      const diff = dto.newQuantity - oldQty;
+      const updated = await tx.storeItem.update({
+        where: { id },
+        data: { quantityOnHand: dto.newQuantity },
+      });
+      await tx.stockMovement.create({
+        data: {
+          storeItemId: id,
+          type: "ADJUST",
+          quantity: diff,
+          ratePerUnit: item.ratePerUnit,
+          note: dto.note ?? `Adjust ${oldQty} → ${dto.newQuantity}`,
+        },
+      });
+      return {
+        id: updated.id,
+        quantityOnHand: toNumber(updated.quantityOnHand),
+      };
     });
-    const oldQty = toNumber(item.quantityOnHand);
-    const diff = dto.newQuantity - oldQty;
-    const updated = await this.prisma.storeItem.update({
-      where: { id },
-      data: { quantityOnHand: dto.newQuantity },
-    });
-    await this.prisma.stockMovement.create({
-      data: {
-        storeItemId: id,
-        type: "ADJUST",
-        quantity: diff,
-        ratePerUnit: item.ratePerUnit,
-        note: dto.note ?? `Adjust ${oldQty} → ${dto.newQuantity}`,
-      },
-    });
-    return {
-      id: updated.id,
-      quantityOnHand: toNumber(updated.quantityOnHand),
-    };
   }
 
   async movements(limit = 200) {
@@ -225,7 +253,7 @@ export class StoreService {
 
   async usageByItem() {
     const rows = await this.prisma.stockMovement.findMany({
-      where: { type: "SALE" },
+      where: { type: { in: ["SALE", "RESTORE"] } },
       include: {
         storeItem: { include: { category: true } },
         order: { select: { orderNo: true } },
@@ -265,9 +293,14 @@ export class StoreService {
         };
         map.set(key, row);
       }
-      row.totalUsed += used;
-      row.totalValue += used * rate;
-      if (m.order?.orderNo) row.orders.add(m.order.orderNo);
+      if (m.type === "SALE") {
+        row.totalUsed += used;
+        row.totalValue += used * rate;
+        if (m.order?.orderNo) row.orders.add(m.order.orderNo);
+      } else if (m.type === "RESTORE") {
+        row.totalUsed -= used;
+        row.totalValue -= used * rate;
+      }
     }
 
     return Array.from(map.values())
@@ -276,11 +309,12 @@ export class StoreService {
         itemName: r.itemName,
         category: r.category,
         unit: r.unit,
-        totalUsed: Number(r.totalUsed.toFixed(3)),
-        totalValue: Number(r.totalValue.toFixed(2)),
+        totalUsed: Number(Math.max(0, r.totalUsed).toFixed(3)),
+        totalValue: Number(Math.max(0, r.totalValue).toFixed(2)),
         orderCount: r.orders.size,
         orderNos: Array.from(r.orders).sort((a, b) => a - b).join(", "),
       }))
+      .filter((r) => r.totalUsed > 0.0001)
       .sort((a, b) => b.totalUsed - a.totalUsed);
   }
 
@@ -291,9 +325,7 @@ export class StoreService {
       orderBy: { name: "asc" },
     });
     return items
-      .filter(
-        (i) => toNumber(i.quantityOnHand) <= toNumber(i.reorderLevel)
-      )
+      .filter((i) => toNumber(i.quantityOnHand) <= toNumber(i.reorderLevel))
       .map((i) => ({
         id: i.id,
         name: i.name,
@@ -305,3 +337,5 @@ export class StoreService {
       }));
   }
 }
+
+export { applySaleRestoreNet };

@@ -5,7 +5,7 @@ import { useT } from "../i18n";
 import { useSocketEvent } from "../socket";
 import { DateField } from "./DateField";
 import { Pagination, paginate } from "./Pagination";
-import type { PaymentRow } from "./CashHandovers";
+import { cashOf, type PaymentRow } from "./CashHandovers";
 
 const PAGE_SIZE = 15;
 
@@ -44,19 +44,20 @@ export function CashRecord() {
 
   const totals = useMemo(() => {
     const rows = data?.rows ?? [];
-    const sum = (xs: PaymentRow[]) => xs.reduce((s, p) => s + p.amount, 0);
-    const self = rows.filter((p) => p.collectedBy.id === user?.id);
-    const handed = rows.filter((p) => p.handedTo?.id === user?.id && p.collectedBy.id !== user?.id);
+    const cashRows = rows.filter((p) => (p.method || "CASH") === "CASH");
+    const sumCash = (xs: PaymentRow[]) => xs.reduce((s, p) => s + cashOf(p), 0);
+    const self = cashRows.filter((p) => p.collectedBy.id === user?.id);
+    const handed = cashRows.filter((p) => p.handedTo?.id === user?.id && p.collectedBy.id !== user?.id);
     const confirmed = handed.filter((p) => p.confirmedAt);
     const waiting = handed.filter((p) => !p.confirmedAt);
     return {
-      self: sum(self),
+      self: sumCash(self),
       selfCount: self.length,
-      confirmed: sum(confirmed),
+      confirmed: sumCash(confirmed),
       confirmedCount: confirmed.length,
-      waiting: sum(waiting),
+      waiting: sumCash(waiting),
       waitingCount: waiting.length,
-      inDrawer: sum(self) + sum(confirmed),
+      inDrawer: sumCash(self) + sumCash(confirmed),
     };
   }, [data, user?.id]);
 
@@ -108,7 +109,9 @@ export function CashRecord() {
                 <th>{t("cash.paidAt")}</th>
                 <th>{t("payments.bill")}</th>
                 <th>{t("common.table")}</th>
+                <th>{t("payments.method")}</th>
                 <th>{t("common.amount")}</th>
+                <th>{t("payments.tip")}</th>
                 <th>{t("cash.billTakenBy")}</th>
                 <th>{t("cash.handedToMe")}</th>
                 <th>{t("cash.iConfirmed")}</th>
@@ -117,17 +120,30 @@ export function CashRecord() {
             <tbody>
               {pageRows.map((p) => {
                 const mine = p.collectedBy.id === user?.id;
+                const due = p.orderDue ?? p.orderTotal;
                 return (
                   <tr key={p.id}>
                     <td>{clock(p.createdAt)}</td>
-                    <td>#{p.orderNo}</td>
+                    <td>
+                      #{p.orderNo}
+                      {p.isCredit ? (
+                        <div className="tiny">
+                          <span className="badge credit" title={p.creditCustomerName || undefined}>
+                            {t("payments.credit")}
+                            {p.creditCustomerName ? ` · ${p.creditCustomerName}` : ""}
+                          </span>
+                        </div>
+                      ) : null}
+                    </td>
                     <td>{p.tableNo || "—"}</td>
+                    <td className="tiny">{t(`pay.method.${p.method || "CASH"}` as "pay.method.CASH")}</td>
                     <td>
                       <strong>{money(p.amount)}</strong>
-                      {p.amount < p.orderTotal && (
-                        <span className="tiny muted"> {t("payments.partialOf", { amount: money(p.orderTotal) })}</span>
+                      {p.amount + 0.001 < due && (
+                        <span className="tiny muted"> {t("payments.partialOf", { amount: money(due) })}</span>
                       )}
                     </td>
+                    <td>{(p.tipAmount ?? 0) > 0 ? money(p.tipAmount ?? 0) : "—"}</td>
                     <td>
                       {mine ? (
                         <span className="badge ready">{t("cash.me")}</span>

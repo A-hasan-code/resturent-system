@@ -143,7 +143,7 @@ const emptyTally: BillingTally = {
 };
 
 function dueOf(o: Order) {
-  const net = Math.max(0, o.total - (o.discountAmount ?? 0));
+  const net = Math.max(0, o.total - (o.discountAmount ?? 0) + (o.taxAmount ?? 0));
   return Math.max(0, net - (o.paidAmount ?? 0));
 }
 
@@ -211,25 +211,33 @@ export function BillsPage() {
     paidStampUrl?: string | null;
     unpaidStampUrl?: string | null;
   } | null>(null);
+  const [thermalError, setThermalError] = useState(false);
 
   async function load() {
     try {
-      const query =
+      const openPath = "/orders?view=billing&paymentStatus=UNPAID";
+      const partialPath = "/orders?view=billing&paymentStatus=PARTIAL";
+      const listPath =
         filter === "ALL"
-          ? "?view=billing"
+          ? "/orders?view=billing"
           : filter === "CANCELLED"
-            ? "?view=billing&status=CANCELLED"
-            : `?view=billing&paymentStatus=${filter}`;
-      const [list, dash, unpaidRows, paidRows, cancelledRows] = await Promise.all([
-        api<Order[]>(`/orders${query}`),
+            ? "/orders?view=billing&status=CANCELLED"
+            : filter === "UNPAID"
+              ? openPath
+              : `/orders?view=billing&paymentStatus=${filter}`;
+      const [listRaw, dash, unpaidRows, partialRows, paidRows, cancelledRows] = await Promise.all([
+        filter === "UNPAID"
+          ? Promise.all([api<Order[]>(openPath), api<Order[]>(partialPath)]).then(([a, b]) => [...a, ...b])
+          : api<Order[]>(listPath),
         api<Stats>("/dashboard"),
-        api<Order[]>("/orders?view=billing&paymentStatus=UNPAID"),
+        api<Order[]>(openPath),
+        api<Order[]>(partialPath),
         api<Order[]>("/orders?view=billing&paymentStatus=PAID"),
         api<Order[]>("/orders?view=billing&status=CANCELLED"),
       ]);
-      setOrders(list);
+      setOrders(listRaw);
       setStats(dash);
-      setTally(buildTally(unpaidRows, paidRows, cancelledRows));
+      setTally(buildTally([...unpaidRows, ...partialRows], paidRows, cancelledRows));
     } catch (e) {
       toast.push(e instanceof Error ? e.message : t("bills.loadFailed"), "err");
     }
@@ -276,6 +284,7 @@ export function BillsPage() {
     setEditQtyDraft({});
     setAddSearch("");
     setThermal(null);
+    setThermalError(false);
     const qty: Record<string, number> = {};
     for (const i of o.items) {
       if (i.id) qty[i.id] = i.quantity;
@@ -322,6 +331,7 @@ export function BillsPage() {
   useEffect(() => {
     if (!selected?.id || editing) return;
     let cancelled = false;
+    setThermalError(false);
     api<{
       text: string;
       paperWidth?: number;
@@ -330,10 +340,16 @@ export function BillsPage() {
       unpaidStampUrl?: string | null;
     }>(`/orders/${selected.id}/bill-preview`)
       .then((r) => {
-        if (!cancelled) setThermal(r);
+        if (!cancelled) {
+          setThermal(r);
+          setThermalError(false);
+        }
       })
       .catch(() => {
-        if (!cancelled) setThermal(null);
+        if (!cancelled) {
+          setThermal(null);
+          setThermalError(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -545,7 +561,10 @@ export function BillsPage() {
 
   async function reverseOrder() {
     if (!selected || !can("order.edit")) return;
-    if (selected.paymentStatus !== "PAID" || selected.status === "CANCELLED") return;
+    if (selected.status === "CANCELLED" || selected.paymentStatus === "VOID") return;
+    if (selected.paymentStatus !== "PAID" && selected.paymentStatus !== "PARTIAL" && !(selected.paidAmount > 0)) {
+      return;
+    }
     const reason = await askPrompt({
       title: t("bills.reverseConfirmTitle"),
       body: t("bills.reverseConfirmBody", { n: selected.orderNo }),
@@ -604,9 +623,9 @@ export function BillsPage() {
     }
   }
 
-  function paid() {
+  function paid(fullyPaid = true) {
     setPaying(null);
-    setSelected(null);
+    if (fullyPaid) setSelected(null);
     void load();
   }
 
@@ -884,7 +903,7 @@ export function BillsPage() {
                   <td>
                     <span
                       className={`badge ${
-                        cancelled ? "cancelled" : o.paymentStatus === "PAID" ? "paid" : "unpaid"
+                        cancelled ? "cancelled" : o.paymentStatus === "PAID" ? "paid" : o.paymentStatus === "PARTIAL" ? "pending" : "unpaid"
                       }`}
                     >
                       {cancelled ? ts("CANCELLED") : ts(o.paymentStatus)}
@@ -1199,14 +1218,20 @@ export function BillsPage() {
                   />
                 </div>
               ) : (
-                <p className="tiny muted">{t("settings.billPreviewLoading")}</p>
+                <p className="tiny muted">
+                  {thermalError ? t("settings.billPreviewFailed") : t("settings.billPreviewLoading")}
+                </p>
               )}
               {!!selected.payments?.length && (
                 <ul className="payment-log no-print">
                   {selected.payments.map((p) => (
                     <li key={p.id}>
-                      <strong>{money(p.amount)}</strong> {t("bills.receivedBy")}{" "}
-                      <strong>{p.collectedBy}</strong> · {stamp(p.createdAt)}
+                      <strong>{money(p.amount)}</strong>
+                      {" · "}
+                      <span className="badge ready">{t(`pay.method.${p.method || "CASH"}` as "pay.method.CASH")}</span>
+                      {" · "}
+                      {t("bills.receivedBy")} <strong>{p.collectedBy}</strong> ·{" "}
+                      {stamp(p.createdAt ? String(p.createdAt) : new Date().toISOString())}
                       {p.handedTo && (
                         <>
                           {" "}
@@ -1267,8 +1292,11 @@ export function BillsPage() {
                   </>
                 ))}
               {can("order.edit") &&
-                selected.paymentStatus === "PAID" &&
+                (selected.paymentStatus === "PAID" ||
+                  selected.paymentStatus === "PARTIAL" ||
+                  (selected.paidAmount ?? 0) > 0) &&
                 selected.status !== "CANCELLED" &&
+                selected.paymentStatus !== "VOID" &&
                 !editing && (
                   <button
                     type="button"

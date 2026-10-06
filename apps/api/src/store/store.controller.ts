@@ -58,7 +58,7 @@ export class StoreController {
   }
 
   @Post("day-use")
-  @RequirePerms("store.manage", "users.manage")
+  @RequirePerms("store.manage")
   saveDayUse(@CurrentUser() user: AuthUser, @Body() dto: SaveDayUseDto) {
     return this.dayUse.save(user, dto);
   }
@@ -127,6 +127,12 @@ export class StoreController {
   @RequirePerms("store.manage")
   createPurchase(@Body() dto: CreatePurchaseDto) {
     return this.purchases.createPurchase(dto);
+  }
+
+  @Post("purchases/:id/void")
+  @RequirePerms("store.manage")
+  voidPurchase(@Param("id") id: string, @Body() body?: { note?: string }) {
+    return this.purchases.voidPurchase(id, body?.note);
   }
 
   @Post("purchases/:id/bill")

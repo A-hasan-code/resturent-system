@@ -3,7 +3,7 @@ import { VENDOR } from "../common/vendor";
 import { logoRasterFromFile } from "./logo-raster";
 import { splitTableLabel } from "./table-label";
 
-export type Restaurant = { name: string; tagline: string; address: string; phone: string };
+export type Restaurant = { name: string; tagline: string; address: string; phone: string; ntn?: string; strn?: string };
 
 export type KotPayload = {
   restaurant: Restaurant;
@@ -84,11 +84,20 @@ export type BillPayload = BillDesign & {
   items: Array<{ name: string; quantity: number; unit: string; rate: number; amount: number }>;
   total: number;
   discountAmount?: number;
+  taxAmount?: number;
+  taxPercent?: number;
   tipAmount?: number;
   paidAmount: number;
   /** Cash the guest handed over (may exceed paidAmount). */
   tenderedAmount?: number;
   paymentStatus: string;
+  /** Individual payment rows (method-aware). */
+  payments?: Array<{
+    method: "CASH" | "CARD" | "WALLET" | "BANK";
+    amount: number;
+    tipAmount: number;
+    tenderedAmount?: number;
+  }>;
 };
 
 /** Cashier / admin confirmation slip after a PAID bill was edited. */
@@ -176,9 +185,32 @@ function orderTypeLabel(p: { tableNo?: string | null; tableName?: string | null 
   return p.tableNo || p.tableName ? "DINE IN" : "WALK IN";
 }
 
-function paymentModeLabel(p: { creditName?: string | null; paymentStatus: string }) {
-  if (p.creditName) return "Credit";
+function methodLabel(method: string) {
+  switch (method) {
+    case "CARD":
+      return "Card";
+    case "WALLET":
+      return "Wallet";
+    case "BANK":
+      return "Bank";
+    default:
+      return "Cash";
+  }
+}
+
+function paymentModeLabel(p: {
+  creditName?: string | null;
+  paymentStatus: string;
+  payments?: BillPayload["payments"];
+}) {
+  if (p.creditName) {
+    return p.paymentStatus === "PAID" ? "Credit settled" : "Credit / On account";
+  }
+  const methods = [...new Set((p.payments || []).map((x) => x.method))];
+  if (methods.length === 1) return methodLabel(methods[0]!);
+  if (methods.length > 1) return methods.map(methodLabel).join(" + ");
   if (p.paymentStatus === "PAID") return "Cash";
+  if (p.paymentStatus === "PARTIAL") return "Partial";
   return "Unpaid";
 }
 
@@ -235,10 +267,13 @@ type BillTotals = {
   tip: number;
   showTip: boolean;
   discount: number;
+  tax: number;
+  taxPercent: number;
   net: number;
   grand: number;
   amountPaid: number;
   cash: number;
+  cashTender: number;
   balance: number;
   change: number;
   billNo: number;
@@ -246,6 +281,10 @@ type BillTotals = {
   customerPhone: string;
   customerAddr: string;
   paid: boolean;
+  isCredit: boolean;
+  paymentMode: string;
+  orderType: string;
+  methodLines: { label: string; amount: number }[];
   stampPath: string | null | undefined;
   paidStamp: string;
   showPaidStamp: boolean;
@@ -258,33 +297,63 @@ function billTotals(p: BillPayload, paperWidth: number): BillTotals {
   const billNo = p.billNo ?? p.orderNo;
   const { partition, table } = place(p);
   const discount = Math.max(0, p.discountAmount ?? 0);
+  const tax = Math.max(0, p.taxAmount ?? 0);
+  const taxPercent = Math.max(0, p.taxPercent ?? 0);
   const net = Math.max(0, p.total - discount);
-  const foodPaid = p.paidAmount > 0 ? p.paidAmount : p.paymentStatus === "PAID" ? net : 0;
-  const grand = net + (showTip ? tip : 0);
+  const dueBase = net + tax;
+  const foodPaid = p.paidAmount > 0 ? p.paidAmount : p.paymentStatus === "PAID" ? dueBase : 0;
+  const grand = dueBase + (showTip ? tip : 0);
   const amountPaid = foodPaid + (showTip && foodPaid > 0 ? tip : 0);
-  const cash =
-    (p.tenderedAmount ?? 0) > 0
-      ? p.tenderedAmount!
-      : amountPaid > 0
-        ? amountPaid
-        : p.paymentStatus === "PAID"
-          ? grand
-          : 0;
+  const payments = p.payments || [];
+  const byMethod = new Map<string, number>();
+  let cashTender = 0;
+  for (const pay of payments) {
+    const method = pay.method || "CASH";
+    const food = Math.max(0, pay.amount);
+    byMethod.set(method, Math.round(((byMethod.get(method) || 0) + food) * 100) / 100);
+    if (method === "CASH") {
+      const tender = (pay.tenderedAmount ?? 0) > 0 ? pay.tenderedAmount! : food + Math.max(0, pay.tipAmount || 0);
+      cashTender = Math.round((cashTender + tender) * 100) / 100;
+    }
+  }
+  // Legacy / no payment rows: treat tendered as cash only when paid and not credit.
+  if (!payments.length && amountPaid > 0 && !p.creditName) {
+    byMethod.set("CASH", foodPaid);
+    cashTender =
+      (p.tenderedAmount ?? 0) > 0
+        ? p.tenderedAmount!
+        : amountPaid > 0
+          ? amountPaid
+          : p.paymentStatus === "PAID"
+            ? grand
+            : 0;
+  }
+  const methodLines = [...byMethod.entries()].map(([method, amount]) => ({
+    label: `${methodLabel(method)} Received`,
+    amount,
+  }));
+  const cash = cashTender > 0 ? cashTender : methodLines.length === 1 && methodLines[0]!.label.startsWith("Cash") ? amountPaid : 0;
+  const cashFoodAndTip = payments
+    .filter((x) => (x.method || "CASH") === "CASH")
+    .reduce((s, x) => s + x.amount + (showTip ? Math.max(0, x.tipAmount || 0) : 0), 0);
+  const change = Math.max(0, cashTender - (cashFoodAndTip || (payments.length ? 0 : amountPaid)));
   const balance = Math.max(0, grand - amountPaid);
-  const change = Math.max(0, cash - amountPaid);
   const customerName = (p.creditName || "Walk In Guest").trim() || "Walk In Guest";
   const customerPhone = (p.creditPhone || "").trim();
   const tableLabel = [partition, table || p.tableNo].filter(Boolean).join(" ") || "Pickup Counter";
-  const customerAddr = (p.creditAddress || tableLabel).trim() || tableLabel;
+  const customerAddr = (p.creditAddress || "").trim() || (p.creditName ? tableLabel : "");
   const paid = p.paymentStatus === "PAID";
   return {
     tip,
     showTip,
     discount,
+    tax,
+    taxPercent,
     net,
     grand,
     amountPaid,
     cash,
+    cashTender,
     balance,
     change,
     billNo,
@@ -292,6 +361,10 @@ function billTotals(p: BillPayload, paperWidth: number): BillTotals {
     customerPhone,
     customerAddr,
     paid,
+    isCredit: !!p.creditName,
+    paymentMode: paymentModeLabel(p),
+    orderType: orderTypeLabel(p),
+    methodLines,
     stampPath: paid ? p.paidStampPath : p.unpaidStampPath,
     paidStamp: (p.paidStampText || "*** PAID ***").trim() || "*** PAID ***",
     showPaidStamp: p.showPaidStamp !== false,
@@ -325,6 +398,8 @@ function printBrandHeader(e: EscPos, p: BillPayload, paperWidth: number, dots: n
   }
   if (showPhone && r.phone) e.line(r.phone);
   if (showAddress && r.address) e.wrapped(r.address);
+  if (r.ntn) e.line(`NTN: ${r.ntn}`);
+  if (r.strn) e.line(`STRN: ${r.strn}`);
   if (showTagline && r.tagline) e.wrapped(r.tagline);
   e.rule("=");
   e.bold().line(title).bold(false);
@@ -363,8 +438,11 @@ function printBillMeta(e: EscPos, p: BillPayload, t: BillTotals) {
     .bold(false)
     .inverse(false)
     .align("left");
+  e.line(`Order type: ${t.orderType}`);
+  e.line(`Payment mode: ${t.paymentMode}`);
   e.line(`Party Name: ${party}`);
   if (t.customerPhone) e.line(`Phone: ${t.customerPhone}`);
+  if (t.customerAddr) e.wrapped(`Address: ${t.customerAddr}`);
   if (p.showCashier !== false && p.cashier) e.line(`Cashier: ${p.cashier}`);
   const orderedBy = p.orderedBy ?? p.waiter;
   if (p.showOrderBy !== false && orderedBy) e.line(`Order by: ${orderedBy}`);
@@ -375,11 +453,17 @@ function printBillTotals(e: EscPos, p: BillPayload, t: BillTotals) {
   e.pair("Gross Total:", money(p.total));
   if (t.discount > 0) e.pair("Discount:", money(t.discount));
   if (t.discount > 0) e.pair("Net Total:", money(t.net));
-  if (t.showTip && t.tip > 0) e.pair("Tip:", money(t.tip));
-  if (t.cash > 0) {
+  if (t.tax > 0) e.pair(`Tax (${t.taxPercent}%):`, money(t.tax));
+  if (t.showTip) e.pair("Tip:", money(t.tip));
+  e.pair("Grand Total:", money(t.grand));
+  if (t.methodLines.length) {
     e.line("");
-    e.boxLine("Cash Received :", money(t.cash));
+    for (const line of t.methodLines) {
+      e.boxLine(`${line.label} :`, money(line.amount));
+    }
     if (t.change > 0) e.pair("Change:", money(t.change));
+  } else if (t.isCredit && !t.paid) {
+    e.line("Payment: Credit / On account");
   } else if (!t.paid) {
     e.line(`Payment: ${p.paymentStatus}`);
   }
@@ -691,10 +775,13 @@ export function sampleBillPayload(restaurant: Restaurant, design: BillDesign, pa
       ],
       total: 2785,
       discountAmount: 85,
-      tipAmount: 0,
-      paidAmount: 2700,
+      taxAmount: 135,
+      taxPercent: 5,
+      tipAmount: 50,
+      paidAmount: 2835,
       tenderedAmount: 3000,
       paymentStatus: "PAID",
+      payments: [{ method: "CASH", amount: 2835, tipAmount: 50, tenderedAmount: 3000 }],
     },
     paperWidth
   ).plain();

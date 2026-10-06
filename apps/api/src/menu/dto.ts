@@ -1,4 +1,5 @@
 import {
+  IsArray,
   IsBoolean,
   IsEnum,
   IsNumber,
@@ -7,7 +8,9 @@ import {
   Min,
   MinLength,
   ValidateIf,
+  ValidateNested,
 } from "class-validator";
+import { Type } from "class-transformer";
 import { KitchenStation, MenuItemKind, UnitType } from "@prisma/client";
 
 export class CreateMenuItemDto {
@@ -144,4 +147,25 @@ export class UpdateMenuItemDto {
 
   @IsOptional()
   active?: boolean;
+}
+
+export class MenuModifierInputDto {
+  @IsString()
+  @MinLength(1)
+  name!: string;
+
+  @IsNumber()
+  priceDelta!: number;
+
+  @IsOptional()
+  @IsNumber()
+  sortOrder?: number;
+}
+
+export class SetMenuModifiersDto {
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => MenuModifierInputDto)
+  modifiers?: MenuModifierInputDto[];
 }

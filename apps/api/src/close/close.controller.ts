@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Module, Param, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Module, Post, Query, StreamableFile, UseGuards } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
@@ -20,6 +20,17 @@ export class CloseController {
   @RequirePerms("close.view", "close.manage")
   history(@Query("limit") limit?: string) {
     return this.close.history(limit ? Number(limit) : 60);
+  }
+
+  @Get("export")
+  @RequirePerms("close.view", "close.manage")
+  async export(@Query("date") date?: string) {
+    const sheet = await this.close.preview(date);
+    const pdf = await this.close.toPdf(date);
+    return new StreamableFile(pdf, {
+      type: "application/pdf",
+      disposition: `attachment; filename="close-${sheet.businessDate}.pdf"`,
+    });
   }
 
   @Post()

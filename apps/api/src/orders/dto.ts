@@ -10,6 +10,7 @@ import {
   IsString,
   MaxLength,
   Min,
+  MinLength,
   ValidateIf,
   ValidateNested,
 } from "class-validator";
@@ -55,6 +56,13 @@ export class OrderLineDto {
   @IsBoolean()
   soloStoreFallback?: boolean;
 
+  /** Optional priced modifiers (Extra cheese, …). */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => OrderModifierDto)
+  modifiers?: OrderModifierDto[];
+
   /**
    * With PER_HEAD: kitchen package lines (included, Rs 0).
    * menuItemId must be in Settings per-head package.
@@ -68,6 +76,21 @@ export class OrderLineDto {
   @IsString()
   @IsOptional()
   notes?: string;
+}
+
+export class OrderModifierDto {
+  /** Required — server resolves name + priceDelta from MenuModifier (client prices ignored). */
+  @IsString()
+  @MinLength(1)
+  id!: string;
+
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  @IsOptional()
+  @IsNumber()
+  priceDelta?: number;
 }
 
 export class CreateOrderDto {
@@ -218,13 +241,13 @@ export class PrintKotDto {
 }
 
 export class PayOrderDto {
-  /** Cash the guest handed over (may be more than the amount due; change is returned). */
+  /** Cash/card amount the guest handed over (may be more than due for cash; change returned). */
   @IsNumber()
   @Min(0)
   @IsOptional()
   amount?: number;
 
-  /** Discount to apply on the bill (gross − discount = net due). */
+  /** Discount to apply on the bill (gross − discount = net food). */
   @IsNumber()
   @Min(0)
   @IsOptional()
@@ -236,12 +259,17 @@ export class PayOrderDto {
   @IsOptional()
   tip?: number;
 
+  /** How the guest paid. Default CASH. Non-cash does not go in the cash drawer. */
+  @IsOptional()
+  @IsIn(["CASH", "CARD", "WALLET", "BANK"])
+  method?: "CASH" | "CARD" | "WALLET" | "BANK";
+
   /** Free-text name of who served the table. */
   @IsString()
   @IsOptional()
   servedByName?: string;
 
-  /** Cashier the collected cash was handed to. Required when the payer does not keep a cash drawer. */
+  /** Cashier the collected cash was handed to. Required when the payer does not keep a cash drawer (cash only). */
   @IsString()
   @IsOptional()
   handedToId?: string;

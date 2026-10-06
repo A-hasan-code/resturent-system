@@ -1,7 +1,51 @@
-# Hotel System v1.4.11 — Release Notes
+# Hotel System v1.4.25 — Release Notes
 
-**Date:** 2026-10-06  
-**Targets:** Windows installer + Desktop (Electron) + Android APK + Web/PWA
+**Date:** 2026-10-07  
+**Targets:** Windows installer + Desktop (Electron) + Android APK + Web/PWA  
+**Branch:** `improve-the-system`
+
+### v1.4.25 (final ship)
+- **Bill preview:** Works even when no bill printer is registered (defaults to 80 mm). No more stuck “Loading preview…” on Billing.
+- **Protected accounts:** `admin`, `sysmanager`, `maincashier`, `cashier2` cannot be deleted or renamed.
+- **Smoke E2E:** API smoke script for pack verification.
+
+### v1.4.24
+- Built-in user lock (API + Users UI): delete button hidden; reserved usernames blocked on create.
+
+### v1.4.23
+- **Kitchen SERVED ≠ COMPLETED:** Floor “Served” does not close the bill; COMPLETED is billing/payment close.
+- Kitchen list + supervisor floor ready beep; paid order can still finish kitchen → SERVED → COMPLETED when paid.
+- Credit settle due includes tax + discount; release-credit gate; PARTIAL bills in Unpaid + PayModal tip/partial UX.
+- Dashboard business-day collected totals; served / stale counts; SUPERVISOR gate.
+
+### v1.4.22 – v1.4.17
+- Store movement semantics; special kitchen station; finance pack wire-up polish; close PDF / expenses / credit billing hardening.
+
+### v1.4.16
+- **Daily Specials (hotel POS):** KPI strip (cook / sold / remaining / margin / waste); pot status; cook cost on board; day-lock blocks cook/reopen/close.
+- **Leftover close:** Shrink vs system folds into waste + cost; waste note required; ±50g tolerance aligned; Close PDF specials section.
+- **Cook recipe required** for pot create/cook so store deduct and waste costing always work.
+
+### v1.4.15
+- **Customer bill / receipt:** Payment mode (Cash/Card/Wallet/Bank or Credit); method-aware “Received” lines; unpaid bills show live tax; credit address; Grand Total.
+- **Bill preview:** NTN/STRN + tax + payment mode parity with thermal print; Bills payment log shows method.
+
+### v1.4.14
+- **Payments & Cash:** Method column + filter (cash/card/wallet/bank); tender mix cards; cash drawers use amount+tip; handover filters are cash-only.
+- **Credit settle:** Explicit CASH method; blocked when the invoice’s business day is locked.
+- **Cash record / handovers:** Tip-aware drawer totals and confirm amounts; credit badge on settlement rows.
+- **Pay modal:** Clear day-lock message when taking payment on a locked day.
+
+### v1.4.13
+- **Close report:** Drawer expected = opening float + cash sales + tips − cash out (C1); miss + surplus; non-cash tender (card/wallet/bank).
+- **Close lock / freeze:** Save locks the day; past days show frozen snapshot; Admin unlock from Close or Finance.
+- **Close PDF:** Download day close PDF (EN layout) with counters, cash-out, sold items, pending.
+
+### v1.4.12
+- **Finance pack:** Payment methods (cash/card/wallet/bank), exclusive sales tax on bills, day P&L + exceptions + unlock, credit aging.
+- **Day lock:** Closing the day locks further payments for that business date (Admin can unlock).
+- **Legal IDs:** NTN / STRN in Settings; printed on receipts.
+- **Menu modifiers:** Optional add-ons on menu items; waiter can pick when ordering.
 
 ### v1.4.11
 - **Restore harden:** Empty / menu-wiping dumps are **blocked** before swap (users required; live menu protected).
@@ -85,12 +129,13 @@ Single-site offline restaurant / hotel POS:
 |------|----------------|
 | **Waiter floor** | Table board, walk-in, add items, KOT, bill request, live “food ready” alerts |
 | **Counter POS** | Walk-in / table orders, kg-based qty, kitchen + customer slips |
-| **Kitchen** | Live tickets, status (Preparing → Ready), reprint KOT |
+| **Kitchen** | Live tickets, status (Preparing → Ready → Served), reprint KOT |
 | **Billing** | Pay / partial pay, cash handover waiter→cashier, thermal bills |
 | **Inventory** | Stock in/out/adjust, low stock, movements, usage by orders |
 | **Recipes + Menu** | Live cost from store rates, sell price, profit |
+| **Finance** | Day P&L, tax, payment methods, credit aging, close PDF |
 | **Payments / Audit** | Cash ledger, handovers, sales & profit reports, Excel export |
-| **Users** | Roles, password + PIN, per-cashier bill printer assignment |
+| **Users** | Roles, password + PIN, per-cashier bill printer assignment; core accounts protected |
 | **Settings** | Branding, tables, printers (USB / LAN :9100), backups, QR codes |
 | **Realtime** | Socket.IO rooms for kitchen, cashier, print status |
 | **i18n** | English / Urdu |
@@ -99,9 +144,12 @@ Single-site offline restaurant / hotel POS:
 
 | User | Password | PIN | Role |
 |------|----------|-----|------|
-| admin | admin123 | — | Full access |
-| manager | manager123 | 2222 | Floor orders & payments |
-| cashier | cashier123 | — | POS, bills, cash drawer |
+| admin | admin123 | — | Full access (protected) |
+| sysmanager | sys123 | 5555 | System Manager (protected) |
+| maincashier | main123 | 3333 | Main Cashier (protected) |
+| cashier2 | cashier123 | 4445 | Cashier (protected) |
+| cashier | cashier123 | 4444 | Cashier |
+| supervisor | super123 | 2222 | Floor supervisor |
 | waiter | waiter123 | 1111 | Tables & KOT |
 | kitchen | kitchen123 | — | Kitchen display |
 | store | store123 | — | Inventory |
@@ -120,7 +168,7 @@ See `INDUSTRIAL-SETUP.md` and `README.txt` in the release folder.
 
 | File | Purpose |
 |------|---------|
-| `HotelSystem-Setup-1.4.10.exe` | Offline installer (required) |
+| `HotelSystem-Setup-1.4.25.exe` | Offline installer (required) |
 | `hotel-system.apk` | Android app (if present in this package) |
 | `README.txt` | Short client install sheet |
 | `INDUSTRIAL-SETUP.md` | Main server + counter printers guide |

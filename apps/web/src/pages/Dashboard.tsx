@@ -24,6 +24,8 @@ type DashOrder = {
   status: string;
   paymentStatus: string;
   total: number;
+  paidAmount?: number;
+  due?: number;
   createdAt: string;
   waitMinutes: number;
   stale: boolean;
@@ -77,7 +79,9 @@ type Stats = {
   pendingKitchen: number;
   preparing: number;
   ready: number;
+  served?: number;
   completed: number;
+  staleCount?: number;
   ordersToday: number;
   orderAmountToday: number;
   totalOrders: number;
@@ -460,8 +464,8 @@ function CashierDash({
       <StaleAlert
         orders={data?.staleOrders ?? []}
         minutes={data?.staleMinutes ?? 10}
-        link="/waiter"
-        linkLabel={t("dash.openPos")}
+        link="/kitchen"
+        linkLabel={t("dash.openKitchen")}
         message={t("dash.delayedWaiting")}
       />
 
@@ -552,6 +556,10 @@ function CashierDash({
         <div className="panel stat">
           <span>{t("dash.ready")}</span>
           <strong>{data?.ready ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.served")}</span>
+          <strong>{data?.served ?? "—"}</strong>
         </div>
         <div className="panel stat">
           <span>{t("dash.completed")}</span>
@@ -645,9 +653,13 @@ function KitchenDash({
           </strong>
         </div>
         <div className="panel stat">
+          <span>{t("dash.served")}</span>
+          <strong>{data?.served ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
           <span>{t("dash.delayed", { n: data?.staleMinutes ?? 10 })}</span>
-          <strong style={{ color: (data?.staleOrders.length ?? 0) ? "var(--danger)" : undefined }}>
-            {data?.staleOrders.length ?? "—"}
+          <strong style={{ color: (data?.staleCount ?? data?.staleOrders.length ?? 0) ? "var(--danger)" : undefined }}>
+            {data?.staleCount ?? data?.staleOrders.length ?? "—"}
           </strong>
         </div>
       </div>
@@ -808,6 +820,10 @@ function WaiterDash({
         <div className="panel stat">
           <span>{t("dash.ready")}</span>
           <strong>{data?.ready ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.served")}</span>
+          <strong>{data?.served ?? "—"}</strong>
         </div>
         <div className="panel stat">
           <span>{t("dash.completed")}</span>
@@ -1162,7 +1178,13 @@ function OrderList({
                     {o.stale && <span className="badge delayed">{ts("DELAYED")}</span>}
                   </div>
                   {showTotal && (
-                    <span className="dash-order-total">{money(o.total)}</span>
+                    <span className="dash-order-total">
+                      {money(
+                        showPayment && o.due != null
+                          ? o.due
+                          : o.total
+                      )}
+                    </span>
                   )}
                 </div>
               </li>

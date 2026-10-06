@@ -14,6 +14,13 @@ import { CreateUserDto, UpdateUserDto } from "./dto";
 
 const ADMIN = "ADMIN";
 
+/** Seed / counter accounts that must always remain (cannot soft-delete). */
+const PROTECTED_USERNAMES = new Set(["admin", "sysmanager", "maincashier", "cashier2"]);
+
+function isProtectedUsername(username: string) {
+  return PROTECTED_USERNAMES.has(String(username || "").trim().toLowerCase());
+}
+
 function num(v: unknown) {
   if (v == null) return 0;
   if (typeof v === "number") return v;
@@ -146,6 +153,9 @@ export class UsersService {
     const role = await this.role(dto.roleCode);
     this.assertCanAssign(actor, role.code);
     const username = dto.username.toLowerCase();
+    if (PROTECTED_USERNAMES.has(username)) {
+      throw new BadRequestException(`Username "${username}" is reserved`);
+    }
     if (await this.prisma.user.findFirst({ where: { username, deletedAt: null } })) {
       throw new ConflictException(`Username "${username}" is already taken`);
     }
@@ -181,7 +191,13 @@ export class UsersService {
     const data: Prisma.UserUpdateInput = {};
     if (dto.name !== undefined) data.name = dto.name.trim();
     if (dto.username !== undefined && dto.username.toLowerCase() !== user.username) {
+      if (isProtectedUsername(user.username)) {
+        throw new BadRequestException("This built-in account username cannot be changed");
+      }
       const username = dto.username.toLowerCase();
+      if (PROTECTED_USERNAMES.has(username)) {
+        throw new BadRequestException(`Username "${username}" is reserved`);
+      }
       if (await this.prisma.user.findFirst({ where: { username, deletedAt: null, NOT: { id } } })) {
         throw new ConflictException(`Username "${username}" is already taken`);
       }
@@ -236,6 +252,9 @@ export class UsersService {
     });
     if (!user) throw new NotFoundException("User not found");
     if (id === actor.id) throw new BadRequestException("You cannot delete your own account");
+    if (isProtectedUsername(user.username)) {
+      throw new BadRequestException("This built-in account cannot be deleted");
+    }
     if (user.role.code === ADMIN && actor.roleCode !== ADMIN) {
       throw new ForbiddenException("Only an admin can delete an admin account");
     }
@@ -295,6 +314,7 @@ export class UsersService {
       name: u.name,
       username: u.username,
       active: u.active,
+      protected: isProtectedUsername(u.username),
       hasPin: !!u.pinHash,
       billPrinterId: u.billPrinterId ?? null,
       billPrinterName: u.billPrinter

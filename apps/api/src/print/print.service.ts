@@ -14,6 +14,7 @@ import { ServerIdentityService } from "../system/server-identity.service";
 import { RealtimeService } from "../realtime/realtime.service";
 import { toNumber } from "../common/units";
 import { TipService } from "../system/tip.service";
+import { FinanceService } from "../finance/finance.service";
 import { BillEditConfirmPayload, BillPayload, KotPayload, renderBill, renderBillEditConfirm, renderKot, renderTest, TestPayload } from "./receipts";
 import { sendToNetworkPrinter, sendToWindowsPrinter, writePreviewFile } from "./drivers";
 import { splitTableLabel } from "./table-label";
@@ -47,7 +48,8 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     private readonly settings: SettingsService,
     private readonly identity: ServerIdentityService,
     private readonly realtime: RealtimeService,
-    private readonly tips: TipService
+    private readonly tips: TipService,
+    private readonly finance: FinanceService
   ) {}
 
   async onApplicationBootstrap() {
@@ -209,12 +211,16 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       select: { id: true, kind: true, paperWidth: true },
       orderBy: { createdAt: "asc" },
     });
-    const printerId = await this.resolveBillPrinterId(
-      printers,
-      order?.cashierId ?? null,
-      order?.assignedCashier?.billPrinterId ?? order?.cashier?.billPrinterId ?? null,
-    );
-    const paperWidth = printers.find((p) => p.id === printerId)?.paperWidth ?? printers[0]?.paperWidth ?? 80;
+    let paperWidth = 80;
+    if (printers.length) {
+      const printerId = await this.resolveBillPrinterId(
+        printers,
+        order?.cashierId ?? null,
+        order?.assignedCashier?.billPrinterId ?? order?.cashier?.billPrinterId ?? null,
+      );
+      paperWidth =
+        printers.find((p) => p.id === printerId)?.paperWidth ?? printers[0]?.paperWidth ?? 80;
+    }
     return {
       text: renderBill(payload, paperWidth).plain(),
       paperWidth,
@@ -325,7 +331,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       order.assignedCashier?.billPrinterId ?? null,
     );
     const payload = await this.loadBillPayload(orderId);
-    return [await this.createJob("BILL", printerId, payload, orderId, requestedById)];
+    return [await this.createJob("BILL", printerId ?? printers[0]!.id, payload, orderId, requestedById)];
   }
 
   /** Cashier confirmation slip after a paid bill edit (reason + before/after amounts). */
@@ -390,7 +396,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       showPhone: billOpts.showPhone,
       showAddress: billOpts.showAddress,
     };
-    return [await this.createJob("BILL_EDIT", printerId, payload, edit.order.id, requestedById)];
+    return [await this.createJob("BILL_EDIT", printerId ?? printers[0]!.id, payload, edit.order.id, requestedById)];
   }
 
   private async loadBillPayload(orderId: string): Promise<BillPayload> {
@@ -401,20 +407,51 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
         waiter: { select: { name: true, role: { select: { name: true } } } },
         cashier: { select: { name: true } },
         creditCustomer: { select: { name: true, phone: true, address: true } },
-        payments: { select: { collectedBy: { select: { name: true } } } },
+        payments: {
+          select: {
+            amount: true,
+            tipAmount: true,
+            tenderedAmount: true,
+            method: true,
+            collectedBy: { select: { name: true } },
+          },
+          orderBy: { createdAt: "asc" },
+        },
         table: { include: { partition: { select: { name: true } } } },
       },
     });
     const cashier = order.cashier?.name ?? null;
-    const collectors = [...new Set(order.payments.map((p) => p.collectedBy.name))].filter((n) => n !== cashier);
+    const collectors = [
+      ...new Set(order.payments.map((p) => p.collectedBy?.name).filter(Boolean) as string[]),
+    ].filter((n) => n !== cashier);
     const billOpts = await this.tips.printBillOpts();
     const restaurant = await this.settings.restaurant();
+    const legal = await this.settings.getMany("restaurant.");
+
+    let taxAmount = toNumber(order.taxAmount);
+    let taxPercent = toNumber(order.taxPercent);
+    // Unpaid / pre-pay print: show live tax from settings so due matches PayModal.
+    if (order.paymentStatus !== "PAID" && !(taxAmount > 0)) {
+      const taxCfg = await this.finance.taxSettings();
+      if (taxCfg.percent > 0) {
+        const computed = this.finance.computeTax(
+          toNumber(order.total),
+          toNumber(order.discountAmount),
+          taxCfg.percent
+        );
+        taxAmount = computed.taxAmount;
+        taxPercent = computed.taxPercent;
+      }
+    }
+
     return {
       restaurant: {
         name: restaurant.name,
         tagline: restaurant.tagline,
         address: restaurant.address,
         phone: restaurant.phone,
+        ntn: (legal["restaurant.ntn"] || "").trim() || undefined,
+        strn: (legal["restaurant.strn"] || "").trim() || undefined,
       },
       logoPath: this.settings.logoFilePath(),
       orderNo: order.orderNo,
@@ -440,10 +477,18 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       })),
       total: toNumber(order.total),
       discountAmount: toNumber(order.discountAmount),
+      taxAmount,
+      taxPercent,
       tipAmount: toNumber(order.tipAmount),
       paidAmount: toNumber(order.paidAmount),
       tenderedAmount: toNumber(order.tenderedAmount),
       paymentStatus: order.paymentStatus,
+      payments: order.payments.map((p) => ({
+        method: (p.method || "CASH") as "CASH" | "CARD" | "WALLET" | "BANK",
+        amount: toNumber(p.amount),
+        tipAmount: toNumber(p.tipAmount),
+        tenderedAmount: toNumber(p.tenderedAmount),
+      })),
       showLogo: billOpts.showLogo,
       showName: billOpts.showName,
       showTagline: billOpts.showTagline,
@@ -487,7 +532,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     }
     const assigned = pick(assignedCashierPrinterId);
     if (assigned) return assigned;
-    return printers.find((p) => p.kind === "NETWORK")?.id ?? printers[0].id;
+    return printers.find((p) => p.kind === "NETWORK")?.id ?? printers[0]?.id ?? null;
   }
 
   async enqueueTest(printerId: string, requestedById?: string | null) {

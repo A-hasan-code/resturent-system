@@ -428,6 +428,11 @@ export function HotelExpensesPage() {
           <strong>{money(s?.manualExpenses ?? 0)}</strong>
         </div>
         <div className="panel stat">
+          <span>{t("expense.selfExtra")}</span>
+          <strong>{money(s?.selfExtra ?? 0)}</strong>
+          <span className="tiny muted">{t("expense.selfExtraHint")}</span>
+        </div>
+        <div className="panel stat">
           <span>{t("expense.total")}</span>
           <strong>{money(s?.total ?? 0)}</strong>
           <span className="tiny muted">{t("expense.totalHint")}</span>

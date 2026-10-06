@@ -14,8 +14,22 @@ export function toNumber(v: Decimal | number | string | null | undefined) {
   return typeof v === "number" ? v : Number(v);
 }
 
+/** solid = KG/G, liquid = L/ML, count = PCS — conversions only within a family. */
+export function unitFamily(u: UnitType): "solid" | "liquid" | "count" {
+  if (u === UnitType.KG || u === UnitType.G) return "solid";
+  if (u === UnitType.L || u === UnitType.ML) return "liquid";
+  return "count";
+}
+
+export function unitsCompatible(a: UnitType, b: UnitType) {
+  return unitFamily(a) === unitFamily(b);
+}
+
 export function convertQty(qty: number, from: UnitType, to: UnitType) {
   if (from === to) return qty;
+  if (!unitsCompatible(from, to)) {
+    throw new Error(`Cannot convert ${from} to ${to}`);
+  }
   const solid = new Set<UnitType>([UnitType.KG, UnitType.G]);
   const liquid = new Set<UnitType>([UnitType.L, UnitType.ML]);
   if (solid.has(from) && solid.has(to)) {

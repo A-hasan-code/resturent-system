@@ -57,15 +57,22 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
       { label: "This year", value: money(s.salesYear), note: "Year to date" },
     ]);
     kpiRow(doc, contentW, [
+      { label: "Discounts", value: money(s.discountsTotal), note: "On paid / credit bills" },
+      { label: "Tax", value: money(s.taxTotal), note: "Exclusive sales tax" },
       { label: "Tips", value: money(s.tipsTotal), note: "Guest tips (separate)" },
-      { label: "Payments in", value: money(s.paymentsIn), note: `${s.paymentCount} receipts` },
-      { label: "Purchases out", value: money(s.purchasesOut), note: `${s.purchaseCount} stock-ins` },
-      { label: "Cash left", value: money(cashLeft), note: "Payments − purchases" },
+      { label: "Food cost / profit", value: `${money(s.foodCost)} / ${money(s.profit)}`, note: "Recipe cost vs net food" },
     ]);
     kpiRow(doc, contentW, [
+      { label: "Payments in", value: money(s.paymentsIn), note: `${s.paymentCount} receipts` },
+      { label: "Cash / Card", value: `${money(s.byMethod.CASH)} / ${money(s.byMethod.CARD)}`, note: "Tender mix" },
+      { label: "Wallet / Bank", value: `${money(s.byMethod.WALLET)} / ${money(s.byMethod.BANK)}`, note: "Tender mix" },
+      { label: "Credit sales", value: money(s.creditSales), note: `${s.creditCount} credit bills` },
+    ]);
+    kpiRow(doc, contentW, [
+      { label: "Purchases out", value: money(s.purchasesOut), note: `${s.purchaseCount} stock-ins` },
+      { label: "Cash left", value: money(cashLeft), note: "Payments − purchases" },
       { label: "Orders", value: String(s.orders), note: `${s.cancelled} cancelled` },
       { label: "Unpaid amount", value: money(s.unpaidAmount), note: `${s.unpaidCount} open bills` },
-      { label: "Food cost", value: money(s.foodCost), note: "Recipe cost on paid bills" },
     ]);
 
     sectionTitle(doc, "1. Cash flow by day", "Payments received versus stock purchases");
@@ -101,18 +108,20 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
     table(
       doc,
       contentW,
-      ["Date", "Sales", "Tips", "Bills", "Payments", "Purchases"],
+      ["Date", "Sales", "Disc.", "Tax", "Tips", "Bills", "In", "Out"],
       report.days
         .filter((d) => d.orders || d.paymentsIn || d.purchasesOut || d.sales)
         .map((d) => [
           dayLabel(d.date),
           money(d.sales),
+          money(d.discounts),
+          money(d.tax),
           money(d.tips),
           String(d.billsPaid),
           money(d.paymentsIn),
           money(d.purchasesOut),
         ]),
-      [0.16, 0.16, 0.14, 0.12, 0.21, 0.21]
+      [0.12, 0.12, 0.11, 0.11, 0.11, 0.1, 0.16, 0.17]
     );
 
     ensureSpace(doc, 120);
@@ -120,18 +129,18 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
     table(
       doc,
       contentW,
-      ["Time", "Bill", "Table", "Sale", "Tip", "Order taken by", "Served by", "Pay"],
+      ["Time", "Bill", "Table", "Sale", "Disc.", "Tax", "Tip", "Pay"],
       report.sales.map((o) => [
         when(o.time),
         `#${o.orderNo}`,
         o.tableNo || "—",
         money(o.total),
+        money(o.discountAmount),
+        money(o.taxAmount),
         money(o.tipAmount),
-        o.orderedBy || "—",
-        o.servedBy || "—",
-        o.paymentStatus,
+        o.isCredit ? `CREDIT${o.creditName ? ` · ${o.creditName}` : ""}` : o.paymentStatus,
       ]),
-      [0.16, 0.08, 0.08, 0.12, 0.1, 0.18, 0.14, 0.14]
+      [0.14, 0.08, 0.08, 0.12, 0.1, 0.1, 0.1, 0.18]
     );
 
     ensureSpace(doc, 120);
@@ -139,18 +148,18 @@ export function renderAuditPdf(report: AuditReport, hotel: Hotel): Promise<Buffe
     table(
       doc,
       contentW,
-      ["Time", "Bill", "Table", "Amount", "Tip", "Received by", "Handed to", "Confirmed"],
+      ["Time", "Bill", "Method", "Amount", "Tip", "Received by", "Handed to", "Confirmed"],
       report.payments.map((p) => [
         when(p.time),
         `#${p.orderNo}`,
-        p.tableNo || "—",
+        p.method || "CASH",
         money(p.amount),
         money(p.tipAmount),
         `${p.collectedBy}`,
         p.handedTo || "—",
         p.confirmedAt ? when(p.confirmedAt) : p.handedTo ? "Pending" : "—",
       ]),
-      [0.16, 0.08, 0.08, 0.12, 0.1, 0.16, 0.14, 0.16]
+      [0.14, 0.08, 0.1, 0.12, 0.1, 0.16, 0.14, 0.16]
     );
 
     ensureSpace(doc, 120);

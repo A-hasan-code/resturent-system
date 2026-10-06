@@ -12,6 +12,7 @@ import {
 import { Type } from "class-transformer";
 
 const SELL_MODES = ["BOTH", "SERVING_ONLY", "RS_ONLY"] as const;
+const STATIONS = ["BEVERAGES", "COOKING", "BBQ"] as const;
 
 export class CreateSpecialProductDto {
   @IsString()
@@ -43,8 +44,12 @@ export class CreateSpecialProductDto {
   plateGrams!: number;
 
   @IsString()
+  @MinLength(1)
+  cookRecipeId!: string;
+
+  @IsIn(STATIONS)
   @IsOptional()
-  cookRecipeId?: string;
+  kitchenStation?: (typeof STATIONS)[number];
 }
 
 export class UpdateSpecialProductDto {
@@ -80,6 +85,10 @@ export class UpdateSpecialProductDto {
   @IsString()
   cookRecipeId?: string | null;
 
+  @IsIn(STATIONS)
+  @IsOptional()
+  kitchenStation?: (typeof STATIONS)[number];
+
   @IsOptional()
   active?: boolean;
 }
@@ -96,6 +105,7 @@ export class CookBatchDto {
 
   @IsString()
   @IsOptional()
+  @MinLength(0)
   note?: string;
 }
 

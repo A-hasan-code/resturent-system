@@ -38,6 +38,12 @@ export class SaveDayCashCloseDto {
   @MaxLength(500)
   note?: string;
 
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  openingFloat?: number;
+
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })

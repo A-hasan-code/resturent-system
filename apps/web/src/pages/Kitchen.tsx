@@ -78,10 +78,8 @@ export function KitchenPage() {
 
   async function load() {
     try {
-      const all = await api<Order[]>("/orders");
-      setOrders(
-        all.filter((o) => ["PENDING", "PREPARING", "READY"].includes(o.status))
-      );
+      const all = await api<Order[]>("/orders/kitchen");
+      setOrders(all);
     } catch (e) {
       toast.push(e instanceof Error ? e.message : t("kitchen.loadFailed"), "err");
     }
@@ -107,7 +105,9 @@ export function KitchenPage() {
         ? t("kitchen.itemsAdded")
         : o.reason === "cancelled"
           ? t("kitchen.orderCancelled")
-          : t("kitchen.newOrder");
+          : o.reason === "edited"
+            ? t("kitchen.orderEdited")
+            : t("kitchen.newOrder");
     toast.push(`${kind}: ${o.tableNo || t("common.walkIn")} · #${o.orderNo}`, "info");
     alertBeep();
   });
@@ -263,7 +263,7 @@ export function KitchenPage() {
                       <button
                         type="button"
                         className="btn sm"
-                        onClick={() => setStatus(o.id, "COMPLETED")}
+                        onClick={() => setStatus(o.id, "SERVED")}
                       >
                         {t("kitchen.complete")}
                       </button>

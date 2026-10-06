@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, formatKg, gramsToKg, kgToGrams, money } from "../api";
+import { api, downloadApi, formatKg, gramsToKg, kgToGrams, money } from "../api";
 import { useAuth } from "../auth";
 import { DateField } from "../components/DateField";
 import { useT } from "../i18n";
@@ -32,9 +32,11 @@ type Counter = {
   label: string;
   roleCode: string;
   cashiers: { id: string; name: string }[];
+  cashSales?: number;
   expectedCash: number;
   collectedCash: number;
   missCash: number;
+  surplusCash?: number;
   missReason: string;
   billCount: number;
   paymentCount: number;
@@ -58,6 +60,8 @@ type Sheet = {
   isToday: boolean;
   dayStart: string;
   canEdit?: boolean;
+  locked?: boolean;
+  frozen?: boolean;
   saved: boolean;
   closeId: string | null;
   note: string;
@@ -87,9 +91,16 @@ type Sheet = {
     createdAt: string;
   }[];
   totals: {
+    cashSales?: number;
+    tipTotal?: number;
+    openingFloat?: number;
     expectedCash: number;
     collectedCash: number;
     missCash: number;
+    surplusCash?: number;
+    cardTotal?: number;
+    walletTotal?: number;
+    bankTotal?: number;
     pendingAmount: number;
     pendingCount: number;
     paidBillsCount: number;
@@ -100,6 +111,13 @@ type Sheet = {
     creditUnpaidCount?: number;
     creditPaidAmount?: number;
     creditPaidCount?: number;
+    hotelExpenses?: number;
+    hotelExpenseCount?: number;
+    supplierPaid?: number;
+    supplierPaymentCount?: number;
+    selfExtra?: number;
+    cashOutTotal?: number;
+    drawerFormula?: string;
   };
 };
 
@@ -248,13 +266,16 @@ export function CloseReportPage() {
   const toast = useToast();
   const { can } = useAuth();
   const canManage = can("close.manage");
+  const canUnlock = can("system.manage");
 
   const [date, setDate] = useState("");
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [busy, setBusy] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [note, setNote] = useState("");
+  const [openingFloat, setOpeningFloat] = useState("0");
   const [collected, setCollected] = useState<Record<CounterKind, string>>({
     COUNTER_1: "",
     COUNTER_2: "",
@@ -297,6 +318,7 @@ export function CloseReportPage() {
         setSheet(data);
         setDate(data.businessDate);
         setNote(data.note || "");
+        setOpeningFloat(String(data.totals.openingFloat ?? 0));
         setEditing(false);
         const nextCollected = { COUNTER_1: "", COUNTER_2: "" } as Record<CounterKind, string>;
         const nextReasons = { COUNTER_1: "", COUNTER_2: "" } as Record<CounterKind, string>;
@@ -355,22 +377,41 @@ export function CloseReportPage() {
 
   const liveCounters = useMemo(() => {
     if (!sheet) return [];
+    const savedFloat = sheet.totals.openingFloat ?? 0;
+    const typedFloatRaw = Number(openingFloat);
+    const typedFloat = Number.isFinite(typedFloatRaw) ? Math.max(0, typedFloatRaw) : 0;
+    const adjustFloat = editing && sheet.isToday !== false && !sheet.frozen;
     return sheet.counters.map((c) => {
+      let expectedCash = c.expectedCash;
+      if (adjustFloat && c.kind === "COUNTER_1") {
+        expectedCash = Math.max(0, Math.round((c.expectedCash - savedFloat + typedFloat) * 100) / 100);
+      }
       const typed = Number(collected[c.kind]);
       const collectedCash = Number.isFinite(typed) ? Math.max(0, typed) : 0;
-      const missCash = Math.max(0, Math.round((c.expectedCash - collectedCash) * 100) / 100);
-      return { ...c, collectedCash, missCash, missReason: reasons[c.kind] };
+      const missCash = Math.max(0, Math.round((expectedCash - collectedCash) * 100) / 100);
+      const surplusCash = Math.max(0, Math.round((collectedCash - expectedCash) * 100) / 100);
+      return { ...c, expectedCash, collectedCash, missCash, surplusCash, missReason: reasons[c.kind] };
     });
-  }, [sheet, collected, reasons]);
+  }, [sheet, collected, reasons, openingFloat, editing]);
 
   const liveTotals = useMemo(() => {
     const expectedCash = liveCounters.reduce((s, c) => s + c.expectedCash, 0);
     const collectedCash = liveCounters.reduce((s, c) => s + c.collectedCash, 0);
-    const missCash = liveCounters.reduce((s, c) => s + c.missCash, 0);
+    const missCash = Math.max(0, Math.round((expectedCash - collectedCash) * 100) / 100);
+    const surplusCash = Math.max(0, Math.round((collectedCash - expectedCash) * 100) / 100);
+    const floatRaw = Number(openingFloat);
+    const float = Number.isFinite(floatRaw) ? Math.max(0, floatRaw) : sheet?.totals.openingFloat ?? 0;
     return {
       expectedCash,
       collectedCash,
       missCash,
+      surplusCash,
+      openingFloat: float,
+      cashSales: sheet?.totals.cashSales ?? 0,
+      tipTotal: sheet?.totals.tipTotal ?? 0,
+      cardTotal: sheet?.totals.cardTotal ?? 0,
+      walletTotal: sheet?.totals.walletTotal ?? 0,
+      bankTotal: sheet?.totals.bankTotal ?? 0,
       pendingAmount: sheet?.totals.pendingAmount ?? 0,
       pendingCount: sheet?.totals.pendingCount ?? 0,
       paidBillsCount: sheet?.totals.paidBillsCount ?? 0,
@@ -380,11 +421,20 @@ export function CloseReportPage() {
       creditUnpaidCount: sheet?.totals.creditUnpaidCount ?? 0,
       creditPaidAmount: sheet?.totals.creditPaidAmount ?? 0,
       creditPaidCount: sheet?.totals.creditPaidCount ?? 0,
+      hotelExpenses: sheet?.totals.hotelExpenses ?? 0,
+      hotelExpenseCount: sheet?.totals.hotelExpenseCount ?? 0,
+      supplierPaid: sheet?.totals.supplierPaid ?? 0,
+      supplierPaymentCount: sheet?.totals.supplierPaymentCount ?? 0,
+      selfExtra: sheet?.totals.selfExtra ?? 0,
+      cashOutTotal: sheet?.totals.cashOutTotal ?? 0,
+      drawerFormula: sheet?.totals.drawerFormula || "float + cash sales + tips − cash out",
     };
-  }, [liveCounters, sheet]);
+  }, [liveCounters, sheet, openingFloat]);
 
   const isToday = sheet?.isToday !== false;
-  const canStartEdit = !!sheet && isToday && canManage && (sheet.canEdit !== false);
+  const locked = !!sheet?.locked;
+  const frozen = !!sheet?.frozen;
+  const canStartEdit = !!sheet && isToday && canManage && sheet.canEdit !== false && !locked;
   const editable = canStartEdit && editing;
 
   function batchPayloadOrError():
@@ -401,6 +451,14 @@ export function CloseReportPage() {
       }
       if (Math.abs(l.carryGrams + l.wasteGrams - l.countedRemainingGrams) > 50) {
         toast.push(t("specials.carryWasteMatch"), "err");
+        return { ok: false };
+      }
+      const draft = batchLines.find((d) => d.specialProductId === l.specialProductId);
+      const systemG = draft?.systemRemainingGrams ?? 0;
+      const shrink = Math.max(0, systemG - l.countedRemainingGrams);
+      const wasteTotal = l.wasteGrams + shrink;
+      if (wasteTotal > 50 && !(l.wasteNote || "").trim()) {
+        toast.push(t("specials.wasteNoteRequired", { name: draft?.name || "special" }), "err");
         return { ok: false };
       }
     }
@@ -425,6 +483,7 @@ export function CloseReportPage() {
   function cancelEdit() {
     if (!sheet) return;
     setNote(sheet.note || "");
+    setOpeningFloat(String(sheet.totals.openingFloat ?? 0));
     const nextCollected = { COUNTER_1: "", COUNTER_2: "" } as Record<CounterKind, string>;
     const nextReasons = { COUNTER_1: "", COUNTER_2: "" } as Record<CounterKind, string>;
     for (const c of sheet.counters) {
@@ -464,6 +523,7 @@ export function CloseReportPage() {
       const body = {
         businessDate: sheet.businessDate,
         note: note.trim() || undefined,
+        openingFloat: liveTotals.openingFloat,
         counters: liveCounters.map((c) => ({
           kind: c.kind,
           collectedCash: c.collectedCash,
@@ -487,6 +547,36 @@ export function CloseReportPage() {
     }
   }
 
+  async function downloadPdf() {
+    if (!sheet) return;
+    setPdfBusy(true);
+    try {
+      await downloadApi(`/close/export?date=${sheet.businessDate}`, `close-${sheet.businessDate}.pdf`);
+      toast.push(t("close.pdfOk"), "ok");
+    } catch (err) {
+      toast.push(err instanceof Error ? err.message : t("common.failed"), "err");
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
+  async function unlockDay() {
+    if (!sheet) return;
+    setBusy(true);
+    try {
+      await api("/finance/unlock-day", {
+        method: "POST",
+        body: JSON.stringify({ businessDate: sheet.businessDate }),
+      });
+      toast.push(t("finance.unlocked"), "ok");
+      await load(sheet.businessDate);
+    } catch (err) {
+      toast.push(err instanceof Error ? err.message : t("common.failed"), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const c1 = liveCounters.find((c) => c.kind === "COUNTER_1");
   const c2 = liveCounters.find((c) => c.kind === "COUNTER_2");
 
@@ -500,6 +590,8 @@ export function CloseReportPage() {
             <p className="page-head-meta tiny">
               <span>{t("close.dayWindow", { start: sheet.dayStart })}</span>
               <span>{isToday ? t("close.todayBadge") : t("close.viewOnlyBadge")}</span>
+              {locked ? <span className="badge pending">{t("close.lockedBadge")}</span> : null}
+              {frozen ? <span className="badge">{t("close.frozenBadge")}</span> : null}
               <span>
                 {sheet.saved
                   ? t("close.savedBy", {
@@ -527,15 +619,41 @@ export function CloseReportPage() {
           <button type="button" className="btn ghost sm page-head-btn" onClick={() => void load(sheet?.today)}>
             {t("close.today")}
           </button>
+          <button
+            type="button"
+            className="btn ghost sm page-head-btn"
+            disabled={!sheet || pdfBusy}
+            onClick={() => void downloadPdf()}
+          >
+            {pdfBusy ? t("common.loading") : t("close.pdf")}
+          </button>
+          {locked && canUnlock && (
+            <button type="button" className="btn sm page-head-btn" disabled={busy} onClick={() => void unlockDay()}>
+              {t("finance.unlock")}
+            </button>
+          )}
         </div>
       </div>
 
       {!isToday && sheet && (
         <div className="panel panel-pad alert-stale banner-row">
-          <p style={{ margin: 0 }}>{t("close.pastReadOnly")}</p>
+          <p style={{ margin: 0 }}>
+            {frozen ? t("close.frozenHint") : t("close.pastReadOnly")}
+          </p>
           <button type="button" className="btn ok sm" onClick={() => void load(sheet.today)}>
             {t("close.today")}
           </button>
+        </div>
+      )}
+
+      {isToday && locked && (
+        <div className="panel panel-pad alert-stale banner-row">
+          <p style={{ margin: 0 }}>{t("close.lockedHint")}</p>
+          {canUnlock ? (
+            <button type="button" className="btn sm" disabled={busy} onClick={() => void unlockDay()}>
+              {t("finance.unlock")}
+            </button>
+          ) : null}
         </div>
       )}
 
@@ -555,6 +673,11 @@ export function CloseReportPage() {
           <span className="tiny">{t("close.paidBillsN", { n: liveTotals.paidBillsCount })}</span>
         </div>
         <div className="panel stat">
+          <span>{t("close.openingFloat")}</span>
+          <strong>{money(liveTotals.openingFloat)}</strong>
+          <span className="tiny">{t("close.drawerFormula")}</span>
+        </div>
+        <div className="panel stat">
           <span>{t("close.expectedCash")}</span>
           <strong>{money(liveTotals.expectedCash)}</strong>
           <span className="tiny">{t("close.bothCounters")}</span>
@@ -566,6 +689,10 @@ export function CloseReportPage() {
         <div className={`panel stat ${liveTotals.missCash > 0 ? "alert-low" : ""}`}>
           <span>{t("close.missCash")}</span>
           <strong>{money(liveTotals.missCash)}</strong>
+        </div>
+        <div className={`panel stat ${liveTotals.surplusCash > 0 ? "" : ""}`}>
+          <span>{t("close.surplusCash")}</span>
+          <strong>{money(liveTotals.surplusCash)}</strong>
         </div>
         <div className="panel stat">
           <span>{t("close.pendingBills")}</span>
@@ -582,6 +709,44 @@ export function CloseReportPage() {
           <strong>{money(liveTotals.creditPaidAmount)}</strong>
           <span className="tiny">{t("close.creditPaidN", { n: liveTotals.creditPaidCount })}</span>
         </div>
+        <div className="panel stat">
+          <span>{t("close.hotelExpenses")}</span>
+          <strong>{money(liveTotals.hotelExpenses)}</strong>
+          <span className="tiny">{t("close.hotelExpensesN", { n: liveTotals.hotelExpenseCount })}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("close.supplierPaid")}</span>
+          <strong>{money(liveTotals.supplierPaid)}</strong>
+          <span className="tiny">{t("close.supplierPaidN", { n: liveTotals.supplierPaymentCount })}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("close.selfExtra")}</span>
+          <strong>{money(liveTotals.selfExtra)}</strong>
+        </div>
+        <div className={`panel stat ${liveTotals.cashOutTotal > 0 ? "alert-low" : ""}`}>
+          <span>{t("close.cashOutTotal")}</span>
+          <strong>{money(liveTotals.cashOutTotal)}</strong>
+          <span className="tiny">{t("close.cashOutHint")}</span>
+        </div>
+      </div>
+
+      <h3 style={{ margin: "0.85rem 0 0.5rem" }}>{t("close.nonCashTitle")}</h3>
+      <div className="stats">
+        <div className="panel stat">
+          <span>{t("pay.method.CARD")}</span>
+          <strong>{money(liveTotals.cardTotal)}</strong>
+          <span className="tiny">{t("close.nonCashHint")}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("pay.method.WALLET")}</span>
+          <strong>{money(liveTotals.walletTotal)}</strong>
+          <span className="tiny">{t("close.nonCashHint")}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("pay.method.BANK")}</span>
+          <strong>{money(liveTotals.bankTotal)}</strong>
+          <span className="tiny">{t("close.nonCashHint")}</span>
+        </div>
       </div>
 
       <div className="panel panel-pad" style={{ marginTop: "0.85rem" }}>
@@ -595,6 +760,49 @@ export function CloseReportPage() {
       </div>
 
       <form onSubmit={save}>
+        {(editable || (sheet && (sheet.totals.openingFloat ?? 0) > 0) || isToday) && (
+          <div className="panel panel-pad" style={{ marginTop: "0.85rem" }}>
+            <h3 style={{ marginTop: 0 }}>{t("close.drawerTitle")}</h3>
+            <p className="tiny muted" style={{ marginTop: 0 }}>
+              {t("close.drawerFormulaHint")}
+            </p>
+            {editable ? (
+              <div className="field" style={{ maxWidth: 280 }}>
+                <label>{t("close.openingFloat")}</label>
+                <input
+                  className="field-ctrl"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={openingFloat}
+                  onChange={(e) => setOpeningFloat(e.target.value)}
+                  placeholder="0"
+                />
+                <span className="tiny muted">{t("close.openingFloatHint")}</span>
+              </div>
+            ) : (
+              <div className="stats" style={{ marginTop: "0.5rem" }}>
+                <div className="panel stat">
+                  <span>{t("close.openingFloat")}</span>
+                  <strong>{money(liveTotals.openingFloat)}</strong>
+                </div>
+                <div className="panel stat">
+                  <span>{t("close.cashSales")}</span>
+                  <strong>{money(liveTotals.cashSales)}</strong>
+                </div>
+                <div className="panel stat">
+                  <span>{t("close.tips")}</span>
+                  <strong>{money(liveTotals.tipTotal)}</strong>
+                </div>
+                <div className="panel stat">
+                  <span>{t("close.cashOutTotal")}</span>
+                  <strong>{money(liveTotals.cashOutTotal)}</strong>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="grid-2" style={{ marginTop: "0.85rem" }}>
           {liveCounters.map((c) => (
             <div key={c.kind} className="panel panel-pad">
@@ -615,6 +823,10 @@ export function CloseReportPage() {
                 <div className={`panel stat ${c.missCash > 0 ? "alert-low" : ""}`}>
                   <span>{t("close.missCash")}</span>
                   <strong>{money(c.missCash)}</strong>
+                </div>
+                <div className="panel stat">
+                  <span>{t("close.surplusCash")}</span>
+                  <strong>{money(c.surplusCash ?? 0)}</strong>
                 </div>
               </div>
 
@@ -796,6 +1008,26 @@ export function CloseReportPage() {
                   </td>
                 </tr>
                 <tr>
+                  <td>{t("close.surplusCash")}</td>
+                  <td>
+                    <strong>{money(liveTotals.surplusCash)}</strong>
+                  </td>
+                </tr>
+                <tr>
+                  <td>{t("close.openingFloat")}</td>
+                  <td>
+                    <strong>{money(liveTotals.openingFloat)}</strong>
+                  </td>
+                </tr>
+                <tr>
+                  <td>{t("pay.method.CARD")} / {t("pay.method.WALLET")} / {t("pay.method.BANK")}</td>
+                  <td>
+                    <strong>
+                      {money(liveTotals.cardTotal)} / {money(liveTotals.walletTotal)} / {money(liveTotals.bankTotal)}
+                    </strong>
+                  </td>
+                </tr>
+                <tr>
                   <td>{t("close.pendingBills")}</td>
                   <td>
                     <strong>{money(liveTotals.pendingAmount)}</strong>
@@ -849,6 +1081,7 @@ export function CloseReportPage() {
                     {Number(l.lossCost) > 0
                       ? ` · ${t("specials.lossCost")} ${money(Number(l.lossCost))}`
                       : ""}
+                    {l.wasteNote ? ` · ${l.wasteNote}` : ""}
                   </div>
                 ))}
               </div>

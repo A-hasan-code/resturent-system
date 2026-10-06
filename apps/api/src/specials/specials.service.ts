@@ -20,6 +20,9 @@ import { Decimal } from "@prisma/client/runtime/library";
 
 @Injectable()
 export class SpecialsService {
+  /** Carry + waste vs counted may differ by this many grams (matches Close UI ±50g). */
+  private static readonly QTY_TOL_G = 50;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly costing: CostingService,
@@ -29,6 +32,36 @@ export class SpecialsService {
   async businessDateNow() {
     const day = await this.settings.dayStart();
     return businessDateOf(new Date(), day.h, day.m);
+  }
+
+  private async assertDayNotLocked(businessDate: string) {
+    const close = await this.prisma.dayCashClose.findUnique({
+      where: { businessDate },
+      select: { lockedAt: true },
+    });
+    if (close?.lockedAt) {
+      throw new BadRequestException(
+        `Business day ${businessDate} is locked after day close. Unlock from Close/Finance before changing specials.`
+      );
+    }
+  }
+
+  private async costForGrams(
+    product: { cookRecipeId: string | null; plateGrams: Parameters<typeof toNumber>[0] },
+    grams: number
+  ) {
+    if (!(grams > 0) || !product.cookRecipeId) return 0;
+    try {
+      const { costPerBase, recipe } = await this.costing.recipeUnitCost(product.cookRecipeId);
+      const qty = this.costing.cookedGramsToRecipeQty({
+        baseUnit: recipe.baseUnit,
+        cookedGrams: grams,
+        plateGrams: toNumber(product.plateGrams),
+      });
+      return Math.round(costPerBase * qty * 100) / 100;
+    } catch {
+      return 0;
+    }
   }
 
   remainingGrams(batch: {
@@ -84,6 +117,7 @@ export class SpecialsService {
     name: string;
     category: string;
     platePrice: Decimal;
+    kitchenStation?: "BEVERAGES" | "COOKING" | "BBQ";
     active: boolean;
   }) {
     const existing = await this.prisma.menuItem.findFirst({
@@ -91,6 +125,7 @@ export class SpecialsService {
       orderBy: { createdAt: "asc" },
     });
     const price = toNumber(product.platePrice);
+    const station = product.kitchenStation ?? "COOKING";
     if (!product.active) {
       if (existing) {
         await this.prisma.menuItem.update({
@@ -106,17 +141,18 @@ export class SpecialsService {
         data: {
           name: product.name,
           category: product.category,
-        sellingPrice: price,
-        sellUnit: "PCS",
-        kind: "SPECIAL",
-        specialProductId: product.id,
-        recipeId: null,
-        mixSpecialPlates: null,
-        listPortionQty: 1,
-        active: true,
-        minQty: 1,
-        qtyStep: 1,
-        allowCustomQty: false,
+          kitchenStation: station,
+          sellingPrice: price,
+          sellUnit: "PCS",
+          kind: "SPECIAL",
+          specialProductId: product.id,
+          recipeId: null,
+          mixSpecialPlates: null,
+          listPortionQty: 1,
+          active: true,
+          minQty: 1,
+          qtyStep: 1,
+          allowCustomQty: false,
         },
       });
     }
@@ -124,7 +160,7 @@ export class SpecialsService {
       data: {
         name: product.name,
         category: product.category,
-        kitchenStation: "COOKING",
+        kitchenStation: station,
         kind: "SPECIAL",
         sellUnit: "PCS",
         sellingPrice: price,
@@ -152,10 +188,11 @@ export class SpecialsService {
   }
 
   async createProduct(dto: CreateSpecialProductDto) {
-    if (dto.cookRecipeId) {
-      const recipe = await this.prisma.recipe.findUnique({ where: { id: dto.cookRecipeId } });
-      if (!recipe) throw new BadRequestException("Cook recipe not found");
+    if (!dto.cookRecipeId?.trim()) {
+      throw new BadRequestException("Pick a cook recipe — required for store deduct and waste cost");
     }
+    const recipe = await this.prisma.recipe.findUnique({ where: { id: dto.cookRecipeId } });
+    if (!recipe) throw new BadRequestException("Cook recipe not found");
     await this.assertUniqueName(dto.name);
     const product = await this.prisma.specialProduct.create({
       data: {
@@ -165,7 +202,8 @@ export class SpecialsService {
         sellMode: dto.sellMode ?? "BOTH",
         platePrice: dto.platePrice,
         plateGrams: dto.plateGrams,
-        cookRecipeId: dto.cookRecipeId || null,
+        cookRecipeId: dto.cookRecipeId,
+        kitchenStation: dto.kitchenStation ?? "COOKING",
       },
     });
     await this.syncSpecialMenuItem(product);
@@ -189,7 +227,10 @@ export class SpecialsService {
           "Cannot delete a special pot while editing. After hotel close, Admin can remove it."
         );
       }
-      if (dto.cookRecipeId) {
+      if (dto.cookRecipeId !== undefined) {
+        if (dto.cookRecipeId === null || dto.cookRecipeId === "") {
+          throw new BadRequestException("Cook recipe is required — cannot clear it");
+        }
         const recipe = await this.prisma.recipe.findUnique({ where: { id: dto.cookRecipeId } });
         if (!recipe) throw new BadRequestException("Cook recipe not found");
       }
@@ -208,6 +249,7 @@ export class SpecialsService {
           ...(dto.cookRecipeId !== undefined
             ? { cookRecipeId: dto.cookRecipeId || null }
             : {}),
+          ...(dto.kitchenStation != null ? { kitchenStation: dto.kitchenStation } : {}),
           ...(dto.active === true ? { active: true } : {}),
         },
       });
@@ -268,41 +310,89 @@ export class SpecialsService {
     const byProduct = new Map(batches.map((b) => [b.specialProductId, b]));
     const dayCash = await this.prisma.dayCashClose.findUnique({
       where: { businessDate },
-      select: { id: true },
+      select: { id: true, lockedAt: true },
     });
     const close = await this.prisma.dayBatchClose.findUnique({
       where: { businessDate },
       include: { lines: true },
     });
 
+    const rows = [];
+    for (const p of products) {
+      const b = byProduct.get(p.id);
+      const remaining = b ? this.remainingGrams(b) : 0;
+      const plateGrams = toNumber(p.plateGrams) || 1;
+      const cookedGrams = b ? toNumber(b.cookedGrams) : 0;
+      const soldGrams = b ? toNumber(b.soldGrams) : 0;
+      const openingCarryGrams = b ? toNumber(b.openingCarryGrams) : 0;
+      const cookCost = await this.costForGrams(p, cookedGrams);
+      const soldCost = await this.costForGrams(p, soldGrams);
+      const remainingCost = await this.costForGrams(p, remaining);
+      const soldValue = (soldGrams / plateGrams) * toNumber(p.platePrice);
+      const costPerKg = cookedGrams > 0 ? Math.round((cookCost / (cookedGrams / 1000)) * 100) / 100 : 0;
+      rows.push({
+        id: p.id,
+        name: p.name,
+        category: p.category,
+        servingLabel: p.servingLabel || "Plate",
+        sellMode: p.sellMode,
+        platePrice: toNumber(p.platePrice),
+        plateGrams,
+        cookRecipeId: p.cookRecipeId,
+        batchId: b?.id ?? null,
+        status: b?.status ?? (cookedGrams || openingCarryGrams ? "OPEN" : null),
+        openingCarryGrams,
+        cookedGrams,
+        soldGrams,
+        remainingGrams: remaining,
+        remainingPlates: remaining / plateGrams,
+        maxRs: (remaining / plateGrams) * toNumber(p.platePrice),
+        cookCost,
+        soldCost,
+        remainingCost,
+        soldValue: Math.round(soldValue * 100) / 100,
+        costPerKg,
+        cookedByName: b?.cookedByName ?? null,
+        cookedAt: b?.cookedAt?.toISOString() ?? null,
+      });
+    }
+
+    const totals = {
+      cookedGrams: rows.reduce((s, r) => s + r.cookedGrams, 0),
+      soldGrams: rows.reduce((s, r) => s + r.soldGrams, 0),
+      remainingGrams: rows.reduce((s, r) => s + r.remainingGrams, 0),
+      cookCost: Math.round(rows.reduce((s, r) => s + r.cookCost, 0) * 100) / 100,
+      soldCost: Math.round(rows.reduce((s, r) => s + r.soldCost, 0) * 100) / 100,
+      remainingCost: Math.round(rows.reduce((s, r) => s + r.remainingCost, 0) * 100) / 100,
+      soldValue: Math.round(rows.reduce((s, r) => s + r.soldValue, 0) * 100) / 100,
+      openPots: rows.filter((r) => r.status === "OPEN").length,
+      closedPots: rows.filter((r) => r.status === "CLOSED").length,
+    };
+    const wasteLines = close?.lines ?? [];
+    const wasteGrams = wasteLines.reduce((s, l) => s + toNumber(l.wasteGrams), 0);
+    const wasteLoss = wasteLines.reduce((s, l) => s + toNumber(l.lossCost), 0);
+
     return {
       businessDate,
       /** True only after leftover was saved with Close Report (DayBatchClose row). */
       batchCloseDone: !!close,
       dayCashClosed: !!dayCash,
-      products: products.map((p) => {
-        const b = byProduct.get(p.id);
-        const remaining = b ? this.remainingGrams(b) : 0;
-        const plateGrams = toNumber(p.plateGrams) || 1;
-        return {
-          id: p.id,
-          name: p.name,
-          category: p.category,
-          servingLabel: p.servingLabel || "Plate",
-          sellMode: p.sellMode,
-          platePrice: toNumber(p.platePrice),
-          plateGrams,
-          cookRecipeId: p.cookRecipeId,
-          batchId: b?.id ?? null,
-          status: b?.status ?? null,
-          openingCarryGrams: b ? toNumber(b.openingCarryGrams) : 0,
-          cookedGrams: b ? toNumber(b.cookedGrams) : 0,
-          soldGrams: b ? toNumber(b.soldGrams) : 0,
-          remainingGrams: remaining,
-          remainingPlates: remaining / plateGrams,
-          maxRs: (remaining / plateGrams) * toNumber(p.platePrice),
-        };
-      }),
+      locked: !!dayCash?.lockedAt,
+      products: rows,
+      totals: {
+        ...totals,
+        wasteGrams,
+        wasteLoss: Math.round(wasteLoss * 100) / 100,
+        yieldPct:
+          totals.cookedGrams + rows.reduce((s, r) => s + r.openingCarryGrams, 0) > 0
+            ? Math.round(
+                (totals.soldGrams /
+                  (totals.cookedGrams + rows.reduce((s, r) => s + r.openingCarryGrams, 0))) *
+                  1000
+              ) / 10
+            : 0,
+        foodMargin: Math.round((totals.soldValue - totals.soldCost) * 100) / 100,
+      },
     };
   }
 
@@ -314,8 +404,14 @@ export class SpecialsService {
       where: { id: dto.specialProductId, active: true },
     });
     if (!product) throw new NotFoundException("Special product not found");
+    if (!product.cookRecipeId) {
+      throw new BadRequestException(
+        `Set a cook recipe on ${product.name} before cooking — needed for store deduct and waste cost`
+      );
+    }
 
     const businessDate = await this.businessDateNow();
+    await this.assertDayNotLocked(businessDate);
     await this.reopenLeftoverIfDayStillOpen(businessDate);
 
     let batch = await this.prisma.dailyBatch.findUnique({
@@ -387,7 +483,8 @@ export class SpecialsService {
         product.cookRecipeId,
         cookQty,
         `Special cook · ${product.name} · ${businessDate} · ${addCook}g`,
-        undefined
+        undefined,
+        "COOK"
       );
     }
 
@@ -506,8 +603,11 @@ export class SpecialsService {
   async reopenLeftoverIfDayStillOpen(businessDate: string) {
     const dayCash = await this.prisma.dayCashClose.findUnique({
       where: { businessDate },
-      select: { id: true },
+      select: { id: true, lockedAt: true },
     });
+    // Locked day: never auto-reopen pots / wipe leftover.
+    if (dayCash?.lockedAt) return { reopened: false, locked: true };
+
     const batchClose = await this.prisma.dayBatchClose.findUnique({
       where: { businessDate },
       select: { id: true },
@@ -535,6 +635,7 @@ export class SpecialsService {
   /** Admin/system: force pots open for today (clears leftover close row). */
   async forceReopenToday() {
     const businessDate = await this.businessDateNow();
+    await this.assertDayNotLocked(businessDate);
     const batchClose = await this.prisma.dayBatchClose.findUnique({
       where: { businessDate },
       select: { id: true },
@@ -553,6 +654,7 @@ export class SpecialsService {
 
   async saveClose(dto: SaveBatchCloseDto, user: AuthUser) {
     const businessDate = await this.businessDateNow();
+    await this.assertDayNotLocked(businessDate);
 
     // Allow re-save with Close Report: replace prior leftover close if day cash not final yet,
     // or update when day cash already exists (report update).
@@ -571,6 +673,7 @@ export class SpecialsService {
     const products = await this.prisma.specialProduct.findMany({ where: { active: true } });
     const batches = await this.prisma.dailyBatch.findMany({ where: { businessDate } });
     const byProduct = new Map(batches.map((b) => [b.specialProductId, b]));
+    const tol = SpecialsService.QTY_TOL_G;
 
     // Every OPEN batch with remaining must be in dto.
     for (const b of batches) {
@@ -593,23 +696,34 @@ export class SpecialsService {
       const systemRem = batch ? this.remainingGrams(batch) : 0;
       const counted = line.countedRemainingGrams;
       const carry = line.carryGrams;
-      const waste = line.wasteGrams;
-      if (Math.abs(carry + waste - counted) > 0.05) {
+      let waste = line.wasteGrams;
+      if (Math.abs(carry + waste - counted) > tol) {
         throw new BadRequestException(
-          `${product.name}: carry + waste must equal counted remaining`
+          `${product.name}: carry + waste must equal counted remaining (±${tol}g)`
         );
       }
 
-      let lossCost = 0;
-      if (waste > 0 && product.cookRecipeId) {
-        const { costPerBase, recipe } = await this.costing.recipeUnitCost(product.cookRecipeId);
-        const wasteQty = this.costing.cookedGramsToRecipeQty({
-          baseUnit: recipe.baseUnit,
-          cookedGrams: waste,
-          plateGrams: toNumber(product.plateGrams),
-        });
-        lossCost = Math.round(costPerBase * wasteQty * 100) / 100;
+      // Book vs count shrink → fold into waste (hotel POS unexplained loss).
+      const shrink = Math.max(0, systemRem - counted);
+      let wasteNote = (line.wasteNote || "").trim();
+      if (shrink > tol) {
+        waste = Math.round((waste + shrink) * 1000) / 1000;
+        const shrinkNote = `Shrink ${Math.round(shrink)}g vs system`;
+        wasteNote = wasteNote ? `${wasteNote} · ${shrinkNote}` : shrinkNote;
       }
+
+      if (waste > tol && wasteNote.length < 3) {
+        throw new BadRequestException(
+          `${product.name}: waste / shrink needs a reason note (why leftover was lost)`
+        );
+      }
+      if (waste > tol && !product.cookRecipeId) {
+        throw new BadRequestException(
+          `${product.name}: set a cook recipe so waste can be costed`
+        );
+      }
+
+      const lossCost = await this.costForGrams(product, waste);
 
       lineData.push({
         specialProductId: product.id,
@@ -618,7 +732,7 @@ export class SpecialsService {
         countedRemainingGrams: counted,
         carryGrams: carry,
         wasteGrams: waste,
-        wasteNote: line.wasteNote?.trim() || null,
+        wasteNote: wasteNote || null,
         lossCost,
       });
     }

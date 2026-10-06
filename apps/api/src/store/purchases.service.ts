@@ -57,9 +57,10 @@ type LedgerPurchase = {
 };
 
 /** Account paid is stored on each bill (invoice day + later account payments allocated FIFO). */
-export function supplierBalance(purchases: LedgerPurchase[]) {
-  const purchased = money2(purchases.reduce((s, p) => s + supplierDue(p), 0));
-  const paid = money2(purchases.reduce((s, p) => s + toNumber(p.paidAmount), 0));
+export function supplierBalance(purchases: (LedgerPurchase & { voidedAt?: Date | null })[]) {
+  const live = purchases.filter((p) => !p.voidedAt);
+  const purchased = money2(live.reduce((s, p) => s + supplierDue(p), 0));
+  const paid = money2(live.reduce((s, p) => s + toNumber(p.paidAmount), 0));
   return { purchased, paid, outstanding: money2(purchased - paid) };
 }
 
@@ -75,7 +76,7 @@ async function allocateUnappliedPayments(tx: Tx, supplierId: string) {
 
   for (const pay of pending) {
     const purchases = await tx.purchase.findMany({
-      where: { supplierId },
+      where: { supplierId, voidedAt: null },
       orderBy: [{ purchasedAt: "asc" }, { createdAt: "asc" }],
       select: {
         id: true,
@@ -134,7 +135,7 @@ export class PurchasesService {
       where: { active: true },
       orderBy: { name: "asc" },
       include: {
-        purchases: { select: { total: true, paidAmount: true, extraExpense: true, extraExpensePaidBy: true } },
+        purchases: { select: { total: true, paidAmount: true, extraExpense: true, extraExpensePaidBy: true, voidedAt: true } },
       },
     });
     return rows.map((s) => {
@@ -236,6 +237,7 @@ export class PurchasesService {
       purchases: supplier.purchases.map((p) => {
         const due = supplierDue(p);
         const paidAmount = toNumber(p.paidAmount);
+        const voided = !!p.voidedAt;
         return {
           id: p.id,
           purchasedOn: localDate(p.purchasedAt),
@@ -245,8 +247,10 @@ export class PurchasesService {
           extraExpenseNote: p.extraExpenseNote,
           extraExpensePaidBy: p.extraExpensePaidBy,
           paidAmount,
-          balance: money2(due - paidAmount),
+          balance: voided ? 0 : money2(due - paidAmount),
           note: p.note,
+          voidedAt: p.voidedAt,
+          voidNote: p.voidNote,
           hasBillImage: !!p.billImagePath,
           lines: p.lines.map((l) => ({
             id: l.id,
@@ -383,13 +387,76 @@ export class PurchasesService {
     return this.purchaseDto(purchase.id);
   }
 
+  /** Reverse stock IN and drop bill from supplier balance. Cash return is handled offline. */
+  async voidPurchase(id: string, note?: string) {
+    const purchase = await this.prisma.purchase.findUnique({
+      where: { id },
+      include: {
+        lines: true,
+        supplier: { select: { id: true, name: true, active: true } },
+      },
+    });
+    if (!purchase) throw new NotFoundException("Purchase not found");
+    if (purchase.voidedAt) throw new BadRequestException("Purchase already voided");
+
+    await this.prisma.$transaction(async (tx) => {
+      for (const line of purchase.lines) {
+        const item = await tx.storeItem.findUniqueOrThrow({ where: { id: line.storeItemId } });
+        const onHand = toNumber(item.quantityOnHand);
+        const qty = toNumber(line.quantity);
+        if (qty - onHand > 0.0001) {
+          throw new BadRequestException(
+            `Cannot void — not enough ${item.name} left in stock (have ${onHand} ${item.unit}, need ${qty})`
+          );
+        }
+        await tx.storeItem.update({
+          where: { id: line.storeItemId },
+          data: { quantityOnHand: { decrement: qty } },
+        });
+        await tx.stockMovement.create({
+          data: {
+            storeItemId: line.storeItemId,
+            type: "OUT",
+            quantity: -qty,
+            ratePerUnit: line.ratePerUnit,
+            note: `Void purchase · ${purchase.supplier.name}`,
+            purchaseId: purchase.id,
+          },
+        });
+      }
+
+      // Unlink the bill's cash payment record so supplier paid total stays consistent.
+      if (toNumber(purchase.paidAmount) > 0.009) {
+        await tx.supplierPayment.deleteMany({
+          where: {
+            supplierId: purchase.supplierId,
+            note: `purchase:${purchase.id}`,
+            allocated: true,
+          },
+        });
+      }
+
+      await tx.purchase.update({
+        where: { id: purchase.id },
+        data: {
+          voidedAt: new Date(),
+          voidNote: (note || "Voided").trim().slice(0, 200),
+          paidAmount: 0,
+        },
+      });
+    });
+
+    await this.prisma.$transaction((tx) => allocateUnappliedPayments(tx, purchase.supplierId));
+    return this.purchaseDto(id);
+  }
+
   async paySupplier(id: string, dto: SupplierPaymentDto) {
     await this.prisma.$transaction((tx) => allocateUnappliedPayments(tx, id));
 
     const supplier = await this.prisma.supplier.findUnique({
       where: { id },
       include: {
-        purchases: { select: { total: true, paidAmount: true, extraExpense: true, extraExpensePaidBy: true } },
+        purchases: { select: { total: true, paidAmount: true, extraExpense: true, extraExpensePaidBy: true, voidedAt: true } },
       },
     });
     if (!supplier || !supplier.active) throw new NotFoundException("Supplier not found");
@@ -480,23 +547,11 @@ export class PurchasesService {
         lines: { include: { storeItem: { select: { name: true } } } },
       },
     });
-    const lines = rows.flatMap((p) =>
-      p.lines.map((l) => ({
-        id: l.id,
-        purchaseId: p.id,
-        supplier: p.supplier.name,
-        payKind: p.payKind,
-        item: l.storeItem.name,
-        category: l.categoryName,
-        unit: l.unit,
-        quantity: toNumber(l.quantity),
-        ratePerUnit: toNumber(l.ratePerUnit),
-        amount: toNumber(l.amount),
-      }))
+    const inventoryTotal = money2(
+      rows.filter((p) => !p.voidedAt).flatMap((p) => p.lines).reduce((s, l) => s + toNumber(l.amount), 0)
     );
-    const inventoryTotal = money2(lines.reduce((s, l) => s + l.amount, 0));
     const extras = rows
-      .filter((p) => toNumber(p.extraExpense) > 0)
+      .filter((p) => !p.voidedAt && toNumber(p.extraExpense) > 0)
       .map((p) => ({
         purchaseId: p.id,
         supplier: p.supplier.name,
@@ -505,10 +560,25 @@ export class PurchasesService {
         paidBy: p.extraExpensePaidBy,
       }));
     const extraTotal = money2(extras.reduce((s, e) => s + e.amount, 0));
+    const lines = rows.flatMap((p) =>
+      p.lines.map((l) => ({
+        id: l.id,
+        purchaseId: p.id,
+        supplier: p.supplier.name,
+        payKind: p.payKind,
+        voided: !!p.voidedAt,
+        item: l.storeItem.name,
+        category: l.categoryName,
+        unit: l.unit,
+        quantity: toNumber(l.quantity),
+        ratePerUnit: toNumber(l.ratePerUnit),
+        amount: toNumber(l.amount),
+      }))
+    );
     return {
       date,
-      purchaseCount: rows.length,
-      lineCount: lines.length,
+      purchaseCount: rows.filter((p) => !p.voidedAt).length,
+      lineCount: lines.filter((l) => !l.voided).length,
       total: inventoryTotal,
       extraExpenseTotal: extraTotal,
       extras,
@@ -540,6 +610,7 @@ export class PurchasesService {
     return rows.map((p) => {
       const paidAmount = toNumber(p.paidAmount);
       const due = supplierDue(p);
+      const voided = !!p.voidedAt;
       return {
         id: p.id,
         purchasedOn: localDate(p.purchasedAt),
@@ -550,9 +621,11 @@ export class PurchasesService {
         extraExpenseNote: p.extraExpenseNote,
         extraExpensePaidBy: p.extraExpensePaidBy,
         paidAmount,
-        outstanding: money2(due - paidAmount),
+        outstanding: voided ? 0 : money2(due - paidAmount),
         lineCount: p.lines.length,
         hasBillImage: !!p.billImagePath,
+        voided,
+        voidNote: p.voidNote,
       };
     });
   }
@@ -564,6 +637,7 @@ export class PurchasesService {
     });
     const paidAmount = toNumber(p.paidAmount);
     const due = supplierDue(p);
+    const voided = !!p.voidedAt;
     return {
       id: p.id,
       purchasedOn: localDate(p.purchasedAt),
@@ -574,8 +648,10 @@ export class PurchasesService {
       extraExpenseNote: p.extraExpenseNote,
       extraExpensePaidBy: p.extraExpensePaidBy,
       paidAmount,
-      outstanding: money2(due - paidAmount),
+      outstanding: voided ? 0 : money2(due - paidAmount),
       hasBillImage: !!p.billImagePath,
+      voided,
+      voidNote: p.voidNote,
       lines: p.lines.map((l) => ({
         item: l.storeItem.name,
         category: l.categoryName,

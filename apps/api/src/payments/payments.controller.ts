@@ -15,9 +15,10 @@ export class PaymentsController {
     @Query("from") from?: string,
     @Query("to") to?: string,
     @Query("status") status?: PaymentFilter["status"],
+    @Query("method") method?: PaymentFilter["method"],
     @Query("staffId") staffId?: string
   ) {
-    return this.payments.list({ from, to, status, staffId });
+    return this.payments.list({ from, to, status, method, staffId });
   }
 
   @Get("cashiers")

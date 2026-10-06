@@ -403,6 +403,9 @@ export function StorePage() {
               <button type="button" className="btn ok sm" onClick={() => openMove("IN")}>
                 {t("store.stockIn")}
               </button>
+              <button type="button" className="btn danger sm" onClick={() => openMove("OUT")}>
+                {t("store.stockOut")}
+              </button>
               <button type="button" className="btn ghost sm" onClick={() => openMove("ADJUST")}>
                 {t("store.adjust")}
               </button>
@@ -531,6 +534,13 @@ export function StorePage() {
                             </button>
                             <button
                               type="button"
+                              className="btn danger sm"
+                              onClick={() => openMove("OUT", i)}
+                            >
+                              {t("store.stockOut")}
+                            </button>
+                            <button
+                              type="button"
                               className="btn ghost sm"
                               onClick={() => openRateEdit(i)}
                             >
@@ -578,9 +588,9 @@ export function StorePage() {
                       <td>
                         <span
                           className={`badge ${
-                            m.type === "IN"
+                            m.type === "IN" || m.type === "RESTORE"
                               ? "paid"
-                              : m.type === "OUT" || m.type === "SALE"
+                              : m.type === "OUT" || m.type === "SALE" || m.type === "COOK"
                                 ? "unpaid"
                                 : "pending"
                           }`}

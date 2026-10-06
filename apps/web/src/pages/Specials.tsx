@@ -10,8 +10,10 @@ import { useHotelGate } from "../hotel-gate";
 
 type Recipe = { id: string; name: string; category: string };
 type SellMode = "BOTH" | "SERVING_ONLY" | "RS_ONLY";
+type KitchenStation = "BEVERAGES" | "COOKING" | "BBQ";
 
 const SERVING_PRESETS = ["Plate", "Glass", "Box", "Bowl", "Cup"] as const;
+const STATIONS: KitchenStation[] = ["BEVERAGES", "COOKING", "BBQ"];
 
 type SpecialProduct = {
   id: string;
@@ -22,6 +24,7 @@ type SpecialProduct = {
   platePrice: number;
   plateGrams: number;
   cookRecipeId: string | null;
+  kitchenStation?: KitchenStation;
   cookRecipe?: { id: string; name: string; category?: string } | null;
   menuItems?: { id: string; name: string; kind: string; sellingPrice: number }[];
 };
@@ -43,12 +46,36 @@ type TodayProduct = {
   remainingGrams: number;
   remainingPlates: number;
   maxRs: number;
+  cookCost?: number;
+  soldCost?: number;
+  remainingCost?: number;
+  soldValue?: number;
+  costPerKg?: number;
+  cookedByName?: string | null;
+  cookedAt?: string | null;
 };
 
 type TodayPayload = {
   businessDate: string;
   batchCloseDone: boolean;
+  dayCashClosed?: boolean;
+  locked?: boolean;
   products: TodayProduct[];
+  totals?: {
+    cookedGrams: number;
+    soldGrams: number;
+    remainingGrams: number;
+    cookCost: number;
+    soldCost: number;
+    remainingCost: number;
+    soldValue: number;
+    wasteGrams: number;
+    wasteLoss: number;
+    yieldPct: number;
+    foodMargin: number;
+    openPots: number;
+    closedPots: number;
+  };
 };
 
 type LossRow = {
@@ -76,6 +103,8 @@ export function SpecialsPage() {
   const [loss, setLoss] = useState<{ rows: LossRow[]; totalLoss: number; totalWasteGrams: number } | null>(
     null
   );
+  const [lossFrom, setLossFrom] = useState("");
+  const [lossTo, setLossTo] = useState("");
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
@@ -90,6 +119,7 @@ export function SpecialsPage() {
   const [plateKg, setPlateKg] = useState("0.25");
   const [cookRecipeId, setCookRecipeId] = useState("");
   const [recipeQ, setRecipeQ] = useState("");
+  const [kitchenStation, setKitchenStation] = useState<KitchenStation>("COOKING");
   const [cookKg, setCookKg] = useState<Record<string, string>>({});
 
   async function load() {
@@ -104,7 +134,10 @@ export function SpecialsPage() {
         setRecipes(await api<Recipe[]>("/recipes"));
       }
       if (can("close.view", "reports.view", "menu.manage")) {
-        setLoss(await api("/specials/loss"));
+        const params = new URLSearchParams();
+        if (lossFrom) params.set("from", lossFrom);
+        if (lossTo) params.set("to", lossTo);
+        setLoss(await api(`/specials/loss?${params}`));
       }
     } catch (e) {
       toast.push(e instanceof Error ? e.message : t("specials.loadFailed"), "err");
@@ -112,8 +145,9 @@ export function SpecialsPage() {
   }
 
   useEffect(() => {
-    load();
-  }, []);
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lossFrom, lossTo]);
 
   const shown = useMemo(
     () => products.filter((p) => matchesSearch(q, p.name, p.category, p.cookRecipe?.name)),
@@ -136,6 +170,7 @@ export function SpecialsPage() {
     setPlateKg("0.25");
     setCookRecipeId("");
     setRecipeQ("");
+    setKitchenStation("COOKING");
     setEditId(null);
   }
 
@@ -154,6 +189,7 @@ export function SpecialsPage() {
     setPlateKg(String(gramsToKg(p.plateGrams)));
     setCookRecipeId(p.cookRecipeId || "");
     setRecipeQ(p.cookRecipe ? `${p.cookRecipe.category ? p.cookRecipe.category + " · " : ""}${p.cookRecipe.name}` : "");
+    setKitchenStation(p.kitchenStation || "COOKING");
     setOpen(true);
   }
 
@@ -197,6 +233,7 @@ export function SpecialsPage() {
         platePrice: price,
         plateGrams: kgToGrams(kg),
         cookRecipeId,
+        kitchenStation,
       };
       if (editId) {
         await api(`/specials/products/${editId}`, { method: "PATCH", body: JSON.stringify(body) });
@@ -294,6 +331,46 @@ export function SpecialsPage() {
         )}
       </div>
 
+      {today?.locked && (
+        <div className="panel panel-pad alert-stale banner-row" style={{ marginBottom: "0.85rem" }}>
+          <p style={{ margin: 0 }}>{t("specials.lockedHint")}</p>
+        </div>
+      )}
+
+      {today?.totals && (
+        <div className="stats" style={{ marginBottom: "0.85rem" }}>
+          <div className="panel stat">
+            <span>{t("specials.kpiCooked")}</span>
+            <strong>{formatKg(today.totals.cookedGrams)}</strong>
+            <span className="tiny">{money(today.totals.cookCost)}</span>
+          </div>
+          <div className="panel stat">
+            <span>{t("specials.kpiSold")}</span>
+            <strong>{formatKg(today.totals.soldGrams)}</strong>
+            <span className="tiny">
+              {money(today.totals.soldValue)} · {t("specials.kpiCost")} {money(today.totals.soldCost)}
+            </span>
+          </div>
+          <div className="panel stat">
+            <span>{t("specials.kpiRemaining")}</span>
+            <strong>{formatKg(today.totals.remainingGrams)}</strong>
+            <span className="tiny">{money(today.totals.remainingCost)}</span>
+          </div>
+          <div className="panel stat">
+            <span>{t("specials.kpiMargin")}</span>
+            <strong style={{ color: today.totals.foodMargin < 0 ? "var(--danger)" : "var(--ok)" }}>
+              {money(today.totals.foodMargin)}
+            </strong>
+            <span className="tiny">{t("specials.kpiYield", { n: today.totals.yieldPct })}</span>
+          </div>
+          <div className={`panel stat ${today.totals.wasteLoss > 0 ? "alert-low" : ""}`}>
+            <span>{t("specials.kpiWaste")}</span>
+            <strong>{formatKg(today.totals.wasteGrams)}</strong>
+            <span className="tiny">{money(today.totals.wasteLoss)}</span>
+          </div>
+        </div>
+      )}
+
       <div className="panel panel-pad" style={{ marginBottom: "0.85rem" }}>
         <h3 style={{ marginTop: 0 }}>{t("specials.todayCook")}</h3>
         <p className="tiny muted" style={{ marginTop: 0 }}>
@@ -312,10 +389,12 @@ export function SpecialsPage() {
               <thead>
                 <tr>
                   <th>{t("common.item")}</th>
+                  <th>{t("common.status")}</th>
                   <th>{t("specials.carry")}</th>
                   <th>{t("specials.cooked")}</th>
                   <th>{t("specials.sold")}</th>
                   <th>{t("specials.remaining")}</th>
+                  <th>{t("specials.kpiCost")}</th>
                   {canCook && (
                     <th>
                       {t("specials.cookAction")} ({t("common.kg")})
@@ -331,6 +410,7 @@ export function SpecialsPage() {
                       <div className="tiny muted">
                         {money(p.platePrice)} / {(p.servingLabel || "Plate").toLowerCase()} ·{" "}
                         {formatKg(p.plateGrams)}
+                        {p.costPerKg ? ` · ${money(p.costPerKg)}/${t("common.kg")}` : ""}
                         {p.sellMode === "SERVING_ONLY"
                           ? ` · ${t("specials.sellServingOnly")}`
                           : p.sellMode === "RS_ONLY"
@@ -338,14 +418,34 @@ export function SpecialsPage() {
                             : ""}
                       </div>
                     </td>
+                    <td>
+                      {p.status === "CLOSED" ? (
+                        <span className="badge pending">{t("specials.statusClosed")}</span>
+                      ) : p.status === "OPEN" ? (
+                        <span className="badge paid">{t("specials.statusOpen")}</span>
+                      ) : (
+                        <span className="tiny muted">{t("specials.statusIdle")}</span>
+                      )}
+                    </td>
                     <td>{formatKg(p.openingCarryGrams)}</td>
-                    <td>{formatKg(p.cookedGrams)}</td>
-                    <td>{formatKg(p.soldGrams)}</td>
+                    <td>
+                      {formatKg(p.cookedGrams)}
+                      {(p.cookCost ?? 0) > 0 ? <div className="tiny muted">{money(p.cookCost!)}</div> : null}
+                    </td>
+                    <td>
+                      {formatKg(p.soldGrams)}
+                      {(p.soldValue ?? 0) > 0 ? (
+                        <div className="tiny muted">{money(p.soldValue!)}</div>
+                      ) : null}
+                    </td>
                     <td>
                       <strong>{formatKg(p.remainingGrams)}</strong>
                       <div className="tiny muted">
                         ≈ {p.remainingPlates.toFixed(1)} {p.servingLabel || "Plate"}
                       </div>
+                    </td>
+                    <td className="tiny">
+                      {(p.remainingCost ?? 0) > 0 ? money(p.remainingCost!) : "—"}
                     </td>
                     {canCook && (
                       <td>
@@ -357,7 +457,7 @@ export function SpecialsPage() {
                               placeholder="5"
                               value={cookKg[p.id] ?? ""}
                               onChange={(e) => setCookKg((s) => ({ ...s, [p.id]: e.target.value }))}
-                              disabled={busy || today.batchCloseDone}
+                              disabled={busy || today.batchCloseDone || !!today.locked}
                               title={t("specials.cookKgPh")}
                               aria-label={t("specials.cookKgPh")}
                             />
@@ -366,7 +466,7 @@ export function SpecialsPage() {
                           <button
                             type="button"
                             className="btn sm"
-                            disabled={busy || today.batchCloseDone}
+                            disabled={busy || today.batchCloseDone || !!today.locked}
                             onClick={() => cook(p.id)}
                           >
                             {t("specials.logCook")}
@@ -468,32 +568,66 @@ export function SpecialsPage() {
         </table>
       </div>
 
-      {loss && loss.rows.length > 0 && (
+      {can("close.view", "reports.view", "menu.manage") && (
         <div className="panel panel-pad" style={{ marginTop: "0.85rem" }}>
-          <h3 style={{ marginTop: 0 }}>{t("specials.lossTitle")}</h3>
-          <p className="tiny muted">
-            {t("specials.lossTotal")}: {money(loss.totalLoss)} · {formatKg(loss.totalWasteGrams)}
-          </p>
-          <table>
-            <thead>
-              <tr>
-                <th>{t("close.date")}</th>
-                <th>{t("common.item")}</th>
-                <th>{t("specials.waste")}</th>
-                <th>{t("specials.lossCost")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loss.rows.slice(0, 30).map((r, i) => (
-                <tr key={`${r.businessDate}-${r.name}-${i}`}>
-                  <td>{r.businessDate}</td>
-                  <td>{r.name}</td>
-                  <td>{formatKg(r.wasteGrams)}</td>
-                  <td>{money(r.lossCost)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap" }}>
+            <h3 style={{ marginTop: 0 }}>{t("specials.lossTitle")}</h3>
+            <div className="row" style={{ gap: "0.5rem" }}>
+              <div className="field" style={{ margin: 0 }}>
+                <label htmlFor="sp-loss-from">{t("payments.from")}</label>
+                <input
+                  id="sp-loss-from"
+                  className="field-ctrl"
+                  type="date"
+                  value={lossFrom}
+                  onChange={(e) => setLossFrom(e.target.value)}
+                />
+              </div>
+              <div className="field" style={{ margin: 0 }}>
+                <label htmlFor="sp-loss-to">{t("payments.to")}</label>
+                <input
+                  id="sp-loss-to"
+                  className="field-ctrl"
+                  type="date"
+                  value={lossTo}
+                  onChange={(e) => setLossTo(e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+          {loss && loss.rows.length > 0 ? (
+            <>
+              <p className="tiny muted">
+                {t("specials.lossTotal")}: {money(loss.totalLoss)} · {formatKg(loss.totalWasteGrams)}
+              </p>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{t("close.date")}</th>
+                      <th>{t("common.item")}</th>
+                      <th>{t("specials.waste")}</th>
+                      <th>{t("specials.lossCost")}</th>
+                      <th>{t("specials.wasteNote")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loss.rows.slice(0, 60).map((r, i) => (
+                      <tr key={`${r.businessDate}-${r.name}-${i}`}>
+                        <td>{r.businessDate}</td>
+                        <td>{r.name}</td>
+                        <td>{formatKg(r.wasteGrams)}</td>
+                        <td>{money(r.lossCost)}</td>
+                        <td className="tiny">{r.wasteNote || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : (
+            <div className="empty">{t("specials.lossEmpty")}</div>
+          )}
         </div>
       )}
 
@@ -631,6 +765,20 @@ export function SpecialsPage() {
                 </div>
               )}
               <p className="tiny muted">{t("specials.cookRecipeHint")}</p>
+            </div>
+            <div className="field">
+              <label>{t("specials.kitchenStation")}</label>
+              <select
+                value={kitchenStation}
+                onChange={(e) => setKitchenStation(e.target.value as KitchenStation)}
+              >
+                {STATIONS.map((s) => (
+                  <option key={s} value={s}>
+                    {t(`menu.station.${s}` as "menu.station.COOKING")}
+                  </option>
+                ))}
+              </select>
+              <p className="tiny muted">{t("specials.kitchenStationHint")}</p>
             </div>
           </div>
           <div className="form-actions">
