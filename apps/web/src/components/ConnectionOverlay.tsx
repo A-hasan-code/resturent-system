@@ -2,7 +2,16 @@ import { FormEvent, useEffect, useState } from "react";
 import { useT } from "../i18n";
 import { acquireScrollLock, releaseScrollLock } from "../scroll-lock";
 import { BrandLoader } from "./BrandLoader";
-import { connectManually, connStatus, onConnStatus, reportLost, scanProgress, type ConnStatus } from "../server";
+import {
+  connectManually,
+  connStatus,
+  offlineForMs,
+  offlineSessionLimitMs,
+  onConnStatus,
+  reportLost,
+  scanProgress,
+  type ConnStatus,
+} from "../server";
 
 export function ConnectionOverlay() {
   const t = useT();
@@ -12,6 +21,7 @@ export function ConnectionOverlay() {
   const [address, setAddress] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [offlineSec, setOfflineSec] = useState(0);
 
   useEffect(() => {
     const off = onConnStatus(setStatus);
@@ -22,7 +32,11 @@ export function ConnectionOverlay() {
 
   useEffect(() => {
     if (status === "ok") return;
-    const timer = setInterval(() => setDetail(scanProgress()), 400);
+    const timer = setInterval(() => {
+      setDetail(scanProgress());
+      const ms = offlineForMs();
+      setOfflineSec(ms == null ? 0 : Math.floor(ms / 1000));
+    }, 400);
     return () => clearInterval(timer);
   }, [status]);
 
@@ -51,6 +65,13 @@ export function ConnectionOverlay() {
           {status === "searching" ? t("conn.searchingBody") : t("conn.lostBody")}
         </p>
         {detail && <p className="tiny muted">{detail}</p>}
+        {offlineSec > 0 ? (
+          <p className="tiny muted">
+            {t("conn.offlineReloginHint", {
+              m: Math.max(1, Math.ceil((offlineSessionLimitMs() - offlineSec * 1000) / 60000)),
+            })}
+          </p>
+        ) : null}
         <div className="row" style={{ justifyContent: "center", marginTop: "0.75rem" }}>
           <button type="button" className="btn ghost sm" onClick={() => void reportLost()}>
             {t("conn.retryNow")}

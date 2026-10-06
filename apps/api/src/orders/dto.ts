@@ -16,6 +16,15 @@ import {
 import { Type } from "class-transformer";
 import { OrderStatus } from "@prisma/client";
 
+export class PerHeadPackageLineDto {
+  @IsString()
+  menuItemId!: string;
+
+  @IsNumber()
+  @Min(0.001)
+  quantity!: number;
+}
+
 export class OrderLineDto {
   /** MENU (default) or PER_HEAD cover charge. */
   @IsOptional()
@@ -29,6 +38,32 @@ export class OrderLineDto {
   @IsNumber()
   @Min(0.001)
   quantity!: number;
+
+  /** SPECIAL: PLATE (default) or RS. MIX uses MIX / MIX_SOLO_STORE server-side. */
+  @IsOptional()
+  @IsIn(["PLATE", "RS", "MIX"])
+  saleMode?: "PLATE" | "RS" | "MIX";
+
+  /** SPECIAL RS mode: rupees to convert into grams. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  amountRs?: number;
+
+  /** MIX: if special pot is out, sell store part only (e.g. sirf Rosh). */
+  @IsOptional()
+  @IsBoolean()
+  soloStoreFallback?: boolean;
+
+  /**
+   * With PER_HEAD: kitchen package lines (included, Rs 0).
+   * menuItemId must be in Settings per-head package.
+   */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PerHeadPackageLineDto)
+  packageLines?: PerHeadPackageLineDto[];
 
   @IsString()
   @IsOptional()
@@ -85,12 +120,50 @@ export class EditLineDto {
   quantity!: number;
 }
 
+/** New menu lines added during bill edit (paid or unpaid). */
+export class EditAddLineDto {
+  @IsString()
+  menuItemId!: string;
+
+  @IsNumber()
+  @Min(0.001)
+  quantity!: number;
+
+  @IsOptional()
+  @IsIn(["PLATE", "RS", "MIX"])
+  saleMode?: "PLATE" | "RS" | "MIX";
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  amountRs?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  soloStoreFallback?: boolean;
+
+  @IsString()
+  @IsOptional()
+  notes?: string;
+}
+
 export class EditOrderDto {
   @IsArray()
-  @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => EditLineDto)
   items!: EditLineDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => EditAddLineDto)
+  addItems?: EditAddLineDto[];
+
+  /** Required when editing a PAID bill (Main Cashier audit reason). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  reason?: string;
 
   /** Move the open bill onto this table. The previous table is released. */
   @IsOptional()

@@ -1,4 +1,4 @@
-import { columnsFor, EscPos, paperDotsFor, wrap } from "./escpos";
+import { columnsFor, EscPos, isNarrowPaper, normalizePaperWidth, paperDotsFor, wrap } from "./escpos";
 import { VENDOR } from "../common/vendor";
 import { logoRasterFromFile } from "./logo-raster";
 import { splitTableLabel } from "./table-label";
@@ -70,6 +70,8 @@ export type BillPayload = BillDesign & {
   partitionName?: string | null;
   tableName?: string | null;
   creditName?: string | null;
+  creditPhone?: string | null;
+  creditAddress?: string | null;
   cashier: string | null;
   waiter: string | null;
   /** Order-taker with role, e.g. "Ali (Manager)". */
@@ -87,6 +89,29 @@ export type BillPayload = BillDesign & {
   /** Cash the guest handed over (may exceed paidAmount). */
   tenderedAmount?: number;
   paymentStatus: string;
+};
+
+/** Cashier / admin confirmation slip after a PAID bill was edited. */
+export type BillEditConfirmPayload = {
+  restaurant: Restaurant;
+  orderNo: number;
+  billNo?: number;
+  tableNo: string | null;
+  partitionName?: string | null;
+  tableName?: string | null;
+  time: string;
+  reason: string;
+  beforeTotal: number;
+  afterTotal: number;
+  beforeNet: number;
+  afterNet: number;
+  editedBy: string;
+  items?: Array<{ name: string; beforeQty: number; afterQty: number; beforeAmount: number; afterAmount: number }>;
+  showLogo?: boolean;
+  showName?: boolean;
+  showPhone?: boolean;
+  showAddress?: boolean;
+  logoPath?: string | null;
 };
 
 export type TestPayload = {
@@ -139,30 +164,289 @@ function timePart(iso: string) {
   return `${h}:${pad(m)}:${pad(s)}${ampm}`;
 }
 
+/** Reference-style bill datetime: JUN 17, 2024 14:15 */
+function dateTimeBill(iso: string) {
+  const d = new Date(iso);
+  const mon = MONTHS[d.getMonth()].toUpperCase();
+  const pad = (x: number) => String(x).padStart(2, "0");
+  return `${mon} ${d.getDate()}, ${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function orderTypeLabel(p: { tableNo?: string | null; tableName?: string | null }) {
+  return p.tableNo || p.tableName ? "DINE IN" : "WALK IN";
+}
+
+function paymentModeLabel(p: { creditName?: string | null; paymentStatus: string }) {
+  if (p.creditName) return "Credit";
+  if (p.paymentStatus === "PAID") return "Cash";
+  return "Unpaid";
+}
+
 function place(p: { tableNo?: string | null; partitionName?: string | null; tableName?: string | null }) {
   return splitTableLabel(p.tableNo, p.partitionName, p.tableName);
 }
 
 function logoMaxDots(paperWidth: number) {
-  if (paperWidth <= 58) return 200;
-  if (paperWidth <= 72) return 240;
-  if (paperWidth <= 80) return 280;
-  return 320;
+  const w = normalizePaperWidth(paperWidth);
+  // Clear circular seal on the slip — large enough to read, not a tiny icon.
+  if (w <= 58) return 180;
+  if (w <= 72) return 220;
+  if (w <= 80) return 256;
+  return 300;
 }
 
+/** PAID / UNPAID stamp under totals (not over the item list). */
 function stampMaxDots(paperWidth: number) {
-  if (paperWidth <= 58) return 180;
-  if (paperWidth <= 72) return 210;
-  if (paperWidth <= 80) return 240;
-  return 280;
+  const w = normalizePaperWidth(paperWidth);
+  if (w <= 58) return 96;
+  if (w <= 72) return 112;
+  if (w <= 80) return 128;
+  return 144;
 }
 
-/** Product | Qty | Rate | Amount column widths (sum ≈ paper cols minus gaps). */
-function itemColWidths(cols: number): [number, number, number, number] {
-  if (cols <= 32) return [11, 4, 6, 8]; // 29 + 3 gaps = 32
-  if (cols <= 42) return [17, 5, 7, 10]; // 39 + 3 = 42
-  if (cols <= 48) return [21, 5, 8, 11]; // 45 + 3 = 48
-  return [28, 6, 10, 14]; // 58 + 3 = 61 ≈ 64
+function paymentStampRaster(
+  path: string | null | undefined,
+  paperWidth: number,
+  paperDots: number,
+) {
+  if (!path) return null;
+  const max = stampMaxDots(paperWidth);
+  return logoRasterFromFile(path, max, {
+    centerOnPaperDots: paperDots,
+    maxHeight: max,
+    mode: "stamp",
+  });
+}
+
+/** Wide (80mm+) Product | Qty | Rate | Amount — must sum to `cols`. */
+function itemColWidthsWide(cols: number): [number, number, number, number] {
+  if (cols <= 42) return [cols - 22, 4, 8, 10];
+  if (cols <= 48) return [cols - 26, 4, 10, 12];
+  return [cols - 32, 5, 12, 15];
+}
+
+/** Narrow (58mm) Product | Qty | Amt — must sum to `cols`. */
+function itemColWidthsNarrow(cols: number): [number, number, number] {
+  if (cols <= 32) return [cols - 12, 4, 8];
+  return [cols - 14, 5, 9];
+}
+
+type BillTotals = {
+  tip: number;
+  showTip: boolean;
+  discount: number;
+  net: number;
+  grand: number;
+  amountPaid: number;
+  cash: number;
+  balance: number;
+  change: number;
+  billNo: number;
+  customerName: string;
+  customerPhone: string;
+  customerAddr: string;
+  paid: boolean;
+  stampPath: string | null | undefined;
+  paidStamp: string;
+  showPaidStamp: boolean;
+  dots: number;
+};
+
+function billTotals(p: BillPayload, paperWidth: number): BillTotals {
+  const tip = p.tipAmount ?? 0;
+  const showTip = p.showTip !== false && tip > 0;
+  const billNo = p.billNo ?? p.orderNo;
+  const { partition, table } = place(p);
+  const discount = Math.max(0, p.discountAmount ?? 0);
+  const net = Math.max(0, p.total - discount);
+  const foodPaid = p.paidAmount > 0 ? p.paidAmount : p.paymentStatus === "PAID" ? net : 0;
+  const grand = net + (showTip ? tip : 0);
+  const amountPaid = foodPaid + (showTip && foodPaid > 0 ? tip : 0);
+  const cash =
+    (p.tenderedAmount ?? 0) > 0
+      ? p.tenderedAmount!
+      : amountPaid > 0
+        ? amountPaid
+        : p.paymentStatus === "PAID"
+          ? grand
+          : 0;
+  const balance = Math.max(0, grand - amountPaid);
+  const change = Math.max(0, cash - amountPaid);
+  const customerName = (p.creditName || "Walk In Guest").trim() || "Walk In Guest";
+  const customerPhone = (p.creditPhone || "").trim();
+  const tableLabel = [partition, table || p.tableNo].filter(Boolean).join(" ") || "Pickup Counter";
+  const customerAddr = (p.creditAddress || tableLabel).trim() || tableLabel;
+  const paid = p.paymentStatus === "PAID";
+  return {
+    tip,
+    showTip,
+    discount,
+    net,
+    grand,
+    amountPaid,
+    cash,
+    balance,
+    change,
+    billNo,
+    customerName,
+    customerPhone,
+    customerAddr,
+    paid,
+    stampPath: paid ? p.paidStampPath : p.unpaidStampPath,
+    paidStamp: (p.paidStampText || "*** PAID ***").trim() || "*** PAID ***",
+    showPaidStamp: p.showPaidStamp !== false,
+    dots: paperDotsFor(paperWidth),
+  };
+}
+
+function printBrandHeader(e: EscPos, p: BillPayload, paperWidth: number, dots: number) {
+  const showLogo = p.showLogo !== false;
+  const showName = p.showName !== false;
+  const showTagline = p.showTagline !== false;
+  const showAddress = p.showAddress !== false;
+  const showPhone = p.showPhone !== false;
+  const title = (p.title || "Customer Bill").trim() || "Customer Bill";
+  const r = p.restaurant;
+  e.align("center");
+  if (showLogo && p.logoPath) {
+    const img = logoRasterFromFile(p.logoPath, logoMaxDots(paperWidth), {
+      centerOnPaperDots: dots,
+      frame: false,
+      mode: "logo",
+      maxHeight: logoMaxDots(paperWidth),
+    });
+    if (img) e.raster(img);
+    else e.rasterMarker("[LOGO]");
+    e.line("");
+  }
+  // Hotel name — full paper width, bold, centered (readable on printer + preview).
+  if (showName && r.name) {
+    e.bold().wrapped(r.name.trim()).bold(false);
+  }
+  if (showPhone && r.phone) e.line(r.phone);
+  if (showAddress && r.address) e.wrapped(r.address);
+  if (showTagline && r.tagline) e.wrapped(r.tagline);
+  e.rule("=");
+  e.bold().line(title).bold(false);
+  e.rule("=");
+  e.align("left");
+}
+
+/** Clear PAID/UNPAID mark under the totals — never drawn over item prices. */
+function printPaidStamp(e: EscPos, t: BillTotals, paperWidth: number) {
+  if (!t.showPaidStamp) return;
+  const label = t.paid ? "[PAID STAMP SMALL]" : "[UNPAID STAMP SMALL]";
+  e.align("center").line("");
+  const stampImg = paymentStampRaster(t.stampPath, paperWidth, t.dots);
+  if (stampImg) e.raster(stampImg, label);
+  else {
+    e.rasterMarker(label);
+    e.bold().line(t.paid ? t.paidStamp : "*** UNPAID ***").bold(false);
+  }
+  e.align("left");
+}
+
+function printBillMeta(e: EscPos, p: BillPayload, t: BillTotals) {
+  const { partition, table } = place(p);
+  const tableLabel = [partition, table || p.tableNo].filter(Boolean).join(" ") || "Walk-in";
+  const party = (p.creditName || "General").trim() || "General";
+
+  e.pair(`Date: ${datePart(p.time)}`, `Time: ${timePart(p.time)}`);
+  e.pair(`Order #${p.orderNo}`, `Bill # ${t.billNo}`);
+  e.align("center").bold().line(`Token No: ${t.billNo}`).bold(false).align("left");
+  e.align("center")
+    .inverse(true)
+    .bold()
+    .big()
+    .line(` Table No. ${tableLabel} `)
+    .big(false)
+    .bold(false)
+    .inverse(false)
+    .align("left");
+  e.line(`Party Name: ${party}`);
+  if (t.customerPhone) e.line(`Phone: ${t.customerPhone}`);
+  if (p.showCashier !== false && p.cashier) e.line(`Cashier: ${p.cashier}`);
+  const orderedBy = p.orderedBy ?? p.waiter;
+  if (p.showOrderBy !== false && orderedBy) e.line(`Order by: ${orderedBy}`);
+  if (p.showServedBy !== false && p.servedBy) e.line(`Served by: ${p.servedBy}`);
+}
+
+function printBillTotals(e: EscPos, p: BillPayload, t: BillTotals) {
+  e.pair("Gross Total:", money(p.total));
+  if (t.discount > 0) e.pair("Discount:", money(t.discount));
+  if (t.discount > 0) e.pair("Net Total:", money(t.net));
+  if (t.showTip && t.tip > 0) e.pair("Tip:", money(t.tip));
+  if (t.cash > 0) {
+    e.line("");
+    e.boxLine("Cash Received :", money(t.cash));
+    if (t.change > 0) e.pair("Change:", money(t.change));
+  } else if (!t.paid) {
+    e.line(`Payment: ${p.paymentStatus}`);
+  }
+  if (t.balance > 0) e.pair("Balance:", money(t.balance));
+  if (p.receivedBy) e.line(`Received by: ${p.receivedBy}`);
+}
+
+/** Compact slip for 50/58mm rolls — same hotel bill structure, tighter columns. */
+function renderBillNarrow(p: BillPayload, paperWidth: number, t: BillTotals) {
+  const e = new EscPos(columnsFor(paperWidth));
+  const widths = itemColWidthsNarrow(e.cols);
+  printBrandHeader(e, p, paperWidth, t.dots);
+  printBillMeta(e, p, t);
+
+  e.rule("-");
+  e.bold().columns(["Product", "Qty", "Amt"], widths).bold(false);
+  e.rule("-");
+  for (const i of p.items) {
+    const nameLines = wrapName(i.name, widths[0]);
+    e.columns([nameLines[0], qtyNum(i.quantity), amountPlain(i.amount)], widths);
+    for (const extra of nameLines.slice(1)) e.columns([extra, "", ""], widths);
+    e.columns([`@${amountPlain(i.rate)}`, "", ""], widths);
+  }
+  e.rule("-");
+
+  printBillTotals(e, p, t);
+  printPaidStamp(e, t, paperWidth);
+
+  e.line("");
+  e.align("center").wrapped(p.footer || "Thanks for your Visit..");
+  e.line("");
+  e.line(VENDOR.line);
+  return e.feed(3).cut();
+}
+
+/** Full hotel bill for 72/80/112mm rolls (reference layout + thermal logo). */
+function renderBillWide(p: BillPayload, paperWidth: number, t: BillTotals) {
+  const e = new EscPos(columnsFor(paperWidth));
+  const widths = itemColWidthsWide(e.cols);
+  printBrandHeader(e, p, paperWidth, t.dots);
+  printBillMeta(e, p, t);
+
+  e.rule("-");
+  e.bold().columns(["Product", "Qty", "Rate", "Amount"], widths).bold(false);
+  e.rule("-");
+  for (const i of p.items) {
+    const nameLines = wrapName(i.name, widths[0]);
+    e.columns([nameLines[0], qtyNum(i.quantity), amountPlain(i.rate), amountPlain(i.amount)], widths);
+    for (const extra of nameLines.slice(1)) e.columns([extra, "", "", ""], widths);
+  }
+  e.rule("-");
+
+  printBillTotals(e, p, t);
+  printPaidStamp(e, t, paperWidth);
+
+  e.line("");
+  e.align("center").wrapped(p.footer || "Thanks for your Visit..");
+  e.line("");
+  e.line(VENDOR.line);
+  if (VENDOR.phoneDisplay) e.line(VENDOR.phoneDisplay);
+  return e.feed(3).cut();
+}
+
+export function renderBill(p: BillPayload, paperWidth: number) {
+  const mm = normalizePaperWidth(paperWidth);
+  const t = billTotals(p, mm);
+  return isNarrowPaper(mm) ? renderBillNarrow(p, mm, t) : renderBillWide(p, mm, t);
 }
 
 export function renderKot(p: KotPayload, paperWidth: number) {
@@ -181,10 +465,16 @@ export function renderKot(p: KotPayload, paperWidth: number) {
 
   e.align("center");
   if (showLogo && p.logoPath) {
-    const img = logoRasterFromFile(p.logoPath, logoMaxDots(paperWidth), { centerOnPaperDots: dots, frame: true });
+    const img = logoRasterFromFile(p.logoPath, logoMaxDots(paperWidth), {
+      centerOnPaperDots: dots,
+      frame: false,
+      mode: "logo",
+    });
     if (img) {
       e.raster(img);
       e.line("");
+    } else {
+      e.rasterMarker("[LOGO]");
     }
   }
   if (showName && p.restaurant?.name) e.bold().wrapped(p.restaurant.name).bold(false);
@@ -195,12 +485,7 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   if (p.station) e.line(`[ ${p.station} ]`);
   if (cancelled) {
     e.bold().big().line("*** CANCELLED ***").big(false).bold(false);
-    const stampImg = p.cancelledStampPath
-      ? logoRasterFromFile(p.cancelledStampPath, stampMaxDots(paperWidth), {
-          centerOnPaperDots: dots,
-          maxHeight: stampMaxDots(paperWidth),
-        })
-      : null;
+    const stampImg = paymentStampRaster(p.cancelledStampPath, paperWidth, dots);
     if (stampImg) e.raster(stampImg, "[CANCELLED STAMP]");
     else e.bold().line("*** ORDER CANCELLED ***").bold(false);
   } else if (p.reprint) {
@@ -213,12 +498,24 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   e.align("center").bold().line(`Token No: ${p.orderNo}`).bold(false).align("left");
   if (partition) e.line(`Partition: ${partition}`);
   if (table || p.tableNo) e.line(`Table: ${table || p.tableNo}`);
-  e.align("center").inverse(true).bold().line(` Table No. ${tableLabel} `).bold(false).inverse(false).align("left");
+  e.align("center")
+    .inverse(true)
+    .bold()
+    .big()
+    .line(` Table No. ${tableLabel} `)
+    .big(false)
+    .bold(false)
+    .inverse(false)
+    .align("left");
   if (p.round && !cancelled) e.align("center").bold().line(`Round ${p.round}`).bold(false).align("left");
 
   e.rule("-");
   const qtyWidth = e.cols <= 32 ? 9 : 10;
-  for (const i of p.items) {
+  const isPerHeadPkg = (notes: string | null | undefined) =>
+    !!notes && /^per\s*head\b/i.test(notes.trim());
+  const perHeadItems = p.items.filter((i) => isPerHeadPkg(i.notes));
+  const otherItems = p.items.filter((i) => !isPerHeadPkg(i.notes));
+  const printKotLine = (i: (typeof p.items)[number], hidePerHeadNote = false) => {
     const q = qty(i.quantity, i.unit);
     const nameWidth = Math.max(6, e.width() - qtyWidth - 1);
     const names = wrap(i.name, nameWidth);
@@ -229,8 +526,14 @@ export function renderKot(p: KotPayload, paperWidth: number) {
       e.bold().line(`${q.padEnd(qtyWidth)} ${names[0] || ""}`.trimEnd()).bold(false);
       for (const extra of names.slice(1)) e.line(`${" ".repeat(qtyWidth)} ${extra}`);
     }
-    if (i.notes) e.wrapped(`>> ${i.notes}`);
+    if (i.notes && !(hidePerHeadNote && isPerHeadPkg(i.notes))) e.wrapped(`>> ${i.notes}`);
+  };
+  if (perHeadItems.length) {
+    e.align("center").bold().line("--- PER HEAD ITEMS ---").bold(false).align("left");
+    for (const i of perHeadItems) printKotLine(i, true);
+    if (otherItems.length) e.rule("-");
   }
+  for (const i of otherItems) printKotLine(i);
   e.rule("-");
 
   if (p.notes) e.wrapped(`Note: ${p.notes}`).rule("-");
@@ -257,119 +560,70 @@ export function renderKot(p: KotPayload, paperWidth: number) {
   return e.feed(4).beep().cut();
 }
 
-export function renderBill(p: BillPayload, paperWidth: number) {
+/** Special slip for cashier + admin: paid bill was edited (reason, before/after, sign). */
+export function renderBillEditConfirm(p: BillEditConfirmPayload, paperWidth: number) {
   const e = new EscPos(columnsFor(paperWidth));
-  const r = p.restaurant;
-  const tip = p.tipAmount ?? 0;
-  const showTip = p.showTip !== false && tip > 0;
-  const showLogo = p.showLogo !== false;
-  const showName = p.showName !== false;
-  const showTagline = p.showTagline !== false;
-  const showAddress = p.showAddress !== false;
-  const showPhone = p.showPhone !== false;
-  const title = (p.title || "Customer Bill").trim() || "Customer Bill";
-  const paidStamp = (p.paidStampText || "*** PAID ***").trim() || "*** PAID ***";
-  const showPaidStamp = p.showPaidStamp !== false;
-  const paidStampBig = p.paidStampBig !== false;
-  const billNo = p.billNo ?? p.orderNo;
   const { partition, table } = place(p);
   const dots = paperDotsFor(paperWidth);
-  const discount = Math.max(0, p.discountAmount ?? 0);
-  const net = Math.max(0, p.total - discount);
-  const foodPaid = p.paidAmount > 0 ? p.paidAmount : p.paymentStatus === "PAID" ? net : 0;
-  const grand = net + (showTip ? tip : 0);
-  const cash =
-    (p.tenderedAmount ?? 0) > 0
-      ? p.tenderedAmount!
-      : foodPaid > 0
-        ? foodPaid + (showTip ? tip : 0)
-        : p.paymentStatus === "PAID"
-          ? grand
-          : 0;
-  const change = Math.max(0, cash - foodPaid - (showTip ? tip : 0));
-  const party = (p.creditName || "General").trim() || "General";
-  const tableLabel = [partition, table || p.tableNo].filter(Boolean).join(" ") || "Walk-in";
-  const widths = itemColWidths(e.cols);
+  const showLogo = p.showLogo !== false;
+  const showName = p.showName !== false;
+  const showPhone = p.showPhone !== false;
+  const showAddress = p.showAddress !== false;
+  const diff = Math.round((p.afterNet - p.beforeNet) * 100) / 100;
 
-  // Header: logo → name → phone → address → Customer Bill (matches sample slip)
   e.align("center");
   if (showLogo && p.logoPath) {
-    const img = logoRasterFromFile(p.logoPath, logoMaxDots(paperWidth), { centerOnPaperDots: dots, frame: true });
+    const img = logoRasterFromFile(p.logoPath, logoMaxDots(paperWidth), {
+      centerOnPaperDots: dots,
+      frame: false,
+      mode: "logo",
+    });
     if (img) {
       e.raster(img);
       e.line("");
     }
   }
-  if (showName) e.bold().wrapped(r.name).bold(false);
-  if (showPhone && r.phone) e.line(r.phone);
-  if (showAddress && r.address) e.wrapped(r.address);
-  if (showTagline && r.tagline) e.wrapped(r.tagline);
+  if (showName && p.restaurant?.name) e.bold().wrapped(p.restaurant.name).bold(false);
+  if (showPhone && p.restaurant?.phone) e.line(p.restaurant.phone);
+  if (showAddress && p.restaurant?.address) e.wrapped(p.restaurant.address);
   e.line("");
-  e.bold().line(title).bold(false);
+  e.bold().big().line("PAID BILL EDIT").big(false).bold(false);
+  e.bold().line("CASHIER CONFIRMATION").bold(false);
+  e.line("(Not a customer copy)");
   e.align("left").line("");
 
   e.pair(`Date: ${datePart(p.time)}`, `Time: ${timePart(p.time)}`);
-  e.pair(`Order #${p.orderNo}`, `Bill # ${billNo}`);
-  e.align("center").bold().line(`Token No: ${billNo}`).bold(false).align("left");
+  e.pair(`Order #${p.orderNo}`, `Bill # ${p.billNo ?? p.orderNo}`);
   if (partition) e.line(`Partition: ${partition}`);
   if (table || p.tableNo) e.line(`Table: ${table || p.tableNo}`);
-  e.align("center").inverse(true).bold().line(` Table No. ${tableLabel} `).bold(false).inverse(false).align("left");
-  e.line(`Party Name: ${party}`);
-  if (p.showCashier !== false && p.cashier) e.line(`Cashier: ${p.cashier}`);
-  const orderedBy = p.orderedBy ?? p.waiter;
-  if (p.showOrderBy !== false && orderedBy) e.line(`Order by: ${orderedBy}`);
-  if (p.showServedBy !== false && p.servedBy) e.line(`Served by: ${p.servedBy}`);
-
+  e.line(`Cashier: ${p.editedBy}`);
+  e.rule("=");
+  e.bold().line("EDITED AFTER PAYMENT").bold(false);
+  e.pair("Before amount:", money(p.beforeNet));
+  e.pair("After amount:", money(p.afterNet));
+  e.pair("Difference:", `${diff > 0 ? "+" : ""}${money(diff)}`);
   e.rule("-");
-  e.bold().columns(["Product", "Qty", "Rate", "Amount"], widths).bold(false);
-  e.rule("-");
-  for (const i of p.items) {
-    const nameLines = wrapName(i.name, widths[0]);
-    e.columns([nameLines[0], qtyNum(i.quantity), amountPlain(i.rate), amountPlain(i.amount)], widths);
-    for (const extra of nameLines.slice(1)) e.line(extra);
-  }
-  e.rule("-");
-
-  e.pair("Gross Total:", money(p.total));
-  if (discount > 0) e.pair("Discount:", money(discount));
-  if (discount > 0) e.pair("Net Total:", money(net));
-  if (showTip && tip > 0) e.pair("Tip:", money(tip));
-  if (cash > 0) {
-    e.line("");
-    e.boxLine("Cash Received :", money(cash));
-    if (change > 0) e.pair("Change:", money(change));
-  } else if (p.paymentStatus !== "PAID") {
-    e.line(`Payment: ${p.paymentStatus}`);
-  }
-  if (foodPaid > 0 && foodPaid < net) e.pair("Balance:", money(net - foodPaid));
-  if (p.receivedBy) e.line(`Received by: ${p.receivedBy}`);
-
-  if (showPaidStamp) {
-    const paid = p.paymentStatus === "PAID";
-    const stampPath = paid ? p.paidStampPath : p.unpaidStampPath;
-    e.align("center").line("");
-    const stampImg = stampPath
-      ? logoRasterFromFile(stampPath, stampMaxDots(paperWidth), {
-          centerOnPaperDots: dots,
-          maxHeight: stampMaxDots(paperWidth),
-        })
-      : null;
-    if (stampImg) e.raster(stampImg, paid ? "[PAID STAMP]" : "[UNPAID STAMP]");
-    else if (paid) {
-      e.bold();
-      if (paidStampBig) e.big();
-      e.line(paidStamp);
-      if (paidStampBig) e.big(false);
-      e.bold(false);
+  e.line("Reason:");
+  for (const line of wrap(p.reason, e.cols)) e.line(line);
+  if (p.items?.length) {
+    e.rule("-");
+    e.bold().line("Item changes").bold(false);
+    for (const it of p.items) {
+      e.line(it.name);
+      e.pair(
+        `  ${qtyNum(it.beforeQty)} → ${qtyNum(it.afterQty)}`,
+        `${money(it.beforeAmount)} → ${money(it.afterAmount)}`
+      );
     }
-    e.align("left");
   }
-
+  e.rule("=");
   e.line("");
-  e.align("center").wrapped(p.footer || "Thanks for your Visit..");
+  e.line("Cashier sign: ________________");
   e.line("");
+  e.line("Admin / SM confirm: __________");
+  e.line("");
+  e.align("center").line("Keep with day close report");
   e.line(VENDOR.line);
-  e.line(VENDOR.phoneDisplay);
   return e.feed(4).cut();
 }
 
@@ -420,6 +674,8 @@ export function sampleBillPayload(restaurant: Restaurant, design: BillDesign, pa
       partitionName: "Roof Top",
       tableName: "Table 4",
       creditName: null,
+      creditPhone: null,
+      creditAddress: null,
       cashier: "Cashier",
       waiter: "Ali",
       orderedBy: "Ali (Waiter)",

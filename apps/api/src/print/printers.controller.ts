@@ -18,7 +18,7 @@ import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
 import { PrismaService } from "../prisma/prisma.service";
 import { PrintService } from "./print.service";
-import { listWindowsPrinters } from "./drivers";
+import { listUsbDevices, listWindowsPrinters } from "./drivers";
 
 const MANUAL_KINDS = [PrinterKind.WINDOWS, PrinterKind.NETWORK, PrinterKind.FILE] as const;
 
@@ -96,6 +96,17 @@ export class PrintersController {
   async system() {
     try {
       return await listWindowsPrinters();
+    } catch {
+      return [];
+    }
+  }
+
+  /** USB / PnP devices on the main server PC (incl. Unknown USB missing drivers). */
+  @Get("devices")
+  @RequirePerms("printers.manage")
+  async devices() {
+    try {
+      return await listUsbDevices();
     } catch {
       return [];
     }

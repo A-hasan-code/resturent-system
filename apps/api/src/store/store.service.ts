@@ -18,6 +18,12 @@ export class StoreService {
   constructor(private readonly prisma: PrismaService) {}
 
   async categories() {
+    // Fix any rows that went negative from older forced cook/sales — never show below 0.
+    await this.prisma.storeItem.updateMany({
+      where: { quantityOnHand: { lt: 0 } },
+      data: { quantityOnHand: 0 },
+    });
+
     const rows = await this.prisma.storeCategory.findMany({
       orderBy: { sortOrder: "asc" },
       include: {

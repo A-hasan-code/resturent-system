@@ -17,6 +17,7 @@ import { AuditModule } from "./audit/audit.controller";
 import { ExpensesModule } from "./expenses/expenses.controller";
 import { CloseModule } from "./close/close.controller";
 import { CreditModule } from "./credit/credit.module";
+import { SpecialsModule } from "./specials/specials.module";
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { CreditModule } from "./credit/credit.module";
     ExpensesModule,
     CloseModule,
     CreditModule,
+    SpecialsModule,
   ],
 })
 export class AppModule {}

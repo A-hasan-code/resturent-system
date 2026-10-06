@@ -1,8 +1,8 @@
 {
   "name": "@hotel/mobile",
-  "version": "1.4.0",
+  "version": "1.4.11",
   "private": true,
-  "description": "Android app (Capacitor) — bundles the web UI and finds the server on the LAN natively",
+  "description": "Android app (Capacitor) Ã¢â‚¬â€ bundles the web UI and finds the server on the LAN natively",
   "scripts": {
     "sync": "cap sync android",
     "open": "cap open android"

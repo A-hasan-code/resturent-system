@@ -1,8 +1,9 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import { api, money } from "../api";
 import { useAuth } from "../auth";
-import { useT, type MessageKey } from "../i18n";
+import { useI18n, useT, type MessageKey } from "../i18n";
 import { useToast } from "../toast";
+import { useConfirm } from "../components/ConfirmModal";
 import { Modal } from "../components/Modal";
 import { Pagination, paginate } from "../components/Pagination";
 import { SearchField, matchesSearch } from "../components/SearchField";
@@ -22,8 +23,48 @@ type StaffUser = {
   createdAt: string;
 };
 
+type UserStats = {
+  billHistory: number;
+  billsAsCashier: number;
+  billsAsWaiter: number;
+  billsAssigned: number;
+  billsCancelled: number;
+  paymentsCollected: number;
+  paymentsCollectedAmount: number;
+  tipsCollectedOnPayments: number;
+  cashHandovers: number;
+  tipShares: number;
+  tipSharesAmount: number;
+  billEdits: number;
+};
+
+type RecentBill = {
+  id: string;
+  orderNo: number;
+  tableNo: string | null;
+  status: string;
+  paymentStatus: string;
+  total: number;
+  paidAmount: number;
+  createdAt: string;
+  roles: string[];
+};
+
+type UserDetail = StaffUser & {
+  stats: UserStats;
+  recentBills: RecentBill[];
+};
+
 type Role = { code: string; name: string };
-type BillPrinter = { id: string; name: string; station: string; printsBill: boolean; active: boolean };
+type BillPrinter = {
+  id: string;
+  name: string;
+  station: string;
+  printsBill: boolean;
+  active: boolean;
+  kind?: string;
+  agent?: { displayName: string; hostname: string; online: boolean } | null;
+};
 
 type Draft = {
   id?: string;
@@ -69,16 +110,34 @@ function roleKey(code: string): MessageKey {
   return `role.${code}` as MessageKey;
 }
 
+function fmtWhen(iso: string, locale: string) {
+  try {
+    return new Date(iso).toLocaleString(locale === "ur" ? "ur-PK" : "en-PK", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
+
 export function UsersPage() {
   const { user } = useAuth();
   const toast = useToast();
+  const ask = useConfirm();
   const t = useT();
+  const { ts, locale } = useI18n();
   const [users, setUsers] = useState<StaffUser[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
   const [billPrinters, setBillPrinters] = useState<BillPrinter[]>([]);
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [detail, setDetail] = useState<UserDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const isAdmin = user?.roleCode === "ADMIN";
 
@@ -109,7 +168,39 @@ export function UsersPage() {
     setPage(1);
   }, [q]);
 
+  async function openDetail(u: StaffUser) {
+    setDetailLoading(true);
+    setDetail({
+      ...u,
+      stats: {
+        billHistory: 0,
+        billsAsCashier: 0,
+        billsAsWaiter: 0,
+        billsAssigned: 0,
+        billsCancelled: 0,
+        paymentsCollected: 0,
+        paymentsCollectedAmount: 0,
+        tipsCollectedOnPayments: 0,
+        cashHandovers: 0,
+        tipShares: 0,
+        tipSharesAmount: 0,
+        billEdits: 0,
+      },
+      recentBills: [],
+    });
+    try {
+      const d = await api<UserDetail>(`/users/${u.id}`);
+      setDetail(d);
+    } catch (err) {
+      setDetail(null);
+      toast.push(errMsg(err, t("users.loadFailed")), "err");
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
   function edit(u: StaffUser) {
+    setDetail(null);
     setDraft({
       id: u.id,
       name: u.name,
@@ -175,8 +266,31 @@ export function UsersPage() {
         "ok"
       );
       void load();
+      if (detail?.id === u.id) void openDetail({ ...u, active });
     } catch (err) {
       toast.push(errMsg(err, t("common.failed")), "err");
+    }
+  }
+
+  async function removeUser(u: StaffUser) {
+    if (
+      !(await ask({
+        title: t("users.deleteTitle"),
+        body: t("users.deleteConfirm", { name: u.name }),
+        confirmLabel: t("common.delete"),
+        danger: true,
+      }))
+    ) {
+      return;
+    }
+    try {
+      await api(`/users/${u.id}`, { method: "DELETE" });
+      toast.push(t("users.deleted", { name: u.name }), "ok");
+      if (draft?.id === u.id) setDraft(null);
+      if (detail?.id === u.id) setDetail(null);
+      void load();
+    } catch (err) {
+      toast.push(errMsg(err, t("users.deleteFailed")), "err");
     }
   }
 
@@ -186,6 +300,14 @@ export function UsersPage() {
     const key = roleKey(code);
     const translated = t(key);
     return translated === key ? fallback : translated;
+  }
+
+  function billRoleLabel(code: string) {
+    if (code === "cashier") return t("users.roleCashier");
+    if (code === "waiter") return t("users.roleWaiter");
+    if (code === "assigned") return t("users.roleAssigned");
+    if (code === "cancelled") return t("users.roleCancelled");
+    return code;
   }
 
   return (
@@ -218,7 +340,14 @@ export function UsersPage() {
             {pageRows.map((u) => (
               <tr key={u.id} className={u.active ? "" : "inactive-row"}>
                 <td>
-                  <strong>{u.name}</strong>
+                  <button
+                    type="button"
+                    className="linkish"
+                    disabled={locked(u)}
+                    onClick={() => void openDetail(u)}
+                  >
+                    <strong>{u.name}</strong>
+                  </button>
                   {u.id === user?.id && <span className="tiny muted"> {t("common.you")}</span>}
                 </td>
                 <td>@{u.username}</td>
@@ -231,18 +360,31 @@ export function UsersPage() {
                   </span>
                 </td>
                 <td className="row">
+                  <button type="button" className="btn ghost sm" disabled={locked(u)} onClick={() => void openDetail(u)}>
+                    {t("users.view")}
+                  </button>
                   <button type="button" className="btn ghost sm" disabled={locked(u)} onClick={() => edit(u)}>
                     {t("common.edit")}
                   </button>
                   {u.id !== user?.id && (
-                    <button
-                      type="button"
-                      className={`btn sm ${u.active ? "danger" : "ok"}`}
-                      disabled={locked(u)}
-                      onClick={() => void setActive(u, !u.active)}
-                    >
-                      {u.active ? t("users.disable") : t("users.enable")}
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className={`btn sm ${u.active ? "ghost" : "ok"}`}
+                        disabled={locked(u)}
+                        onClick={() => void setActive(u, !u.active)}
+                      >
+                        {u.active ? t("users.disable") : t("users.enable")}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn sm danger"
+                        disabled={locked(u)}
+                        onClick={() => void removeUser(u)}
+                      >
+                        {t("common.delete")}
+                      </button>
+                    </>
                   )}
                 </td>
               </tr>
@@ -261,6 +403,165 @@ export function UsersPage() {
           {t("users.footer")}
         </p>
       </div>
+
+      <Modal
+        wide
+        open={!!detail}
+        title={detail ? `${t("users.details")} · ${detail.name}` : t("users.details")}
+        onClose={() => setDetail(null)}
+      >
+        {detail && (
+          <div className="user-form user-detail">
+            <div className="modal-scroll">
+              <section className="form-section">
+                <h3>{t("users.profile")}</h3>
+                <dl className="user-detail-meta">
+                  <div>
+                    <dt>{t("common.name")}</dt>
+                    <dd>{detail.name}</dd>
+                  </div>
+                  <div>
+                    <dt>{t("users.username")}</dt>
+                    <dd>@{detail.username}</dd>
+                  </div>
+                  <div>
+                    <dt>{t("users.role")}</dt>
+                    <dd>{roleLabel(detail.roleCode, detail.roleName)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t("common.status")}</dt>
+                    <dd>
+                      <span className={`badge ${detail.active ? "ready" : "unpaid"}`}>
+                        {detail.active ? t("common.active") : t("common.disabled")}
+                      </span>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{t("users.pinLogin")}</dt>
+                    <dd>{detail.hasPin ? t("users.set") : "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>{t("users.createdAt")}</dt>
+                    <dd>{fmtWhen(detail.createdAt, locale)}</dd>
+                  </div>
+                  <div className="user-detail-meta-wide">
+                    <dt>{t("users.billPrinter")}</dt>
+                    <dd>{detail.billPrinterName || t("users.billPrinterDefault")}</dd>
+                  </div>
+                </dl>
+              </section>
+
+              <section className="form-section">
+                <h3>{t("users.activity")}</h3>
+                {detailLoading ? (
+                  <p className="hint">{t("common.loading")}</p>
+                ) : (
+                  <div className="user-stats">
+                    {(
+                      [
+                        { label: t("users.statBillHistory"), value: detail.stats.billHistory },
+                        { label: t("users.statAsCashier"), value: detail.stats.billsAsCashier },
+                        { label: t("users.statAsWaiter"), value: detail.stats.billsAsWaiter },
+                        { label: t("users.statAssigned"), value: detail.stats.billsAssigned },
+                        {
+                          label: t("users.statPayments"),
+                          value: detail.stats.paymentsCollected,
+                          sub: money(detail.stats.paymentsCollectedAmount),
+                        },
+                        {
+                          label: t("users.statTips"),
+                          value: detail.stats.tipShares,
+                          sub: money(detail.stats.tipSharesAmount),
+                        },
+                        { label: t("users.statCancelled"), value: detail.stats.billsCancelled },
+                        { label: t("users.statBillEdits"), value: detail.stats.billEdits },
+                      ] as { label: string; value: number; sub?: string }[]
+                    ).map((s) => (
+                      <div key={s.label} className="user-stat">
+                        <span>{s.label}</span>
+                        <strong>{s.value}</strong>
+                        <small>{s.sub ?? "\u00a0"}</small>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="form-section form-section-last">
+                <h3>{t("users.recentBills")}</h3>
+                {detailLoading ? (
+                  <p className="hint">{t("common.loading")}</p>
+                ) : detail.recentBills.length ? (
+                  <div className="table-wrap user-bills-wrap">
+                    <table className="user-bills-table">
+                      <thead>
+                        <tr>
+                          <th>{t("users.billNo")}</th>
+                          <th>{t("users.table")}</th>
+                          <th>{t("common.status")}</th>
+                          <th>{t("users.payment")}</th>
+                          <th>{t("users.onBillAs")}</th>
+                          <th className="num">{t("users.amount")}</th>
+                          <th>{t("users.when")}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.recentBills.map((b) => (
+                          <tr key={b.id}>
+                            <td className="num">#{b.orderNo}</td>
+                            <td>{b.tableNo || "—"}</td>
+                            <td>
+                              <span className="badge pending">{ts(b.status)}</span>
+                            </td>
+                            <td>
+                              <span className={`badge ${b.paymentStatus === "PAID" ? "paid" : "unpaid"}`}>
+                                {ts(b.paymentStatus)}
+                              </span>
+                            </td>
+                            <td>{b.roles.map(billRoleLabel).join(", ") || "—"}</td>
+                            <td className="num">{money(b.total)}</td>
+                            <td className="when">{fmtWhen(b.createdAt, locale)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="hint">{t("users.noBills")}</p>
+                )}
+              </section>
+            </div>
+            <div className="form-footer user-detail-footer">
+              <button className="btn ghost" type="button" onClick={() => setDetail(null)}>
+                {t("common.close")}
+              </button>
+              <button className="btn ghost" type="button" onClick={() => edit(detail)}>
+                {t("common.edit")}
+              </button>
+              {detail.id !== user?.id && (
+                <>
+                  <button
+                    type="button"
+                    className={`btn ${detail.active ? "ghost" : "ok"}`}
+                    disabled={locked(detail)}
+                    onClick={() => void setActive(detail, !detail.active)}
+                  >
+                    {detail.active ? t("users.disable") : t("users.enable")}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn danger"
+                    disabled={locked(detail)}
+                    onClick={() => void removeUser(detail)}
+                  >
+                    {t("common.delete")}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </Modal>
 
       <Modal
         wide
@@ -386,11 +687,21 @@ export function UsersPage() {
                   onChange={(e) => setDraft({ ...draft, billPrinterId: e.target.value })}
                 >
                   <option value="">{t("users.billPrinterDefault")}</option>
-                  {billPrinters.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.station ? `${p.name} · ${p.station}` : p.name}
-                    </option>
-                  ))}
+                  {billPrinters.map((p) => {
+                    const pc =
+                      p.agent?.displayName || p.agent?.hostname || p.station || "";
+                    const online =
+                      p.agent == null
+                        ? ""
+                        : p.agent.online
+                          ? ` · ${t("settings.agentOnline")}`
+                          : ` · ${t("settings.agentOffline")}`;
+                    return (
+                      <option key={p.id} value={p.id}>
+                        {pc ? `${pc} — ${p.name}${online}` : p.name}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
             </section>

@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, money } from "../api";
+import { api, formatKg, gramsToKg, kgToGrams, money } from "../api";
 import { useAuth } from "../auth";
 import { DateField } from "../components/DateField";
 import { useT } from "../i18n";
@@ -206,6 +206,43 @@ function CloseBars({
   );
 }
 
+type BatchCloseLineDraft = {
+  specialProductId: string;
+  name: string;
+  systemRemainingGrams: number;
+  countedRemainingGrams: string;
+  carryGrams: string;
+  wasteGrams: string;
+  wasteNote: string;
+};
+
+type BatchPreview = {
+  businessDate: string;
+  batchCloseDone: boolean;
+  dayCashClosed?: boolean;
+  products: {
+    id: string;
+    name: string;
+    remainingGrams: number;
+    cookedGrams: number;
+    soldGrams: number;
+    status: string | null;
+  }[];
+  existingClose: {
+    id: string;
+    lines: {
+      specialProductId: string;
+      systemRemainingGrams: number;
+      countedRemainingGrams: number;
+      carryGrams: number;
+      wasteGrams: number;
+      lossCost: number;
+      wasteNote: string | null;
+      specialProduct: { name: string };
+    }[];
+  } | null;
+};
+
 export function CloseReportPage() {
   const t = useT();
   const toast = useToast();
@@ -238,6 +275,9 @@ export function CloseReportPage() {
     COUNTER_1: 1,
     COUNTER_2: 1,
   });
+  const [batchPreview, setBatchPreview] = useState<BatchPreview | null>(null);
+  const [batchLines, setBatchLines] = useState<BatchCloseLineDraft[]>([]);
+
 
   useEffect(() => {
     setSoldPage(1);
@@ -266,6 +306,31 @@ export function CloseReportPage() {
         }
         setCollected(nextCollected);
         setReasons(nextReasons);
+        if (data.isToday) {
+          try {
+            const bp = await api<BatchPreview>("/specials/close-preview");
+            setBatchPreview(bp);
+            setBatchLines(
+              bp.products
+                .filter((p) => p.remainingGrams > 0.0005 || (p.cookedGrams > 0 && p.status === "OPEN"))
+                .map((p) => ({
+                  specialProductId: p.id,
+                  name: p.name,
+                  systemRemainingGrams: p.remainingGrams,
+                  countedRemainingGrams: String(gramsToKg(p.remainingGrams)),
+                  carryGrams: String(gramsToKg(p.remainingGrams)),
+                  wasteGrams: "0",
+                  wasteNote: "",
+                }))
+            );
+          } catch {
+            setBatchPreview(null);
+            setBatchLines([]);
+          }
+        } else {
+          setBatchPreview(null);
+          setBatchLines([]);
+        }
       } catch (e) {
         toast.push(e instanceof Error ? e.message : t("close.loadFailed"), "err");
       }
@@ -322,6 +387,36 @@ export function CloseReportPage() {
   const canStartEdit = !!sheet && isToday && canManage && (sheet.canEdit !== false);
   const editable = canStartEdit && editing;
 
+  function batchPayloadOrError():
+    | { ok: true; lines: null | ReturnType<typeof mapBatchLine>[] }
+    | { ok: false } {
+    // Final leftover only after day cash close — until then always send lines with Save.
+    const finalized = !!(batchPreview?.dayCashClosed && batchPreview?.existingClose);
+    if (!isToday || finalized || !batchLines.length) return { ok: true, lines: null };
+    const lines = batchLines.map(mapBatchLine);
+    for (const l of lines) {
+      if (!Number.isFinite(l.countedRemainingGrams) || l.countedRemainingGrams < 0) {
+        toast.push(t("specials.closeInvalid"), "err");
+        return { ok: false };
+      }
+      if (Math.abs(l.carryGrams + l.wasteGrams - l.countedRemainingGrams) > 50) {
+        toast.push(t("specials.carryWasteMatch"), "err");
+        return { ok: false };
+      }
+    }
+    return { ok: true, lines };
+  }
+
+  function mapBatchLine(l: BatchCloseLineDraft) {
+    return {
+      specialProductId: l.specialProductId,
+      countedRemainingGrams: kgToGrams(Number(l.countedRemainingGrams)),
+      carryGrams: kgToGrams(Number(l.carryGrams)),
+      wasteGrams: kgToGrams(Number(l.wasteGrams)),
+      wasteNote: l.wasteNote.trim() || undefined,
+    };
+  }
+
   function startEdit() {
     if (!canStartEdit) return;
     setEditing(true);
@@ -338,14 +433,34 @@ export function CloseReportPage() {
     }
     setCollected(nextCollected);
     setReasons(nextReasons);
+    if (batchPreview && !(batchPreview.dayCashClosed && batchPreview.existingClose)) {
+      setBatchLines(
+        batchPreview.products
+          .filter((p) => p.remainingGrams > 0.0005 || (p.cookedGrams > 0 && p.status === "OPEN"))
+          .map((p) => ({
+            specialProductId: p.id,
+            name: p.name,
+            systemRemainingGrams: p.remainingGrams,
+            countedRemainingGrams: String(gramsToKg(p.remainingGrams)),
+            carryGrams: String(gramsToKg(p.remainingGrams)),
+            wasteGrams: "0",
+            wasteNote: "",
+          }))
+      );
+    }
     setEditing(false);
   }
 
   async function save(e: FormEvent) {
     e.preventDefault();
     if (!sheet || !editable || !isToday) return;
+    const batch = batchPayloadOrError();
+    if (!batch.ok) return;
     setBusy(true);
     try {
+      if (batch.lines?.length) {
+        await api("/specials/close", { method: "POST", body: JSON.stringify({ lines: batch.lines }) });
+      }
       const body = {
         businessDate: sheet.businessDate,
         note: note.trim() || undefined,
@@ -359,7 +474,11 @@ export function CloseReportPage() {
       setSheet(data);
       setNote(data.note || "");
       setEditing(false);
-      toast.push(t("close.saved"), "ok");
+      toast.push(
+        batch.lines?.length ? t("close.savedWithSpecials") : t("close.saved"),
+        "ok"
+      );
+      await load(date);
       await loadHistory();
     } catch (err) {
       toast.push(err instanceof Error ? err.message : t("common.failed"), "err");
@@ -502,6 +621,7 @@ export function CloseReportPage() {
               <div className="field" style={{ marginTop: "0.65rem" }}>
                 <label>{t("close.cashCollection")}</label>
                 <input
+                  className="field-ctrl"
                   type="number"
                   min={0}
                   step="0.01"
@@ -519,6 +639,7 @@ export function CloseReportPage() {
                 <div className="field">
                   <label>{t("close.missReason")}</label>
                   <input
+                    className="field-ctrl"
                     value={reasons[c.kind]}
                     disabled={!editable}
                     onChange={(e) => setReasons((prev) => ({ ...prev, [c.kind]: e.target.value }))}
@@ -698,20 +819,15 @@ export function CloseReportPage() {
           </div>
 
           {editable && (
-            <>
-              <div className="field" style={{ marginTop: "0.75rem" }}>
-                <label>{t("close.note")}</label>
-                <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={t("close.notePh")} />
-              </div>
-              <div className="form-actions">
-                <button type="button" className="btn ghost" disabled={busy} onClick={cancelEdit}>
-                  {t("common.cancel")}
-                </button>
-                <button className="btn" type="submit" disabled={busy}>
-                  {busy ? t("common.saving") : sheet?.saved ? t("close.update") : t("close.save")}
-                </button>
-              </div>
-            </>
+            <div className="field" style={{ marginTop: "0.75rem" }}>
+              <label>{t("close.note")}</label>
+              <input
+                className="field-ctrl wide"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder={t("close.notePh")}
+              />
+            </div>
           )}
           {!editable && sheet?.note && (
             <p className="tiny muted" style={{ marginTop: "0.75rem" }}>
@@ -719,8 +835,134 @@ export function CloseReportPage() {
             </p>
           )}
         </div>
-      </form>
 
+        {isToday && batchPreview && (batchLines.length > 0 || batchPreview.existingClose) && (
+          <div className="panel panel-pad" style={{ marginTop: "0.85rem" }}>
+            <h3 style={{ marginTop: 0 }}>{t("specials.closeTitle")}</h3>
+            {batchPreview.dayCashClosed && batchPreview.existingClose ? (
+              <div>
+                <p className="tiny muted">{t("specials.alreadyClosed")}</p>
+                {batchPreview.existingClose.lines.map((l) => (
+                  <div key={l.specialProductId} className="tiny" style={{ marginBottom: "0.35rem" }}>
+                    <strong>{l.specialProduct.name}</strong>: {formatKg(Number(l.carryGrams))}{" "}
+                    {t("specials.carry")} · {formatKg(Number(l.wasteGrams))} {t("specials.waste")}
+                    {Number(l.lossCost) > 0
+                      ? ` · ${t("specials.lossCost")} ${money(Number(l.lossCost))}`
+                      : ""}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <>
+                <p className="tiny muted" style={{ marginTop: 0 }}>
+                  {t("specials.closeHintWithReport")}
+                </p>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("common.item")}</th>
+                        <th>{t("specials.systemRem")}</th>
+                        <th>{t("specials.counted")} ({t("common.kg")})</th>
+                        <th>{t("specials.carry")} ({t("common.kg")})</th>
+                        <th>{t("specials.waste")} ({t("common.kg")})</th>
+                        <th>{t("specials.wasteNote")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {batchLines.map((l) => (
+                        <tr key={l.specialProductId}>
+                          <td>{l.name}</td>
+                          <td>{formatKg(l.systemRemainingGrams)}</td>
+                          <td>
+                            <input
+                              className="field-ctrl sm"
+                              inputMode="decimal"
+                              value={l.countedRemainingGrams}
+                              disabled={!editable}
+                              onChange={(e) =>
+                                setBatchLines((rows) =>
+                                  rows.map((r) =>
+                                    r.specialProductId === l.specialProductId
+                                      ? { ...r, countedRemainingGrams: e.target.value }
+                                      : r
+                                  )
+                                )
+                              }
+                            />
+                          </td>
+                          <td>
+                            <input
+                              className="field-ctrl sm"
+                              inputMode="decimal"
+                              value={l.carryGrams}
+                              disabled={!editable}
+                              onChange={(e) =>
+                                setBatchLines((rows) =>
+                                  rows.map((r) =>
+                                    r.specialProductId === l.specialProductId
+                                      ? { ...r, carryGrams: e.target.value }
+                                      : r
+                                  )
+                                )
+                              }
+                            />
+                          </td>
+                          <td>
+                            <input
+                              className="field-ctrl sm"
+                              inputMode="decimal"
+                              value={l.wasteGrams}
+                              disabled={!editable}
+                              onChange={(e) =>
+                                setBatchLines((rows) =>
+                                  rows.map((r) =>
+                                    r.specialProductId === l.specialProductId
+                                      ? { ...r, wasteGrams: e.target.value }
+                                      : r
+                                  )
+                                )
+                              }
+                            />
+                          </td>
+                          <td>
+                            <input
+                              className="field-ctrl wide"
+                              value={l.wasteNote}
+                              disabled={!editable}
+                              onChange={(e) =>
+                                setBatchLines((rows) =>
+                                  rows.map((r) =>
+                                    r.specialProductId === l.specialProductId
+                                      ? { ...r, wasteNote: e.target.value }
+                                      : r
+                                  )
+                                )
+                              }
+                              placeholder={t("specials.wasteNotePh")}
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {editable && (
+          <div className="form-actions" style={{ marginTop: "0.85rem" }}>
+            <button type="button" className="btn ghost" disabled={busy} onClick={cancelEdit}>
+              {t("common.cancel")}
+            </button>
+            <button className="btn" type="submit" disabled={busy}>
+              {busy ? t("common.saving") : sheet?.saved ? t("close.update") : t("close.save")}
+            </button>
+          </div>
+        )}
+      </form>
       <div className="grid-2" style={{ marginTop: "0.85rem" }}>
         <div className="panel panel-pad">
           <h3 style={{ marginTop: 0 }}>{t("close.itemsSold")}</h3>

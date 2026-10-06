@@ -232,7 +232,7 @@ if (-not $SkipDesktop) {
 
 Step "Install scripts"
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "scripts") | Out-Null
-Copy-Item (Join-Path $PSScriptRoot "install.ps1"), (Join-Path $PSScriptRoot "uninstall.ps1") (Join-Path $Stage "scripts")
+Copy-Item (Join-Path $PSScriptRoot "install.ps1"), (Join-Path $PSScriptRoot "uninstall.ps1"), (Join-Path $PSScriptRoot "Repair-Migrations.ps1") (Join-Path $Stage "scripts")
 Set-Content -Path (Join-Path $Stage "VERSION") -Value $Version -NoNewline -Encoding ascii
 
 Step "Authenticode sign staged binaries"
@@ -333,10 +333,12 @@ INSTALL - INDUSTRIAL PATTERN
   UI only - finds the main server automatically.
 
 • Each cashier COUNTER billing printer:
-  Use NETWORK mode (Wi-Fi or Ethernet), fixed IP, port 9100.
-  On the server: Settings → Printers → Add LAN printer, tick Bill,
-  set Station (e.g. Cashier 1), Test print.
+  Option A — NETWORK mode (Wi-Fi/Ethernet), fixed IP, port 9100.
+  Option B — USB on the cashier PC: leave the desktop app open on that PC;
+  printers appear automatically in Settings as "USB (Additional PC)".
+  On the server: tick Bill, set Station (e.g. Cashier 1), Test print.
   Users → edit cashier → Bill printer → assign that printer.
+  Every Additional PC registers its own USB printers (new PCs too).
 
 • Tablets / phones: same Wi-Fi → scan QR or install hotel-system.apk
 

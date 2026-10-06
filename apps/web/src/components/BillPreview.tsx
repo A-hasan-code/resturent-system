@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { api, unitLabel } from "../api";
 import { useBrand } from "../brand";
 import { PoweredBy } from "./PoweredBy";
-import { useI18n, useT } from "../i18n";
-import { serverOrigin } from "../server";
+import { useT } from "../i18n";
+import { apiBase, serverOrigin } from "../server";
 
 export type BillOrder = {
   id?: string;
@@ -24,7 +24,7 @@ export type BillOrder = {
   orderedBy?: { id?: string; name: string; roleCode?: string; roleName: string } | null;
   servedBy?: string | null;
   servedByName?: string | null;
-  creditCustomer?: { name?: string } | null;
+  creditCustomer?: { name?: string; phone?: string; address?: string } | null;
   creditName?: string | null;
   items: {
     id?: string;
@@ -64,7 +64,7 @@ const DEFAULT_DESIGN: BillDesign = {
   showCashier: true,
   showTip: true,
   showPaidStamp: true,
-  footer: "Thanks for your Visit..",
+  footer: "Thank you for your visit",
 };
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -84,7 +84,10 @@ function splitPlace(order: BillOrder) {
 }
 
 function brandingUrl(path: string) {
-  const origin = serverOrigin() || (typeof location !== "undefined" ? location.origin : "");
+  const origin =
+    apiBase().replace(/\/api\/?$/, "") ||
+    serverOrigin() ||
+    (typeof location !== "undefined" ? location.origin : "");
   return `${origin}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
@@ -134,7 +137,6 @@ export function BillPreview({
   };
 }) {
   const t = useT();
-  const { ts } = useI18n();
   const { brand, logoSrc } = useBrand();
   const [saved, setSaved] = useState<BillDesign>(DEFAULT_DESIGN);
   const design: BillDesign = { ...saved, ...designOverride };
@@ -154,9 +156,8 @@ export function BillPreview({
       : order.orderedBy.name
     : order.waiter || null;
   const servedLabel = (order.servedByName || order.servedBy || "").trim() || null;
-  const stampSrc = brandingUrl(
-    order.paymentStatus === "PAID" ? "/branding/paid-stamp.png?v=2" : "/branding/unpaid-stamp.png?v=2",
-  );
+  const isPaid = order.paymentStatus === "PAID";
+  const stampSrc = brandingUrl(isPaid ? "/branding/paid-stamp.png?v=4" : "/branding/unpaid-stamp.png?v=4");
   const sizeClass =
     paperWidth <= 58
       ? "receipt--mm58"
@@ -167,17 +168,18 @@ export function BillPreview({
           : "receipt--mm112";
   const narrow = paperWidth <= 58;
   const tableBadge = [partition, table || order.tableNo].filter(Boolean).join(" ") || "Walk-in";
-  const party =
-    order.creditName || order.creditCustomer?.name || t("bill.partyGeneral");
+  const customerPhone = order.creditCustomer?.phone || "-";
+  const amountPaid = foodPaid + (foodPaid > 0 ? showTipAmt : 0);
   const cash =
     (order.tenderedAmount ?? 0) > 0
       ? order.tenderedAmount!
-      : foodPaid > 0
-        ? foodPaid + showTipAmt
+      : amountPaid > 0
+        ? amountPaid
         : order.paymentStatus === "PAID"
           ? grand
           : 0;
-  const change = Math.max(0, cash - foodPaid - showTipAmt);
+  const balance = Math.max(0, grand - amountPaid);
+  const change = Math.max(0, cash - amountPaid);
 
   useEffect(() => {
     api<{ print?: { bill?: Partial<BillDesign> } }>("/system/settings")
@@ -196,7 +198,7 @@ export function BillPreview({
           showCashier: b.showCashier !== false,
           showTip: b.showTip !== false,
           showPaidStamp: b.showPaidStamp !== false,
-          footer: b.footer || "Thanks for your Visit..",
+          footer: b.footer || "Thank you for your visit",
         });
       })
       .catch(() => undefined);
@@ -306,9 +308,15 @@ export function BillPreview({
     );
   }
 
+  const phoneLine = customerPhone && customerPhone !== "-" ? customerPhone : "";
+  const partyName = (order.creditName || order.creditCustomer?.name || "General").trim() || "General";
+
   return (
     <div className="receipt-wrap">
-      <div className={`receipt receipt-sample ${sizeClass}`} id="bill-print-area">
+      <div
+        className={`receipt receipt-sample receipt-ref ${sizeClass} ${narrow ? "receipt-ref--narrow" : "receipt-ref--wide"}`}
+        id="bill-print-area"
+      >
         <div className="receipt-head">
           {design.showLogo && logoSrc && (
             <div className="receipt-logo-frame">
@@ -316,134 +324,125 @@ export function BillPreview({
             </div>
           )}
           {design.showName && <div className="receipt-hotel">{brand.name}</div>}
-          {design.showPhone && brand.phone && <div className="receipt-sub">{brand.phone}</div>}
-          {design.showAddress && brand.address && <div className="receipt-sub">{brand.address}</div>}
-          {design.showTagline && brand.tagline && <div className="receipt-sub">{brand.tagline}</div>}
+          {design.showPhone && brand.phone ? <div className="receipt-sub">{brand.phone}</div> : null}
+          {design.showAddress && brand.address ? <div className="receipt-sub">{brand.address}</div> : null}
+          {design.showTagline && brand.tagline ? <div className="receipt-sub">{brand.tagline}</div> : null}
+          <div className="receipt-title">{design.title || "Customer Bill"}</div>
         </div>
-
-        <div className="receipt-title">{design.title || t("bill.customerBill")}</div>
 
         <div className="receipt-datetime">
           <span>
-            {t("bill.date")}: {formatDate(when)}
+            Date: {formatDate(when)}
           </span>
           <span>
-            {t("bill.time")}: {formatTime(when)}
+            Time: {formatTime(when)}
           </span>
         </div>
-
         <div className="receipt-meta-grid">
-          <span>
-            {t("bill.orderNo")}
-            {order.orderNo}
-          </span>
-          <span>
-            {t("bill.billNo")} {billNo}
-          </span>
+          <span>Order #{order.orderNo}</span>
+          <span>Bill # {billNo}</span>
         </div>
+        <div className="receipt-token">Token No: {billNo}</div>
+        {partition ? <div className="receipt-serving">Partition: {partition}</div> : null}
+        {(table || order.tableNo) ? (
+          <div className="receipt-serving">Table: {table || order.tableNo}</div>
+        ) : null}
+        <div className="receipt-table-badge">Table No. {tableBadge}</div>
+        <div className="receipt-party">Party Name: {partyName}</div>
+        {phoneLine ? <div className="receipt-party">Phone: {phoneLine}</div> : null}
+        {design.showCashier && order.cashier ? (
+          <div className="receipt-party">Cashier: {order.cashier}</div>
+        ) : null}
+        {design.showOrderBy && orderedLabel ? (
+          <div className="receipt-party">Order by: {orderedLabel}</div>
+        ) : null}
+        {design.showServedBy && servedLabel ? (
+          <div className="receipt-party">Served by: {servedLabel}</div>
+        ) : null}
 
-        <div className="receipt-token">{t("bill.tokenNo")}: {billNo}</div>
+        <div className="receipt-rule dashed" />
 
-        {partition && (
-          <div className="receipt-serving">
-            {t("bill.partition")}: {partition}
+        {narrow ? (
+          <div className="receipt-cols-3">
+            <span>Product</span>
+            <span>Qty</span>
+            <span>Amt</span>
+          </div>
+        ) : (
+          <div className="receipt-cols-4">
+            <span>Product</span>
+            <span>Qty</span>
+            <span>Rate</span>
+            <span>Amount</span>
           </div>
         )}
-        {(table || order.tableNo) && (
-          <div className="receipt-serving">
-            {t("bill.table")}: {table || order.tableNo}
-          </div>
+        <div className="receipt-rule dashed" />
+
+        {order.items.map((i, idx) =>
+          narrow ? (
+            <div key={idx}>
+              <div className="receipt-row-3">
+                <span className="receipt-item-name">{i.name}</span>
+                <span>{qtyPlain(i.quantity)}</span>
+                <span>{amtPlain(i.amount)}</span>
+              </div>
+              <div className="receipt-rate-line">@{amtPlain(i.ratePerUnit ?? 0)}</div>
+            </div>
+          ) : (
+            <div key={idx} className="receipt-row-4">
+              <span className="receipt-item-name">{i.name}</span>
+              <span>{qtyPlain(i.quantity)}</span>
+              <span>{amtPlain(i.ratePerUnit ?? 0)}</span>
+              <span>{amtPlain(i.amount)}</span>
+            </div>
+          ),
         )}
 
-        <div className="receipt-table-badge">
-          {t("bill.tableNo")} {tableBadge}
-        </div>
-
-        <div className="receipt-party">
-          {t("bill.partyName")}: {party}
-        </div>
-
-        {design.showCashier && order.cashier && (
-          <div className="receipt-party">
-            {t("bill.cashier")}: {order.cashier}
-          </div>
-        )}
-        {design.showOrderBy && orderedLabel && (
-          <div className="receipt-party">
-            {t("bill.orderedBy")}: {orderedLabel}
-          </div>
-        )}
-        {design.showServedBy && servedLabel && (
-          <div className="receipt-party">
-            {t("bill.servedBy")}: {servedLabel}
-          </div>
-        )}
-
-        <div className="receipt-rule" />
-        <div className={`receipt-cols-4 ${narrow ? "narrow" : ""}`}>
-          <span>{t("bill.product")}</span>
-          <span>{t("bill.qty")}</span>
-          <span>{t("bill.rate")}</span>
-          <span>{t("bill.amt")}</span>
-        </div>
-        <div className="receipt-rule" />
-
-        {order.items.map((i, idx) => (
-          <div key={idx} className={`receipt-row-4 ${narrow ? "narrow" : ""}`}>
-            <span className="receipt-item-name">{i.name}</span>
-            <span>{qtyPlain(i.quantity)}</span>
-            <span>{amtPlain(i.ratePerUnit ?? 0)}</span>
-            <span>{amtPlain(i.amount)}</span>
-          </div>
-        ))}
-
-        <div className="receipt-rule" />
+        <div className="receipt-rule dashed" />
 
         <div className="receipt-total">
-          <span>{t("bill.grossTotal")}</span>
+          <span>Gross Total:</span>
           <strong>{Math.round(order.total).toLocaleString("en-US")}</strong>
         </div>
         {discount > 0 && (
-          <div className="receipt-total">
-            <span>{t("bill.discount")}</span>
-            <strong>{Math.round(discount).toLocaleString("en-US")}</strong>
-          </div>
-        )}
-        {discount > 0 && (
-          <div className="receipt-total">
-            <span>{t("bill.netTotal")}</span>
-            <strong>{Math.round(net).toLocaleString("en-US")}</strong>
-          </div>
+          <>
+            <div className="receipt-total">
+              <span>Discount:</span>
+              <strong>{Math.round(discount).toLocaleString("en-US")}</strong>
+            </div>
+            <div className="receipt-total">
+              <span>Net Total:</span>
+              <strong>{Math.round(net).toLocaleString("en-US")}</strong>
+            </div>
+          </>
         )}
         {design.showTip && showTipAmt > 0 && (
           <div className="receipt-total">
-            <span>{t("bill.tip")}</span>
+            <span>Tip:</span>
             <strong>{Math.round(showTipAmt).toLocaleString("en-US")}</strong>
           </div>
         )}
-
-        {cash > 0 ? (
-          <>
-            <div className="receipt-cash-box">
-              <span>{t("bill.cashReceived")}</span>
-              <strong>{Math.round(cash).toLocaleString("en-US")}</strong>
-            </div>
-            {change > 0 && (
-              <div className="receipt-total">
-                <span>{t("bill.change")}</span>
-                <strong>{Math.round(change).toLocaleString("en-US")}</strong>
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="receipt-pay">
-            {t("bill.payment")} {ts(order.paymentStatus)}
+        {cash > 0 && (
+          <div className="receipt-cash-box">
+            Cash Received : {Math.round(cash).toLocaleString("en-US")}
+          </div>
+        )}
+        {change > 0 && (
+          <div className="receipt-total">
+            <span>Change:</span>
+            <strong>{Math.round(change).toLocaleString("en-US")}</strong>
+          </div>
+        )}
+        {balance > 0 && (
+          <div className="receipt-total">
+            <span>Balance:</span>
+            <strong>{Math.round(balance).toLocaleString("en-US")}</strong>
           </div>
         )}
 
         {design.showPaidStamp && (
-          <div className="receipt-paid-stamp">
-            <img src={stampSrc} alt={order.paymentStatus === "PAID" ? ts("PAID") : ts("UNPAID")} />
+          <div className="receipt-paid-stamp receipt-paid-stamp--footer" aria-hidden>
+            <img src={stampSrc} alt="" />
           </div>
         )}
 

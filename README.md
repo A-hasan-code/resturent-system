@@ -142,6 +142,6 @@ Upgrading means running a newer installer over the old one. Data, secrets and po
 
 ## Operations
 
-- **Backups:** automatic daily `pg_dump` (the last 30 are kept) in `C:\ProgramData\HotelSystem\backups`. Manual backup and restore are under *Settings → Backup*.
+- **Backups:** manual `pg_dump` (plus a safety copy before restore) in `C:\ProgramData\HotelSystem\backups`. Create and restore under *Settings → Backup*.
 - **Logs:** `C:\ProgramData\HotelSystem\logs`
 - **Services:** `services.msc` → *Hotel System Server*, *Hotel System Database*

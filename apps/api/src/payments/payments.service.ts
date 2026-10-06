@@ -49,6 +49,7 @@ export class PaymentsService {
     const users = await this.prisma.user.findMany({
       where: {
         active: true,
+        deletedAt: null,
         role: {
           OR: [
             { code: { in: ["MAIN_CASHIER", "CASHIER"] } },
@@ -69,7 +70,11 @@ export class PaymentsService {
   /** Floor staff who can be marked as table servers. */
   async servers() {
     const users = await this.prisma.user.findMany({
-      where: { active: true, role: { code: { in: ["WAITER", "SUPERVISOR", "CASHIER", "MAIN_CASHIER"] } } },
+      where: {
+        active: true,
+        deletedAt: null,
+        role: { code: { in: ["WAITER", "SUPERVISOR", "CASHIER", "MAIN_CASHIER"] } },
+      },
       select: { id: true, name: true, role: { select: { code: true, name: true } } },
       orderBy: { name: "asc" },
     });

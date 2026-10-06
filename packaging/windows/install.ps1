@@ -29,6 +29,7 @@ function Log([string]$msg) {
 }
 
 # Runs a native exe, logs its output, throws on non-zero exit (unless -AllowFail).
+# Returns @{ Code; Output } so callers can inspect Prisma errors (e.g. P3009).
 function Run([string]$exe, [string[]]$argv, [string]$cwd = $AppDir, [switch]$AllowFail) {
   Log "> $(Split-Path $exe -Leaf) $($argv -join ' ')"
   Push-Location $cwd
@@ -43,7 +44,64 @@ function Run([string]$exe, [string[]]$argv, [string]$cwd = $AppDir, [switch]$All
   }
   foreach ($l in $out) { if ($l.Trim()) { Log "  $l" } }
   if ($code -ne 0 -and -not $AllowFail) { throw "$(Split-Path $exe -Leaf) failed (exit $code)" }
-  return $code
+  return @{ Code = $code; Output = ($out -join "`n") }
+}
+
+# Prisma P3009 = failed migration row; P3018 = objects already exist (partial apply).
+function Invoke-PrismaMigrateDeploy([string]$nodeExe, [string]$apiDir) {
+  $prisma = @("node_modules\prisma\build\index.js", "migrate", "deploy", "--schema", "prisma\schema.prisma")
+  $r = Run $nodeExe $prisma $apiDir -AllowFail
+  if ($r.Code -eq 0) { return }
+
+  $text = [string]$r.Output
+  $names = [regex]::Matches($text, 'The\s+.([0-9]{14}_[A-Za-z0-9_]+).\s+migration') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+  if (-not $names -or $names.Count -eq 0) {
+    $names = [regex]::Matches($text, 'Migration name:\s*(\S+)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+  }
+  if (-not $names -or $names.Count -eq 0) {
+    $names = [regex]::Matches($text, 'Applying migration .([0-9]{14}_[A-Za-z0-9_]+).') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+  }
+
+  $isP3009 = ($text -match 'P3009' -or $text -match 'failed migrations')
+  $isPartial = ($text -match 'already exists' -or $text -match 'duplicate key' -or $text -match 'P3018')
+
+  if (-not $isP3009 -and -not $isPartial) {
+    throw "prisma migrate deploy failed (exit $($r.Code)). See $LogFile"
+  }
+  if (-not $names -or $names.Count -eq 0) {
+    throw "prisma migrate deploy failed but could not parse migration name. See $LogFile"
+  }
+
+  if ($isP3009) {
+    foreach ($name in $names) {
+      Log "P3009: clearing failed migration record for $name (rolled-back), then re-applying"
+      Run $nodeExe @("node_modules\prisma\build\index.js", "migrate", "resolve", "--rolled-back", $name, "--schema", "prisma\schema.prisma") $apiDir -AllowFail | Out-Null
+    }
+    $r2 = Run $nodeExe $prisma $apiDir -AllowFail
+    if ($r2.Code -eq 0) {
+      Log "prisma migrate deploy OK after resolving failed migration(s)"
+      return
+    }
+    $text = [string]$r2.Output
+    $isPartial = ($text -match 'already exists' -or $text -match 'duplicate key' -or $text -match 'P3018')
+    $names2 = [regex]::Matches($text, 'Migration name:\s*(\S+)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+    if ($names2 -and $names2.Count -gt 0) { $names = $names2 }
+  }
+
+  if ($isPartial -or $isP3009) {
+    foreach ($name in $names) {
+      Log "Partial migration: marking $name as applied (objects may already exist)"
+      Run $nodeExe @("node_modules\prisma\build\index.js", "migrate", "resolve", "--applied", $name, "--schema", "prisma\schema.prisma") $apiDir -AllowFail | Out-Null
+    }
+    $r3 = Run $nodeExe $prisma $apiDir -AllowFail
+    if ($r3.Code -eq 0) {
+      Log "prisma migrate deploy OK after marking migration(s) applied"
+      return
+    }
+    throw "prisma migrate deploy still failing after recovery (exit $($r3.Code)). See $LogFile"
+  }
+
+  throw "prisma migrate deploy failed (exit $($r.Code)). See $LogFile"
 }
 
 function New-Secret([int]$length) {
@@ -110,10 +168,22 @@ function Wait-Until([scriptblock]$test, [int]$seconds, [string]$what) {
 }
 
 function Install-DesktopFirewall {
-  if (Test-Path $DesktopExe) {
-    Set-FirewallRule "Hotel System - Desktop app" @("program=$DesktopExe", "protocol=UDP")
+  # Support current and older desktop exe names after product rename.
+  $candidates = @(
+    $DesktopExe,
+    (Join-Path $AppDir "desktop\Hotel System.exe"),
+    (Join-Path $AppDir "desktop\PixalBoticsRestaurant.exe")
+  )
+  $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if (-not $exe) { Log "Desktop exe not found - skipping desktop firewall rule"; return }
+  try {
+    Set-FirewallRule "Hotel System - Desktop app" @("program=$exe", "protocol=UDP")
+  } catch {
+    Log "WARN: desktop firewall rule failed (continuing): $($_.Exception.Message)"
   }
 }
+
+try {
 
 Log "=== Hotel System setup ($Mode) from $AppDir ==="
 
@@ -223,12 +293,39 @@ if ("$exists".Trim() -ne "1") {
 }
 Remove-Item Env:PGPASSWORD
 
-# --- Schema + base data ------------------------------------------------------
+# --- Pre-upgrade safety dump (never skip on existing hotels) ----------------
+if (-not $freshDb) {
+  $backupDir = Join-Path $DataDir "backups"
+  New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+  $stamp = Get-Date -Format "yyyy-MM-dd-HH-mm-ss"
+  $preUpgrade = Join-Path $backupDir "hotel-$stamp-pre-upgrade.dump"
+  Log "Upgrade safety backup: $preUpgrade"
+  $env:PGPASSWORD = $dbPassword
+  try {
+    $dump = Run (Join-Path $PgBin "pg_dump.exe") @(
+      "--format=custom", "--no-owner", "--file=$preUpgrade",
+      "-h", "127.0.0.1", "-p", "$pgPort", "-U", $DbUser, $DbName
+    ) -AllowFail
+    if ($dump.Code -ne 0 -or -not (Test-Path $preUpgrade) -or ((Get-Item $preUpgrade).Length -lt 8192)) {
+      throw "Pre-upgrade backup failed or too small — aborting upgrade so restaurant data stays safe. See $LogFile"
+    }
+    Log "Pre-upgrade backup OK ($([math]::Round((Get-Item $preUpgrade).Length / 1KB)) KB)"
+  } finally {
+    Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+  }
+}
+
+# --- Schema (+ seed only on first install; never wipe a live hotel on upgrade) -
 $env:DATABASE_URL = $databaseUrl
 $env:CHECKPOINT_DISABLE = "1"
 $env:PRISMA_HIDE_UPDATE_MESSAGE = "1"
-Run $Node @("node_modules\prisma\build\index.js", "migrate", "deploy", "--schema", "prisma\schema.prisma") $ApiDir | Out-Null
-Run $Node @("node_modules\tsx\dist\cli.mjs", "prisma\seed.ts") $ApiDir | Out-Null
+Invoke-PrismaMigrateDeploy $Node $ApiDir
+if ($freshDb) {
+  Log "Fresh install: seeding demo catalog and users"
+  Run $Node @("node_modules\tsx\dist\cli.mjs", "prisma\seed.ts") $ApiDir | Out-Null
+} else {
+  Log "Upgrade: skipping seed (existing restaurant data kept)"
+}
 
 # --- API service (WinSW) -----------------------------------------------------
 $xml = @"
@@ -272,10 +369,14 @@ Wait-Until {
 Log "Server is up on port $httpPort"
 
 # --- Firewall ----------------------------------------------------------------
-Set-FirewallRule "Hotel System - Web (TCP $httpPort)" @("protocol=TCP", "localport=$httpPort")
-Set-FirewallRule "Hotel System - Discovery (UDP)" @("protocol=UDP", "localport=41234-41235")
-Set-FirewallRule "Hotel System - Server (node)" @("program=$Node", "protocol=UDP")
-Install-DesktopFirewall
+try {
+  Set-FirewallRule "Hotel System - Web (TCP $httpPort)" @("protocol=TCP", "localport=$httpPort")
+  Set-FirewallRule "Hotel System - Discovery (UDP)" @("protocol=UDP", "localport=41234-41235")
+  Set-FirewallRule "Hotel System - Server (node)" @("program=$Node", "protocol=UDP")
+  Install-DesktopFirewall
+} catch {
+  Log "WARN: firewall rules failed (continuing): $($_.Exception.Message)"
+}
 
 # --- Shortcuts + summary -----------------------------------------------------
 New-Item -ItemType Directory -Force -Path $StartMenu | Out-Null
@@ -295,4 +396,10 @@ $summary = @(
 )
 $summary | Set-Content -Path (Join-Path $DataDir "server-info.txt") -Encoding ascii
 Log "Setup complete. URLs: $($urls -join ', ')"
+
+} catch {
+  Log "FATAL: $($_.Exception.Message)"
+  if ($_.ScriptStackTrace) { Log $_.ScriptStackTrace }
+  throw
+}
 exit 0

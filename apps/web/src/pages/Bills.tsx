@@ -16,6 +16,51 @@ import { CashRecord } from "../components/CashRecord";
 import { useI18n, useT } from "../i18n";
 import { usePrompt } from "../components/ConfirmModal";
 import { EditBillForm, serverNames, withCurrent, type EditBillMeta, type EditBillPerson, type EditBillTable } from "../components/EditBillForm";
+import {
+  bumpQty,
+  clampQty,
+  maxQtyOf,
+  minQtyOf,
+  qtyIssueOf,
+  qtyStepOf,
+  startQtyOf,
+  type QtyRules,
+} from "../menuQty";
+
+type MenuRow = {
+  id: string;
+  name: string;
+  category: string | null;
+  sellUnit: string;
+  sellingPrice: number;
+  minQty?: number;
+  maxQty?: number | null;
+  qtyStep?: number | null;
+  allowCustomQty?: boolean;
+};
+
+type EditAdd = {
+  tempId: string;
+  menuItemId: string;
+  name: string;
+  sellUnit: string;
+  rate: number;
+  quantity: number;
+  minQty?: number;
+  maxQty?: number | null;
+  qtyStep?: number | null;
+  allowCustomQty?: boolean;
+};
+
+function rulesOf(m: QtyRules): QtyRules {
+  return {
+    sellUnit: m.sellUnit,
+    minQty: m.minQty,
+    maxQty: m.maxQty,
+    qtyStep: m.qtyStep,
+    allowCustomQty: m.allowCustomQty,
+  };
+}
 
 type OrderPayment = {
   id: string;
@@ -43,6 +88,7 @@ type Order = BillOrder & {
   cancelledBy?: { id?: string; name: string; roleCode?: string; roleName?: string } | null;
   updatedAt?: string | null;
   payments?: OrderPayment[];
+  items: (BillOrder["items"][number] & { menuItemId?: string | null; lineKind?: string })[];
 };
 
 const stamp = (iso: string) =>
@@ -147,6 +193,10 @@ export function BillsPage() {
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
   const [editQty, setEditQty] = useState<Record<string, number>>({});
+  const [editQtyDraft, setEditQtyDraft] = useState<Record<string, string>>({});
+  const [editAdds, setEditAdds] = useState<EditAdd[]>([]);
+  const [editMenu, setEditMenu] = useState<MenuRow[]>([]);
+  const [addSearch, setAddSearch] = useState("");
   const [editMeta, setEditMeta] = useState<EditBillMeta | null>(null);
   const [editTables, setEditTables] = useState<EditBillTable[]>([]);
   const [editPartitions, setEditPartitions] = useState<{ id: string; name: string }[]>([]);
@@ -222,6 +272,9 @@ export function BillsPage() {
   function openBill(o: Order) {
     setSelected(o);
     setEditing(false);
+    setEditAdds([]);
+    setEditQtyDraft({});
+    setAddSearch("");
     setThermal(null);
     const qty: Record<string, number> = {};
     for (const i of o.items) {
@@ -229,6 +282,42 @@ export function BillsPage() {
     }
     setEditQty(qty);
   }
+
+  function menuRulesForItem(i: Order["items"][number]): QtyRules {
+    const hit = i.menuItemId
+      ? editMenu.find((m) => m.id === i.menuItemId)
+      : editMenu.find((m) => m.name === i.name && m.sellUnit === i.sellUnit);
+    return hit
+      ? rulesOf(hit)
+      : { sellUnit: i.sellUnit, allowCustomQty: true };
+  }
+
+  function existingQtyText(id: string, fallback: number) {
+    return editQtyDraft[id] ?? String(editQty[id] ?? fallback);
+  }
+
+  function existingQtyIssue(i: Order["items"][number]) {
+    if (!i.id) return null;
+    const text = existingQtyText(i.id, i.quantity).trim();
+    if (text === "" || text === "." || text === "-") return "invalid" as const;
+    const n = Number(text);
+    // 0 = remove — allowed
+    if (n === 0) return null;
+    return qtyIssueOf(menuRulesForItem(i), n);
+  }
+
+  function addQtyIssue(a: EditAdd) {
+    const text = (editQtyDraft[a.tempId] ?? String(a.quantity)).trim();
+    if (text === "" || text === "." || text === "-") return "invalid" as const;
+    return qtyIssueOf(rulesOf(a), Number(text));
+  }
+
+  const editQtyBlocked =
+    editing &&
+    selected &&
+    (selected.items.some((i) => i.id && existingQtyIssue(i) != null) ||
+      editAdds.some((a) => addQtyIssue(a) != null) ||
+      (selected.items.every((i) => !i.id || (editQty[i.id] ?? i.quantity) <= 0) && !editAdds.length));
 
   useEffect(() => {
     if (!selected?.id || editing) return;
@@ -252,12 +341,22 @@ export function BillsPage() {
   }, [selected?.id, selected?.paymentStatus, selected?.paidAmount, selected?.total, editing]);
 
   async function startBillEdit(o: Order) {
+    if (!can("order.edit") || o.status === "CANCELLED" || o.paymentStatus === "PAID") return;
     const qty: Record<string, number> = {};
+    const draft: Record<string, string> = {};
     for (const i of o.items) {
-      if (i.id) qty[i.id] = i.quantity;
+      if (i.id) {
+        qty[i.id] = i.quantity;
+        draft[i.id] = String(i.quantity);
+      }
     }
     setEditQty(qty);
+    setEditQtyDraft(draft);
+    setEditAdds([]);
+    setAddSearch("");
     try {
+      const menu = await api<MenuRow[]>("/menu");
+      setEditMenu(menu);
       const [board, cashiers, servers] = await Promise.all([
         api<{ partitions: { id: string; name: string; tables: { id: string; name: string; label: string; partitionId: string; order: { id: string } | null }[] }[] }>("/tables"),
         api<EditBillPerson[]>("/payments/cashiers"),
@@ -283,16 +382,99 @@ export function BillsPage() {
     }
   }
 
+  function setExistingQty(id: string, qty: number, item: Order["items"][number]) {
+    const rules = menuRulesForItem(item);
+    if (qty <= 0) {
+      setEditQty((prev) => ({ ...prev, [id]: 0 }));
+      setEditQtyDraft((d) => ({ ...d, [id]: "0" }));
+      return;
+    }
+    const next = clampQty(rules, qty);
+    setEditQty((prev) => ({ ...prev, [id]: next }));
+    setEditQtyDraft((d) => ({ ...d, [id]: String(next) }));
+  }
+
+  function setExistingQtyTyped(id: string, text: string) {
+    setEditQtyDraft((d) => ({ ...d, [id]: text }));
+    const n = Number(text);
+    if (!Number.isFinite(n)) return;
+    setEditQty((prev) => ({ ...prev, [id]: +n.toFixed(3) }));
+  }
+
+  function addMenuToEdit(m: MenuRow) {
+    const rules = rulesOf(m);
+    const start = startQtyOf(rules);
+    const tempId = `add-${m.id}-${Date.now()}`;
+    setEditAdds((prev) => [
+      ...prev,
+      {
+        tempId,
+        menuItemId: m.id,
+        name: m.name,
+        sellUnit: m.sellUnit,
+        rate: m.sellingPrice,
+        quantity: start,
+        minQty: rules.minQty ?? undefined,
+        maxQty: rules.maxQty ?? null,
+        qtyStep: rules.qtyStep ?? null,
+        allowCustomQty: rules.allowCustomQty,
+      },
+    ]);
+    setEditQtyDraft((d) => ({ ...d, [tempId]: String(start) }));
+    setAddSearch("");
+  }
+
+  function setAddQty(tempId: string, qty: number) {
+    const row = editAdds.find((a) => a.tempId === tempId);
+    if (!row) return;
+    if (qty <= 0) {
+      setEditAdds((prev) => prev.filter((a) => a.tempId !== tempId));
+      setEditQtyDraft((d) => {
+        const n = { ...d };
+        delete n[tempId];
+        return n;
+      });
+      return;
+    }
+    const next = clampQty(rulesOf(row), qty);
+    setEditAdds((prev) => prev.map((a) => (a.tempId === tempId ? { ...a, quantity: next } : a)));
+    setEditQtyDraft((d) => ({ ...d, [tempId]: String(next) }));
+  }
+
+  function setAddQtyTyped(tempId: string, text: string) {
+    setEditQtyDraft((d) => ({ ...d, [tempId]: text }));
+    const n = Number(text);
+    if (!Number.isFinite(n)) return;
+    setEditAdds((prev) =>
+      prev.map((a) => (a.tempId === tempId ? { ...a, quantity: +n.toFixed(3) } : a))
+    );
+  }
+
   async function saveEdit() {
     if (!selected || !can("order.edit")) return;
-    const items = Object.entries(editQty).map(([id, quantity]) => ({ id, quantity }));
-    if (!items.length) return;
+    if (editQtyBlocked) {
+      toast.push(t("waiter.qtyFixFirst"), "err");
+      return;
+    }
+    const items = selected.items
+      .filter((i): i is typeof i & { id: string } => !!i.id)
+      .map((i) => ({ id: i.id, quantity: editQty[i.id] ?? i.quantity }));
+    const addItems = editAdds.map((a) => ({
+      menuItemId: a.menuItemId,
+      quantity: a.quantity,
+    }));
+    if (!items.length && !addItems.length) return;
+    if (selected.paymentStatus === "PAID") {
+      toast.push(t("bills.editFailed"), "err");
+      return;
+    }
     setSavingEdit(true);
     try {
       const updated = await api<Order>(`/orders/${selected.id}/edit`, {
         method: "POST",
         body: JSON.stringify({
           items,
+          ...(addItems.length ? { addItems } : {}),
           ...(editMeta?.tableId ? { tableId: editMeta.tableId } : {}),
           ...(editMeta?.cashierId ? { assignedCashierId: editMeta.cashierId } : {}),
           ...(editMeta?.supervisorId ? { waiterId: editMeta.supervisorId } : {}),
@@ -302,6 +484,9 @@ export function BillsPage() {
       toast.push(t("bills.editSaved"), "ok");
       setSelected(updated);
       setEditing(false);
+      setEditAdds([]);
+      setEditQtyDraft({});
+      setAddSearch("");
       const qty: Record<string, number> = {};
       for (const i of updated.items) {
         if (i.id) qty[i.id] = i.quantity;
@@ -353,6 +538,37 @@ export function BillsPage() {
       void load();
     } catch (e) {
       toast.push(e instanceof Error ? e.message : t("bills.cancelFailed"), "err");
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  async function reverseOrder() {
+    if (!selected || !can("order.edit")) return;
+    if (selected.paymentStatus !== "PAID" || selected.status === "CANCELLED") return;
+    const reason = await askPrompt({
+      title: t("bills.reverseConfirmTitle"),
+      body: t("bills.reverseConfirmBody", { n: selected.orderNo }),
+      confirmLabel: t("bills.reverseConfirm"),
+      danger: true,
+      inputLabel: t("bills.reverseReason"),
+      inputPlaceholder: t("bills.reverseReasonPh"),
+      inputRequired: true,
+      inputMaxLength: 200,
+    });
+    if (!reason) return;
+    setCancelling(true);
+    try {
+      const res = await api<Order>(`/orders/${selected.id}/reverse`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      });
+      toast.push(t("bills.reversed", { n: res.orderNo }), "ok");
+      setSelected(null);
+      setEditing(false);
+      void load();
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("bills.reverseFailed"), "err");
     } finally {
       setCancelling(false);
     }
@@ -559,6 +775,7 @@ export function BillsPage() {
             <thead>
               <tr>
                 <th>#</th>
+                <th />
                 <th>{t("common.table")}</th>
                 <th>{t("common.time")}</th>
                 <th>{t("bills.orderedBy")}</th>
@@ -569,7 +786,6 @@ export function BillsPage() {
                 <th>{t("common.total")}</th>
                 <th>{t("bills.tip")}</th>
                 <th>{t("bills.pay")}</th>
-                <th />
               </tr>
             </thead>
             <tbody>
@@ -590,6 +806,29 @@ export function BillsPage() {
                   }
                 >
                   <td>{o.orderNo}</td>
+                  <td className="row">
+                    {can("order.pay") && o.paymentStatus !== "PAID" && !cancelled && (
+                      <button type="button" className="btn ok sm" onClick={() => setPaying(o)}>
+                        {t("bills.pay")}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      onClick={() => openBill(o)}
+                    >
+                      {t("bills.open")}
+                    </button>
+                    {cancelled && (can("order.edit") || can("print.kot")) && (
+                      <button
+                        type="button"
+                        className="btn danger sm"
+                        onClick={() => void printCancelSlip(o.id)}
+                      >
+                        {t("bills.printCancelSlip")}
+                      </button>
+                    )}
+                  </td>
                   <td>
                     {o.tableNo || "—"}
                     {o.billRequestedAt && o.paymentStatus !== "PAID" && (
@@ -651,29 +890,6 @@ export function BillsPage() {
                       {cancelled ? ts("CANCELLED") : ts(o.paymentStatus)}
                     </span>
                   </td>
-                  <td className="row">
-                    <button
-                      type="button"
-                      className="btn ghost sm"
-                      onClick={() => openBill(o)}
-                    >
-                      {t("bills.open")}
-                    </button>
-                    {cancelled && (can("order.edit") || can("print.kot")) && (
-                      <button
-                        type="button"
-                        className="btn danger sm"
-                        onClick={() => void printCancelSlip(o.id)}
-                      >
-                        {t("bills.printCancelSlip")}
-                      </button>
-                    )}
-                    {can("order.pay") && o.paymentStatus !== "PAID" && !cancelled && (
-                      <button type="button" className="btn ok sm" onClick={() => setPaying(o)}>
-                        {t("bills.pay")}
-                      </button>
-                    )}
-                  </td>
                 </tr>
                 );
               })}
@@ -720,7 +936,11 @@ export function BillsPage() {
                   </strong>
                 </div>
               )}
-              {can("order.edit") && selected.paymentStatus !== "PAID" && editing && editMeta ? (
+              {can("order.edit") &&
+              selected.status !== "CANCELLED" &&
+              selected.paymentStatus !== "PAID" &&
+              editing &&
+              editMeta ? (
                 <div className="no-print" style={{ marginBottom: "1rem" }}>
                   <EditBillForm
                     meta={editMeta}
@@ -749,52 +969,235 @@ export function BillsPage() {
                     }}
                   />
                   <div className="edit-bill-items">{t("common.items")}</div>
-                  {selected.items.map((i) =>
-                    i.id ? (
-                      <div key={i.id} className="row" style={{ justifyContent: "space-between", marginBottom: "0.5rem" }}>
-                        <span>
-                          {i.name}
-                          <span className="tiny muted"> · {unitLabel(i.sellUnit)}</span>
-                        </span>
-                        <div className="row" style={{ gap: "0.35rem", alignItems: "center" }}>
+                  {selected.items.map((i) => {
+                    if (!i.id) return null;
+                    const rules = menuRulesForItem(i);
+                    const cur = editQty[i.id] ?? i.quantity;
+                    const removed = cur <= 0;
+                    const issue = existingQtyIssue(i);
+                    const minQ = minQtyOf(rules);
+                    const maxQ = maxQtyOf(rules);
+                    const issueMsg =
+                      issue === "below_min"
+                        ? t("waiter.qtyKeepAbove", { n: minQ, u: unitLabel(i.sellUnit) })
+                        : issue === "above_max" && maxQ != null
+                          ? t("waiter.qtyKeepBelow", { n: maxQ, u: unitLabel(i.sellUnit) })
+                          : issue === "invalid"
+                            ? t("waiter.qtyInvalid")
+                            : issue === "bad_step"
+                              ? t("waiter.qtyBadStep", {
+                                  n: qtyStepOf(rules),
+                                  u: unitLabel(i.sellUnit),
+                                })
+                              : null;
+                    return (
+                      <div
+                        key={i.id}
+                        className={`waiter-line${issue || removed ? " qty-error" : ""}`}
+                        style={{ marginBottom: "0.35rem" }}
+                      >
+                        <div className="row" style={{ justifyContent: "space-between", gap: "0.5rem" }}>
+                          <span>
+                            {i.name}
+                            <span className="tiny muted"> · {unitLabel(i.sellUnit)}</span>
+                            {removed ? (
+                              <span className="tiny qty-error-msg"> · {t("bills.itemRemoved")}</span>
+                            ) : null}
+                          </span>
+                          {!removed ? (
+                            <button
+                              type="button"
+                              className="btn danger sm"
+                              onClick={() => setExistingQty(i.id!, 0, i)}
+                            >
+                              {t("bills.removeItem")}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn ghost sm"
+                              onClick={() => setExistingQty(i.id!, startQtyOf(rules) || i.quantity || 1, i)}
+                            >
+                              {t("bills.undoRemove")}
+                            </button>
+                          )}
+                        </div>
+                        {!removed && (
+                          <>
+                            <div className="row waiter-qty">
+                              <button
+                                type="button"
+                                className="qty-btn"
+                                onClick={() => {
+                                  const base = Number(existingQtyText(i.id!, i.quantity));
+                                  const from = Number.isFinite(base) ? base : cur;
+                                  const proposed = +(from - qtyStepOf(rules)).toFixed(3);
+                                  setExistingQty(
+                                    i.id!,
+                                    proposed + 1e-9 < startQtyOf(rules) ? 0 : proposed,
+                                    i
+                                  );
+                                }}
+                              >
+                                −
+                              </button>
+                              <input
+                                className={`field-ctrl sm${issue ? " qty-error-input" : ""}`}
+                                style={{ textAlign: "center" }}
+                                type="text"
+                                inputMode="decimal"
+                                value={existingQtyText(i.id, i.quantity)}
+                                onChange={(e) => setExistingQtyTyped(i.id!, e.target.value)}
+                                aria-invalid={!!issue}
+                              />
+                              <span className="tiny muted">{unitLabel(i.sellUnit)}</span>
+                              <button
+                                type="button"
+                                className="qty-btn"
+                                onClick={() => {
+                                  const base = Number(existingQtyText(i.id!, i.quantity));
+                                  const from = Number.isFinite(base) && base > 0 ? base : cur;
+                                  setExistingQty(i.id!, bumpQty(rules, from, 1), i);
+                                }}
+                              >
+                                +
+                              </button>
+                            </div>
+                            {issueMsg ? (
+                              <div className="tiny qty-error-msg">{issueMsg}</div>
+                            ) : minQ || maxQ != null ? (
+                              <div className="tiny muted">
+                                {minQ ? t("waiter.qtyMin", { n: minQ, u: unitLabel(i.sellUnit) }) : null}
+                                {maxQ != null
+                                  ? `${minQ ? " · " : ""}${t("waiter.qtyMaxHint", { n: maxQ, u: unitLabel(i.sellUnit) })}`
+                                  : null}
+                              </div>
+                            ) : null}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {editAdds.map((a) => {
+                    const issue = addQtyIssue(a);
+                    const minQ = minQtyOf(a);
+                    const maxQ = maxQtyOf(a);
+                    const issueMsg =
+                      issue === "below_min"
+                        ? t("waiter.qtyKeepAbove", { n: minQ, u: unitLabel(a.sellUnit) })
+                        : issue === "above_max" && maxQ != null
+                          ? t("waiter.qtyKeepBelow", { n: maxQ, u: unitLabel(a.sellUnit) })
+                          : issue === "invalid"
+                            ? t("waiter.qtyInvalid")
+                            : null;
+                    return (
+                      <div
+                        key={a.tempId}
+                        className={`waiter-line${issue ? " qty-error" : ""}`}
+                        style={{ marginBottom: "0.35rem" }}
+                      >
+                        <div className="row" style={{ justifyContent: "space-between", gap: "0.5rem" }}>
+                          <span>
+                            <span className="badge">{t("bills.newItem")}</span> {a.name}
+                            <span className="tiny muted"> · {unitLabel(a.sellUnit)}</span>
+                          </span>
+                          <button
+                            type="button"
+                            className="btn danger sm"
+                            onClick={() => setAddQty(a.tempId, 0)}
+                          >
+                            {t("bills.removeItem")}
+                          </button>
+                        </div>
+                        <div className="row waiter-qty">
                           <button
                             type="button"
                             className="qty-btn"
-                            onClick={() =>
-                              setEditQty((prev) => ({
-                                ...prev,
-                                [i.id!]: Math.max(0, +((prev[i.id!] ?? i.quantity) - 1).toFixed(3)),
-                              }))
-                            }
+                            onClick={() => {
+                              const base = Number(editQtyDraft[a.tempId] ?? a.quantity);
+                              const from = Number.isFinite(base) ? base : a.quantity;
+                              setAddQty(a.tempId, +(from - qtyStepOf(a)).toFixed(3));
+                            }}
                           >
                             −
                           </button>
-                          <span className="qty-val">{editQty[i.id] ?? i.quantity}</span>
+                          <input
+                            className={`field-ctrl sm${issue ? " qty-error-input" : ""}`}
+                            style={{ textAlign: "center" }}
+                            type="text"
+                            inputMode="decimal"
+                            value={editQtyDraft[a.tempId] ?? String(a.quantity)}
+                            onChange={(e) => setAddQtyTyped(a.tempId, e.target.value)}
+                            aria-invalid={!!issue}
+                          />
+                          <span className="tiny muted">{unitLabel(a.sellUnit)}</span>
                           <button
                             type="button"
                             className="qty-btn"
-                            onClick={() =>
-                              setEditQty((prev) => ({
-                                ...prev,
-                                [i.id!]: +((prev[i.id!] ?? i.quantity) + 1).toFixed(3),
-                              }))
-                            }
+                            onClick={() => {
+                              const base = Number(editQtyDraft[a.tempId] ?? a.quantity);
+                              const from = Number.isFinite(base) && base > 0 ? base : a.quantity;
+                              setAddQty(a.tempId, bumpQty(rulesOf(a), from, 1));
+                            }}
                           >
                             +
                           </button>
                         </div>
+                        {issueMsg ? <div className="tiny qty-error-msg">{issueMsg}</div> : null}
                       </div>
-                    ) : null
-                  )}
+                    );
+                  })}
+
+                  <div className="field" style={{ marginTop: "0.75rem" }}>
+                    <label>{t("bills.addItem")}</label>
+                    <input
+                      className="field-ctrl wide"
+                      value={addSearch}
+                      onChange={(e) => setAddSearch(e.target.value)}
+                      placeholder={t("bills.addItemPh")}
+                      autoComplete="off"
+                    />
+                    {addSearch.trim() ? (
+                      <div className="suggest-list">
+                        {editMenu
+                          .filter((m) => matchesSearch(addSearch, m.name, m.category, m.sellUnit))
+                          .slice(0, 8)
+                          .map((m) => (
+                            <button
+                              key={m.id}
+                              type="button"
+                              className="suggest-item"
+                              onClick={() => addMenuToEdit(m)}
+                            >
+                              <strong>{m.name}</strong>
+                              <span className="tiny muted">
+                                {m.category} · {money(m.sellingPrice)} / {unitLabel(m.sellUnit)}
+                              </span>
+                            </button>
+                          ))}
+                        {!editMenu.filter((m) => matchesSearch(addSearch, m.name, m.category, m.sellUnit)).length ? (
+                          <div className="tiny muted" style={{ padding: "0.5rem 0.65rem" }}>
+                            {t("waiter.noItems")}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               ) : thermal?.text ? (
-                <ThermalPreview
-                  text={thermal.text}
-                  paperWidth={thermal.paperWidth}
-                  logoUrl={thermal.logoUrl}
-                  paidStampUrl={thermal.paidStampUrl}
-                  unpaidStampUrl={thermal.unpaidStampUrl}
-                />
+                <div
+                  className="bill-design-preview-frame"
+                  style={{ ["--preview-mm" as string]: `${thermal.paperWidth || 80}mm` }}
+                >
+                  <ThermalPreview
+                    text={thermal.text}
+                    paperWidth={thermal.paperWidth}
+                    logoUrl={thermal.logoUrl}
+                    paidStampUrl={thermal.paidStampUrl}
+                    unpaidStampUrl={thermal.unpaidStampUrl}
+                  />
+                </div>
               ) : (
                 <p className="tiny muted">{t("settings.billPreviewLoading")}</p>
               )}
@@ -821,13 +1224,29 @@ export function BillsPage() {
               )}
             </div>
             <div className="form-footer no-print">
-              {can("order.edit") && selected.paymentStatus !== "PAID" && selected.status !== "CANCELLED" && (
-                editing ? (
+              {can("order.edit") &&
+                selected.status !== "CANCELLED" &&
+                selected.paymentStatus !== "PAID" &&
+                (editing ? (
                   <>
-                    <button type="button" className="btn" disabled={savingEdit} onClick={() => void saveEdit()}>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={savingEdit || !!editQtyBlocked}
+                      onClick={() => void saveEdit()}
+                    >
                       {savingEdit ? t("common.saving") : t("bills.saveEdit")}
                     </button>
-                    <button type="button" className="btn ghost" onClick={() => setEditing(false)}>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => {
+                        setEditing(false);
+                        setEditAdds([]);
+                        setEditQtyDraft({});
+                        setAddSearch("");
+                      }}
+                    >
                       {t("common.cancel")}
                     </button>
                   </>
@@ -846,8 +1265,20 @@ export function BillsPage() {
                       {cancelling ? t("common.saving") : t("bills.cancelOrder")}
                     </button>
                   </>
-                )
-              )}
+                ))}
+              {can("order.edit") &&
+                selected.paymentStatus === "PAID" &&
+                selected.status !== "CANCELLED" &&
+                !editing && (
+                  <button
+                    type="button"
+                    className="btn danger"
+                    disabled={cancelling}
+                    onClick={() => void reverseOrder()}
+                  >
+                    {cancelling ? t("common.saving") : t("bills.reversePayment")}
+                  </button>
+                )}
               {selected.status === "CANCELLED" &&
                 (can("order.edit") || can("print.kot")) &&
                 !editing && (

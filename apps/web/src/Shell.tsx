@@ -4,6 +4,7 @@ import { AccountModal } from "./components/AccountModal";
 import { LanguageSwitcher } from "./components/LanguageSwitcher";
 import { PoweredBy } from "./components/PoweredBy";
 import { useAuth } from "./auth";
+import { HotelGateProvider, useHotelGate } from "./hotel-gate";
 import { MessageKey, useT } from "./i18n";
 import { useToast } from "./toast";
 import { useSocketEvent } from "./socket";
@@ -31,6 +32,7 @@ const GROUPS: { titleKey: MessageKey; tabs: Tab[] }[] = [
       { to: "/store", labelKey: "nav.store", perms: ["store.view", "store.manage"] },
       { to: "/recipes", labelKey: "nav.recipes", perms: ["recipe.view", "recipe.manage"] },
       { to: "/menu", labelKey: "nav.menu", perms: ["menu.view", "menu.manage"] },
+      { to: "/specials", labelKey: "nav.specials", perms: ["menu.view", "menu.manage", "close.view", "close.manage", "store.manage"] },
     ],
   },
   {
@@ -41,8 +43,8 @@ const GROUPS: { titleKey: MessageKey; tabs: Tab[] }[] = [
       { to: "/expenses", labelKey: "nav.expenses", perms: ["expense.view", "expense.manage"] },
       { to: "/close", labelKey: "nav.close", perms: ["close.view", "close.manage"] },
       { to: "/users", labelKey: "nav.users", perms: ["users.manage"] },
-
-      { to: "/settings", labelKey: "nav.settings", perms: ["printers.manage", "system.manage", "tables.manage"] },
+      { to: "/table-settings", labelKey: "nav.tableSettings", perms: ["tables.manage"] },
+      { to: "/settings", labelKey: "nav.settings", perms: ["printers.manage", "system.manage"] },
     ],
   },
 ];
@@ -107,7 +109,16 @@ function LiveAlerts() {
 }
 
 export function Shell() {
+  return (
+    <HotelGateProvider>
+      <ShellFrame />
+    </HotelGateProvider>
+  );
+}
+
+function ShellFrame() {
   const { user, logout, can } = useAuth();
+  const { gate } = useHotelGate();
   const { brand, logoSrc } = useBrand();
   const t = useT();
   const [account, setAccount] = useState(false);
@@ -244,6 +255,11 @@ export function Shell() {
       <AccountModal open={account} onClose={() => setAccount(false)} />
       <div className="content">
         <div className="content-main">
+          {gate && !gate.acceptingOrders && (
+            <div className="hotel-banner" role="status">
+              {t("hotel.bannerClosed")}
+            </div>
+          )}
           <Outlet />
         </div>
         <PoweredBy className="no-print" />
