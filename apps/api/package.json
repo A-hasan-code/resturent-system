@@ -4,12 +4,12 @@
   "private": true,
   "scripts": {
     "dev": "nest start --watch",
-    "build": "nest build",
+    "build": "prisma generate --schema=prisma/schema.prisma && nest build",
     "start": "node dist/main.js",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
-    "db:generate": "prisma generate",
+    "db:generate": "prisma generate --schema=prisma/schema.prisma",
     "hotel:dev": "pnpm -w run hotel:dev"
   },
   "dependencies": {

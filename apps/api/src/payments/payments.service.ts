@@ -135,16 +135,14 @@ export class PaymentsService {
 
   async list(f: PaymentFilter) {
     const range = await this.businessRange(f.from, f.to);
-    const createdAt: Prisma.DateTimeFilter | undefined = range
-      ? { gte: range.gte, lt: range.lt }
-      : undefined;
+    const createdAt = range ? { gte: range.gte, lt: range.lt } : undefined;
 
     const method =
       f.method && f.method !== "ALL" && METHODS.has(f.method) ? (f.method as PaymentMethod) : undefined;
     // Handover status only applies to physical cash.
     const statusImpliesCash = !!f.status;
 
-    const where: Prisma.PaymentWhereInput = {
+    const where = {
       ...(createdAt ? { createdAt } : {}),
       ...(method ? { method } : statusImpliesCash ? { method: PaymentMethod.CASH } : {}),
       ...(f.status === "direct" ? { handedToId: null } : {}),
