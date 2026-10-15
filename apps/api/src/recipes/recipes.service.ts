@@ -63,6 +63,7 @@ export class RecipesService {
         category: r.category,
         baseUnit: r.baseUnit,
         baseQty: toNumber(r.baseQty),
+        prepMinutes: r.prepMinutes,
         costPerBase,
         totalForBase,
         ingredients: r.ingredients.map((i) => ({
@@ -95,6 +96,7 @@ export class RecipesService {
           category: catName,
           baseUnit: dto.baseUnit ?? "KG",
           baseQty: dto.baseQty ?? 1,
+          prepMinutes: dto.prepMinutes ?? 15,
           ingredients: { create: ingredients },
         },
         include: { ingredients: true },
@@ -144,6 +146,7 @@ export class RecipesService {
             ...(catName != null ? { category: catName } : {}),
             ...(dto.baseUnit != null ? { baseUnit: dto.baseUnit } : {}),
             ...(dto.baseQty != null ? { baseQty: dto.baseQty } : {}),
+            ...(dto.prepMinutes != null ? { prepMinutes: dto.prepMinutes } : {}),
           },
           include: { ingredients: true },
         });

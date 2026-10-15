@@ -3,7 +3,7 @@ import { ExtraExpensePaidBy, CashCounterKind, PaymentStatus, Prisma } from "@pri
 import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
 import { toNumber } from "../common/units";
-import { businessDateOf, businessWindow } from "../common/business-day";
+import { businessDateOf, businessQueryWindow } from "../common/business-day";
 import { AuthUser } from "../common/decorators";
 import { SaveDayCashCloseDto } from "./close.dto";
 import { renderClosePdf } from "./close-pdf";
@@ -46,7 +46,8 @@ export class CloseService {
     const today = businessDateOf(now, start.h, start.m);
     const businessDate = dateStr?.trim() || today;
     if (!DATE_RE.test(businessDate)) throw new BadRequestException("Invalid business date");
-    const window = businessWindow(businessDate, start.h, start.m);
+    // Exact from/to for sheet labels; gte/lt TZ-padded for payment/order queries (same as Bills).
+    const window = businessQueryWindow(businessDate, start.h, start.m);
     return {
       ...start,
       businessDate,
@@ -54,6 +55,8 @@ export class CloseService {
       isToday: businessDate === today,
       from: window.from,
       to: window.to,
+      gte: window.gte,
+      lt: window.lt,
     };
   }
 
@@ -65,19 +68,28 @@ export class CloseService {
   }
 
   private kindForRole(code: string): CashCounterKind | null {
-    if (code === "MAIN_CASHIER") return CashCounterKind.COUNTER_1;
+    // Admin / System Manager cash stays in the main drawer (Counter 1), same as Main Cashier.
+    if (code === "MAIN_CASHIER" || code === "ADMIN" || code === "SYSTEM_MANAGER") {
+      return CashCounterKind.COUNTER_1;
+    }
     if (code === "CASHIER") return CashCounterKind.COUNTER_2;
     return null;
   }
 
   private async liveSheet(businessDate?: string) {
     const clock = await this.clock(businessDate);
-    const { from, to } = clock;
+    const { from, to, gte, lt } = clock;
 
-    const [payments, orders, cashiers, saved, hotelExpAgg, supplierPayAgg, selfExtraPurchases] =
+    const orderStaffInclude = {
+      cashier: { select: { name: true } },
+      assignedCashier: { select: { name: true } },
+      creditCustomer: { select: { name: true } },
+    } as const;
+
+    const [payments, orders, openCreditOrders, cashiers, saved, hotelExpAgg, supplierPayAgg, selfExtraPurchases] =
       await Promise.all([
       this.prisma.payment.findMany({
-        where: { createdAt: { gte: from, lt: to } },
+        where: { createdAt: { gte, lt } },
         include: {
           order: {
             select: {
@@ -95,16 +107,24 @@ export class CloseService {
         orderBy: { createdAt: "asc" },
       }),
       this.prisma.order.findMany({
-        where: { createdAt: { gte: from, lt: to }, status: { not: "CANCELLED" } },
+        where: { createdAt: { gte, lt }, status: { not: "CANCELLED" } },
         include: {
           items: {
             where: { lineKind: "MENU" },
             select: { name: true, quantity: true, amount: true },
           },
-          cashier: { select: { name: true } },
-          assignedCashier: { select: { name: true } },
-          creditCustomer: { select: { name: true } },
+          ...orderStaffInclude,
         },
+        orderBy: { createdAt: "asc" },
+      }),
+      // All open credit invoices (any day) — receivables, never part of drawer expected cash.
+      this.prisma.order.findMany({
+        where: {
+          creditCustomerId: { not: null },
+          status: { not: "CANCELLED" },
+          paymentStatus: { in: [PaymentStatus.UNPAID, PaymentStatus.PARTIAL] },
+        },
+        include: orderStaffInclude,
         orderBy: { createdAt: "asc" },
       }),
       this.prisma.user.findMany({
@@ -120,18 +140,18 @@ export class CloseService {
         },
       }),
       this.prisma.hotelExpense.aggregate({
-        where: { spentAt: { gte: from, lt: to } },
+        where: { spentAt: { gte, lt } },
         _sum: { amount: true },
         _count: true,
       }),
       this.prisma.supplierPayment.aggregate({
-        where: { paidAt: { gte: from, lt: to } },
+        where: { paidAt: { gte, lt } },
         _sum: { amount: true },
         _count: true,
       }),
       this.prisma.purchase.findMany({
         where: {
-          purchasedAt: { gte: from, lt: to },
+          purchasedAt: { gte, lt },
           voidedAt: null,
           extraExpense: { gt: 0 },
           extraExpensePaidBy: ExtraExpensePaidBy.SELF,
@@ -181,8 +201,11 @@ export class CloseService {
     const nonCashPayments = payRows.filter((p) => p.method !== "CASH");
 
     const paidOrders = orders.filter((o) => o.paymentStatus === PaymentStatus.PAID);
+    // Table / walk-in unpaid only — credit receivables are tracked separately and never feed expected cash.
     const pendingOrders = orders.filter(
-      (o) => o.paymentStatus === PaymentStatus.UNPAID || o.paymentStatus === PaymentStatus.PARTIAL
+      (o) =>
+        !o.creditCustomerId &&
+        (o.paymentStatus === PaymentStatus.UNPAID || o.paymentStatus === PaymentStatus.PARTIAL)
     );
 
     const soldMap = new Map<string, { name: string; qty: number; amount: number }>();
@@ -198,57 +221,116 @@ export class CloseService {
       .map((x) => ({ ...x, qty: Math.round(x.qty * 1000) / 1000 }))
       .sort((a, b) => b.amount - a.amount);
 
-    const pendingBills = pendingOrders.map((o) => {
+    const invoiceNet = (o: { total: unknown; discountAmount?: unknown; taxAmount?: unknown }) =>
+      money2(Math.max(0, toNumber(o.total) - toNumber(o.discountAmount ?? 0) + toNumber(o.taxAmount ?? 0)));
+
+    const toPendingBill = (o: (typeof orders)[number] | (typeof openCreditOrders)[number]) => {
       const total = toNumber(o.total);
       const paid = toNumber(o.paidAmount);
+      const net = invoiceNet(o);
       const isCredit = !!o.creditCustomerId;
       return {
         orderNo: o.orderNo,
         tableNo: o.tableNo,
         total,
         paidAmount: paid,
-        balance: money2(total - paid),
+        balance: money2(Math.max(0, net - paid)),
         paymentStatus: o.paymentStatus,
         isCredit,
         creditCustomerName: o.creditCustomer?.name ?? null,
         cashier: o.cashier?.name || o.assignedCashier?.name || null,
+        createdAt: o.createdAt.toISOString(),
+      };
+    };
+
+    const pendingBills = pendingOrders.map(toPendingBill);
+    const creditUnpaidBills = openCreditOrders.map(toPendingBill);
+    const creditUnpaidAmount = money2(creditUnpaidBills.reduce((s, b) => s + b.balance, 0));
+    const creditUnpaidCount = creditUnpaidBills.length;
+
+    // Today's new credit invoices (opened / put on credit this business day).
+    const creditTodayOrders = orders.filter((o) => !!o.creditCustomerId);
+    const creditTodayBills = creditTodayOrders.map((o) => {
+      const net = invoiceNet(o);
+      return {
+        orderNo: o.orderNo,
+        tableNo: o.tableNo,
+        total: toNumber(o.total),
+        amount: net,
+        paidAmount: toNumber(o.paidAmount),
+        balance: money2(Math.max(0, net - toNumber(o.paidAmount))),
+        paymentStatus: o.paymentStatus,
+        creditCustomerName: o.creditCustomer?.name ?? null,
+        cashier: o.cashier?.name || o.assignedCashier?.name || null,
+        createdAt: o.createdAt.toISOString(),
       };
     });
+    const creditTodayAmount = money2(creditTodayBills.reduce((s, b) => s + b.amount, 0));
+    const creditTodayCount = creditTodayBills.length;
 
-    const creditPendingBills = pendingBills.filter((b) => b.isCredit);
-    const creditUnpaidAmount = money2(creditPendingBills.reduce((s, b) => s + b.balance, 0));
-    const creditUnpaidCount = creditPendingBills.length;
+    // Cash collected today against credit accounts (settlements) — in drawer, listed separately.
     const creditPayments = payRows.filter((p) => p.isCredit);
-    const creditPaidAmount = money2(creditPayments.reduce((s, p) => s + p.amount, 0));
-    const creditPaidCount = creditPayments.length;
+    const creditPaidBills = creditPayments.map((p) => ({
+      id: p.id,
+      orderNo: p.orderNo,
+      tableNo: p.tableNo,
+      amount: p.amount,
+      creditCustomerName: p.creditCustomerName,
+      cashier: p.drawerName,
+      createdAt: p.createdAt,
+      paymentStatus: "PAID" as const,
+    }));
+    const creditPaidAmount = money2(creditPaidBills.reduce((s, p) => s + p.amount, 0));
+    const creditPaidCount = creditPaidBills.length;
     const pendingAmount = money2(pendingBills.reduce((s, b) => s + b.balance, 0));
     const paidSalesTotal = money2(paidOrders.reduce((s, o) => s + toNumber(o.total), 0));
 
     const savedByKind = new Map(saved?.counters.map((c) => [c.kind, c]) ?? []);
 
+    const billRowsFrom = (rows: PayRow[]) => {
+      const billIds = [...new Set(rows.map((p) => p.orderId))];
+      return billIds.map((id) => {
+        const sample = rows.find((p) => p.orderId === id)!;
+        const paidOnCounter = money2(rows.filter((p) => p.orderId === id).reduce((s, p) => s + p.amount, 0));
+        return {
+          orderId: id,
+          orderNo: sample.orderNo,
+          tableNo: sample.tableNo,
+          orderTotal: sample.orderTotal,
+          paidOnCounter,
+          isCredit: sample.isCredit,
+          creditCustomerName: sample.creditCustomerName,
+        };
+      });
+    };
+
     const counters = [CashCounterKind.COUNTER_1, CashCounterKind.COUNTER_2].map((kind) => {
       const meta = this.counterMeta(kind);
+      // All physical cash on this drawer (walk-in + credit settlements).
       const rows = payRows.filter((p) => p.counterKind === kind);
-      const cashSales = money2(rows.reduce((s, p) => s + p.amount, 0));
+      const walkInRows = rows.filter((p) => !p.isCredit);
+      const creditRows = rows.filter((p) => p.isCredit);
+      const walkInCash = money2(walkInRows.reduce((s, p) => s + p.amount, 0));
+      const creditCash = money2(creditRows.reduce((s, p) => s + p.amount, 0));
+      const cashSales = money2(walkInCash + creditCash);
       const tipTotal = money2(rows.reduce((s, p) => s + p.tipAmount, 0));
-      const billIds = new Set(rows.map((p) => p.orderId));
       const savedC = savedByKind.get(kind);
       const staff = cashiers
         .filter((u) => u.role.code === meta.roleCode)
         .map((u) => ({ id: u.id, name: u.name }));
 
-      // Base expected = cash sales + tips kept in drawer for this counter.
+      // Base expected = all drawer cash + tips (+ float on C1).
       let expectedCash = money2(cashSales + tipTotal);
-      // Main counter also holds opening float and absorbs hotel cash-outs.
       if (kind === CashCounterKind.COUNTER_1) {
         const float = saved ? toNumber(saved.openingFloat) : 0;
-        // cashOut computed below — apply after loop via second pass
         expectedCash = money2(expectedCash + float);
       }
 
       const collectedCash = savedC ? toNumber(savedC.collectedCash) : expectedCash;
       const missCash = money2(Math.max(0, expectedCash - collectedCash));
       const surplusCash = money2(Math.max(0, collectedCash - expectedCash));
+      const bills = billRowsFrom(walkInRows);
+      const creditBills = billRowsFrom(creditRows);
 
       return {
         kind,
@@ -256,29 +338,24 @@ export class CloseService {
         roleCode: meta.roleCode,
         cashiers: staff,
         cashSales,
+        walkInCash,
+        creditCash,
         tipTotal,
         expectedCash,
         collectedCash,
         missCash,
         surplusCash,
         missReason: savedC?.missReason ?? "",
-        billCount: billIds.size,
-        paymentCount: rows.length,
+        billCount: bills.length,
+        creditBillCount: creditBills.length,
+        paymentCount: walkInRows.length,
+        creditPaymentCount: creditRows.length,
         pendingHandoverCash: money2(rows.filter((p) => p.pendingHandover).reduce((s, p) => s + p.amount, 0)),
-        payments: rows,
-        bills: [...billIds].map((id) => {
-          const sample = rows.find((p) => p.orderId === id)!;
-          const paidOnCounter = money2(rows.filter((p) => p.orderId === id).reduce((s, p) => s + p.amount, 0));
-          return {
-            orderId: id,
-            orderNo: sample.orderNo,
-            tableNo: sample.tableNo,
-            orderTotal: sample.orderTotal,
-            paidOnCounter,
-            isCredit: sample.isCredit,
-            creditCustomerName: sample.creditCustomerName,
-          };
-        }),
+        /** Walk-in / table cash only — credit collections listed separately. */
+        payments: walkInRows,
+        bills,
+        creditPayments: creditRows,
+        creditBills,
       };
     });
 
@@ -307,7 +384,20 @@ export class CloseService {
         c.missReason = savedC.missReason ?? "";
         c.tipTotal = toNumber(savedC.tipTotal);
         if (Array.isArray(savedC.paymentsJson)) {
-          c.payments = savedC.paymentsJson as typeof c.payments;
+          const snap = savedC.paymentsJson as PayRow[];
+          const walkIn = snap.filter((p) => !p.isCredit);
+          const credit = snap.filter((p) => p.isCredit);
+          // Older snapshots mixed credit into payments — always re-split by isCredit.
+          c.payments = walkIn.length || credit.length ? walkIn : snap;
+          c.creditPayments = credit;
+          c.bills = billRowsFrom(c.payments);
+          c.creditBills = billRowsFrom(credit);
+          c.walkInCash = money2(c.payments.reduce((s, p) => s + p.amount, 0));
+          c.creditCash = money2(credit.reduce((s, p) => s + p.amount, 0));
+          c.billCount = c.bills.length;
+          c.creditBillCount = c.creditBills.length;
+          c.paymentCount = c.payments.length;
+          c.creditPaymentCount = credit.length;
         }
       }
     }
@@ -364,7 +454,9 @@ export class CloseService {
       today: clock.today,
       isToday: clock.isToday,
       dayStart: clock.label,
-      canEdit: clock.isToday && !locked,
+      canEdit: !locked && clock.isToday,
+      /** Frontend + save(): Admin may edit unlocked past days. */
+      canAdminEditPast: !locked && !clock.isToday,
       locked,
       frozen: !!(saved && !clock.isToday),
       from: clock.from.toISOString(),
@@ -380,6 +472,9 @@ export class CloseService {
       soldItems: frozenSold,
       specialsClose,
       pendingBills,
+      creditTodayBills,
+      creditPaidBills,
+      creditUnpaidBills,
       paidBills: paidOrders.map((o) => ({
         orderNo: o.orderNo,
         tableNo: o.tableNo,
@@ -406,11 +501,14 @@ export class CloseService {
         paidBillsCount: paidOrders.length,
         paidSalesTotal,
         totalSale: paidSalesTotal,
+        // Expected + open table unpaid only — credit receivables stay out of this figure.
         cashPlusPending: money2(expectedCash + pendingAmount),
-        creditUnpaidAmount,
-        creditUnpaidCount,
+        creditTodayAmount,
+        creditTodayCount,
         creditPaidAmount,
         creditPaidCount,
+        creditUnpaidAmount,
+        creditUnpaidCount,
         hotelExpenses,
         hotelExpenseCount: hotelExpAgg._count,
         supplierPaid,
@@ -422,8 +520,15 @@ export class CloseService {
     };
   }
 
-  async preview(date?: string) {
-    return this.liveSheet(date);
+  async preview(date?: string, user?: AuthUser) {
+    const sheet = await this.liveSheet(date);
+    const isAdmin = user?.roleCode === "ADMIN";
+    return {
+      ...sheet,
+      canEdit:
+        !sheet.locked && (sheet.isToday || (isAdmin && !!sheet.canAdminEditPast)),
+      adminPastEdit: isAdmin && !sheet.isToday && !sheet.locked,
+    };
   }
 
   async toPdf(date?: string) {
@@ -462,10 +567,15 @@ export class CloseService {
   }
 
   async save(dto: SaveDayCashCloseDto, user: AuthUser) {
+    const isAdmin = user.roleCode === "ADMIN";
     const sheet = await this.liveSheet(dto.businessDate);
-    if (!sheet.isToday) {
+    // Past-day Admin edits may run after hotel close; today still requires hotel open.
+    if (sheet.isToday || !isAdmin) {
+      await this.settings.assertHotelOpen();
+    }
+    if (!sheet.isToday && !isAdmin) {
       throw new BadRequestException(
-        "Past day close reports are view-only. Only today’s report can be saved or updated."
+        "Past day close reports are view-only. Only Admin can edit a previous day’s close."
       );
     }
     if (sheet.locked) {
@@ -507,10 +617,11 @@ export class CloseService {
         collectedCash,
         missCash,
         missReason: missCash > 0 ? missReason : missReason || null,
-        billCount: c.billCount,
-        paymentCount: c.paymentCount,
+        billCount: c.billCount + (c.creditBillCount ?? 0),
+        paymentCount: c.paymentCount + (c.creditPaymentCount ?? 0),
         tipTotal: c.tipTotal,
-        paymentsJson: c.payments as unknown as Prisma.InputJsonValue,
+        // Snapshot both walk-in and credit rows; preview re-splits by isCredit.
+        paymentsJson: [...c.payments, ...(c.creditPayments ?? [])] as unknown as Prisma.InputJsonValue,
       };
     });
 

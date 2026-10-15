@@ -3,6 +3,8 @@ import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "./settings.service";
 import { toNumber } from "../common/units";
+import { type BillBlockId, normalizeBillBlockOrder } from "../print/bill-blocks";
+import { DEFAULT_BILL_TEMPLATE, normalizeBillTemplate } from "../print/bill-template";
 
 /** How guest tips are split among staff. */
 export type TipSplit = "ORDER_TAKER" | "SERVER" | "SPLIT_50" | "POOL";
@@ -22,6 +24,10 @@ export type PrintBillOpts = {
   paidStampText: string;
   paidStampBig: boolean;
   footer: string;
+  blockOrder: BillBlockId[];
+  template: string;
+  grapesProject: string | null;
+  customCss: string;
 };
 
 export type PrintKotOpts = {
@@ -53,7 +59,7 @@ export class TipService {
       showTagline: s["print.bill.showTagline"] !== "0",
       showAddress: s["print.bill.showAddress"] !== "0",
       showPhone: s["print.bill.showPhone"] !== "0",
-      title: (s["print.bill.title"] || "Customer Bill").trim() || "Customer Bill",
+      title: (s["print.bill.title"] || "Provisional Bill").trim() || "Provisional Bill",
       showOrderBy: s["print.bill.showOrderBy"] !== "0",
       showServedBy: s["print.bill.showServedBy"] !== "0",
       showCashier: s["print.bill.showCashier"] !== "0",
@@ -62,6 +68,10 @@ export class TipService {
       paidStampText: (s["print.bill.paidStampText"] || "*** PAID ***").trim() || "*** PAID ***",
       paidStampBig: s["print.bill.paidStampBig"] !== "0",
       footer: (s["print.bill.footer"] || "Thanks for your Visit..").trim(),
+      blockOrder: normalizeBillBlockOrder(s["print.bill.blockOrder"]),
+      template: normalizeBillTemplate(s["print.bill.template"] || DEFAULT_BILL_TEMPLATE),
+      grapesProject: (s["print.bill.grapesProject"] || "").trim() || null,
+      customCss: (s["print.bill.customCss"] || "").trim(),
     };
   }
 
@@ -131,27 +141,27 @@ export class TipService {
     }
   }
 
-  async tipsTodayForUser(userId: string, start: Date) {
+  async tipsTodayForUser(userId: string, start: Date, end?: Date) {
     const agg = await this.prisma.tipShare.aggregate({
-      where: { userId, createdAt: { gte: start } },
+      where: { userId, createdAt: end ? { gte: start, lt: end } : { gte: start } },
       _sum: { amount: true },
       _count: true,
     });
     return { amount: toNumber(agg._sum.amount ?? 0), shares: agg._count };
   }
 
-  async tipsTodayTotal(start: Date) {
+  async tipsTodayTotal(start: Date, end?: Date) {
     const agg = await this.prisma.tipShare.aggregate({
-      where: { createdAt: { gte: start } },
+      where: { createdAt: end ? { gte: start, lt: end } : { gte: start } },
       _sum: { amount: true },
     });
     return toNumber(agg._sum.amount ?? 0);
   }
 
-  async tipBoard(start: Date) {
+  async tipBoard(start: Date, end?: Date) {
     const rows = await this.prisma.tipShare.groupBy({
       by: ["userId"],
-      where: { createdAt: { gte: start } },
+      where: { createdAt: end ? { gte: start, lt: end } : { gte: start } },
       _sum: { amount: true },
       _count: true,
     });

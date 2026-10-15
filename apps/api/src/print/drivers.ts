@@ -87,6 +87,44 @@ export async function sendToWindowsPrinter(printerName: string, data: Buffer) {
   }
 }
 
+/**
+ * Print a PDF buffer to a Windows printer via the shell PrintTo verb
+ * (uses the server’s default PDF app / driver — office/A4 printers).
+ */
+export async function printPdfToWindowsPrinter(printerName: string, pdf: Buffer) {
+  if (process.platform !== "win32") throw new Error("PDF Other print only works on Windows server");
+  if (!printerName.trim()) throw new Error("Printer name required");
+  if (!pdf?.length) throw new Error("PDF is empty");
+
+  const tmp = join(tmpdir(), `hotel-report-${Date.now()}-${Math.random().toString(36).slice(2)}.pdf`);
+  writeFileSync(tmp, pdf);
+  const printer = printerName.replace(/'/g, "''");
+  const pathEsc = tmp.replace(/'/g, "''");
+  try {
+    // PrintTo uses the registered PDF handler; wait briefly then release the temp file.
+    await powershell(
+      [
+        "-Command",
+        `$ErrorActionPreference='Stop'; ` +
+          `$p = Start-Process -FilePath '${pathEsc}' -Verb PrintTo -ArgumentList '${printer}' -PassThru -WindowStyle Hidden; ` +
+          `if ($p) { Wait-Process -Id $p.Id -Timeout 90 -ErrorAction SilentlyContinue }; ` +
+          `Start-Sleep -Seconds 3`,
+      ],
+      120_000
+    );
+  } finally {
+    // Handler may still hold the file briefly
+    for (let i = 0; i < 5; i++) {
+      try {
+        unlinkSync(tmp);
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+}
+
 /** LAN thermal printers accept raw ESC/POS on TCP 9100. */
 export function sendToNetworkPrinter(target: string, data: Buffer, timeoutMs = 6000) {
   const [host, portStr] = target.trim().split(":");

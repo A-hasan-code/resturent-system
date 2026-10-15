@@ -19,6 +19,8 @@ import {
   EditOrderDto,
   PayOrderDto,
   PrintKotDto,
+  PutOnCreditDto,
+  ReassignCreditDto,
   UpdateOrderDto,
   UpdateStatusDto,
 } from "./dto";
@@ -34,9 +36,16 @@ export class OrdersController {
     @CurrentUser() user: AuthUser,
     @Query("paymentStatus") paymentStatus?: string,
     @Query("status") status?: string,
-    @Query("view") view?: string
+    @Query("view") view?: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("includeCredit") includeCredit?: string
   ) {
-    return this.orders.list(user, paymentStatus, status, view === "billing");
+    return this.orders.list(user, paymentStatus, status, view === "billing", {
+      from,
+      to,
+      includeCredit: includeCredit === "1" || includeCredit === "true",
+    });
   }
 
   /** Active kitchen tickets (PENDING / PREPARING / READY) — not capped by general list take:100. */
@@ -135,6 +144,22 @@ export class OrdersController {
   @RequirePerms("order.pay")
   pay(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: PayOrderDto) {
     return this.orders.pay(user, id, dto);
+  }
+
+  @Post(":id/put-on-credit")
+  @RequirePerms("order.pay")
+  putOnCredit(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: PutOnCreditDto) {
+    return this.orders.putOnCredit(user, id, dto);
+  }
+
+  @Patch(":id/credit-customer")
+  @RequirePerms("order.pay")
+  reassignCredit(
+    @CurrentUser() user: AuthUser,
+    @Param("id") id: string,
+    @Body() dto: ReassignCreditDto
+  ) {
+    return this.orders.reassignCredit(user, id, dto.creditCustomerId);
   }
 
   @Post(":id/release-credit")

@@ -9,8 +9,8 @@ import { useConfirm } from "../components/ConfirmModal";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 import { listPriceLabel } from "../menuQty";
+import { loadKitchenStations, type KitchenStationRow } from "../kitchenStations";
 
-type KitchenStation = "BEVERAGES" | "COOKING" | "BBQ";
 type MenuKind = "NORMAL" | "SPECIAL" | "MIX";
 type FormKind = "NORMAL" | "MIX";
 type KindFilter = "ALL" | MenuKind;
@@ -23,11 +23,23 @@ type SpecialProduct = {
   plateGrams: number;
 };
 
+type DealPart = {
+  id?: string;
+  kind: "STORE" | "SPECIAL";
+  recipeId?: string | null;
+  specialProductId?: string | null;
+  quantity: number;
+  sortOrder?: number;
+  label?: string | null;
+  recipe?: { id: string; name: string; category: string | null; baseUnit: string } | null;
+  specialProduct?: { id: string; name: string; platePrice?: number; plateGrams?: number } | null;
+};
+
 type MenuItem = {
   id: string;
   name: string;
   category: string | null;
-  kitchenStation?: KitchenStation | null;
+  kitchenStation?: string | null;
   kind?: MenuKind;
   sellUnit: string;
   sellingPrice: number;
@@ -39,6 +51,7 @@ type MenuItem = {
   specialProductId?: string | null;
   mixSpecialPlates?: number | null;
   specialProduct?: SpecialProduct | null;
+  parts?: DealPart[];
   minQty?: number;
   maxQty?: number | null;
   qtyStep?: number | null;
@@ -48,11 +61,22 @@ type MenuItem = {
 
 type ModDraft = { name: string; priceDelta: string };
 
+type DealPartDraft = {
+  key: string;
+  kind: "STORE" | "SPECIAL";
+  recipeId: string;
+  specialProductId: string;
+  qty: string;
+};
+
 type Recipe = { id: string; name: string; category: string; baseUnit: string };
 type RecipeCat = { id: string; name: string };
 
+function newDealKey() {
+  return `p-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
 const UNITS = ["KG", "G", "L", "ML", "PCS"] as const;
-const STATIONS: KitchenStation[] = ["BEVERAGES", "COOKING", "BBQ"];
 const PAGE_SIZE = 10;
 
 function defaultPriceBasis(unit: string) {
@@ -96,9 +120,10 @@ export function MenuPage() {
   const [kindFilter, setKindFilter] = useState<KindFilter>("ALL");
   const [newCatName, setNewCatName] = useState("");
 
+  const [stations, setStations] = useState<KitchenStationRow[]>([]);
   const [name, setName] = useState("");
   const [category, setCategory] = useState("Karahi");
-  const [kitchenStation, setKitchenStation] = useState<KitchenStation>("COOKING");
+  const [kitchenStation, setKitchenStation] = useState("COOKING");
   const [sellUnit, setSellUnit] = useState("KG");
   const [price, setPrice] = useState("");
   const [priceBasis, setPriceBasis] = useState("1000");
@@ -107,19 +132,27 @@ export function MenuPage() {
   const [qtyStep, setQtyStep] = useState("");
   const [allowCustomQty, setAllowCustomQty] = useState(true);
   const [recipeId, setRecipeId] = useState("");
-  const [specialProductId, setSpecialProductId] = useState("");
-  const [mixPlates, setMixPlates] = useState("1");
   const [recipeQ, setRecipeQ] = useState("");
+  const [dealParts, setDealParts] = useState<DealPartDraft[]>([]);
+  const [addingStore, setAddingStore] = useState(false);
+  const [addingPot, setAddingPot] = useState(false);
   const [modDrafts, setModDrafts] = useState<ModDraft[]>([]);
+
+  function stationLabel(code: string | null | undefined) {
+    const c = code || "COOKING";
+    return stations.find((s) => s.code === c)?.name || c;
+  }
 
   async function load() {
     try {
-      const [menu, recipeCats] = await Promise.all([
+      const [menu, recipeCats, stationList] = await Promise.all([
         api<MenuItem[]>("/menu"),
         api<RecipeCat[]>("/recipes/categories"),
+        loadKitchenStations(),
       ]);
       setRows(menu);
       setCats(recipeCats);
+      setStations(stationList);
       if (recipeCats[0]) setCategory((c) => c || recipeCats[0].name);
       if (can("menu.manage", "recipe.view", "recipe.manage")) {
         setRecipes(await api<Recipe[]>("/recipes"));
@@ -184,15 +217,6 @@ export function MenuPage() {
     return list.slice(0, 14);
   }, [recipes, recipeQ]);
 
-  const selectedRecipe = useMemo(
-    () => recipes.find((r) => r.id === recipeId) || null,
-    [recipes, recipeId]
-  );
-
-  const selectedSpecial = useMemo(
-    () => specials.find((p) => p.id === specialProductId) || null,
-    [specials, specialProductId]
-  );
   useEffect(() => {
     setPage(1);
   }, [q, kindFilter]);
@@ -257,7 +281,9 @@ export function MenuPage() {
   function resetForm() {
     setName("");
     setCategory(cats[0]?.name || "Karahi");
-    setKitchenStation("COOKING");
+    setKitchenStation(
+      stations.find((s) => s.code === "COOKING")?.code || stations[0]?.code || "COOKING"
+    );
     setSellUnit("KG");
     setPrice("");
     setPriceBasis(defaultPriceBasis("KG"));
@@ -266,9 +292,10 @@ export function MenuPage() {
     setQtyStep("");
     setAllowCustomQty(true);
     setRecipeId("");
-    setSpecialProductId("");
-    setMixPlates("1");
     setRecipeQ("");
+    setDealParts([]);
+    setAddingStore(false);
+    setAddingPot(false);
     setModDrafts([]);
     setEditId(null);
     setFormKind("NORMAL");
@@ -287,7 +314,7 @@ export function MenuPage() {
       setMinQty("1");
       setQtyStep("1");
       setAllowCustomQty(false);
-      setMixPlates("1");
+      setDealParts([]);
     }
     setPickOpen(false);
     setOpen(true);
@@ -307,8 +334,6 @@ export function MenuPage() {
     setSellUnit(m.sellUnit);
     setRecipeId(m.recipeId || "");
     setRecipeQ("");
-    setSpecialProductId(m.specialProductId || "");
-    setMixPlates(String(m.mixSpecialPlates ?? 1));
     setMinQty(String(m.minQty ?? (kind === "MIX" ? 1 : 0)));
     setMaxQty(m.maxQty == null ? "" : String(m.maxQty));
     setQtyStep(m.qtyStep == null ? "" : String(m.qtyStep));
@@ -316,6 +341,43 @@ export function MenuPage() {
     setModDrafts(
       (m.modifiers ?? []).map((x) => ({ name: x.name, priceDelta: String(x.priceDelta) }))
     );
+    if (kind === "MIX") {
+      const fromParts = (m.parts ?? []).map((p) => ({
+        key: p.id || newDealKey(),
+        kind: p.kind,
+        recipeId: p.recipeId || "",
+        specialProductId: p.specialProductId || "",
+        qty: String(p.quantity > 0 ? p.quantity : 1),
+      }));
+      if (fromParts.length) {
+        setDealParts(fromParts);
+      } else {
+        const legacy: DealPartDraft[] = [];
+        if (m.recipeId) {
+          legacy.push({
+            key: newDealKey(),
+            kind: "STORE",
+            recipeId: m.recipeId,
+            specialProductId: "",
+            qty: "1",
+          });
+        }
+        if (m.specialProductId) {
+          legacy.push({
+            key: newDealKey(),
+            kind: "SPECIAL",
+            recipeId: "",
+            specialProductId: m.specialProductId,
+            qty: String(m.mixSpecialPlates ?? 1),
+          });
+        }
+        setDealParts(legacy);
+      }
+      setAddingStore(false);
+      setAddingPot(false);
+    } else {
+      setDealParts([]);
+    }
 
     if (kind === "MIX") {
       setPrice(String(m.sellingPrice));
@@ -353,17 +415,40 @@ export function MenuPage() {
     }
 
     if (formKind === "MIX") {
-      if (!recipeId) {
+      const storeParts = dealParts.filter((p) => p.kind === "STORE" && p.recipeId);
+      if (!storeParts.length) {
         toast.push(t("menu.needMixRecipe"), "err");
         return;
       }
-      if (!specialProductId) {
-        toast.push(t("menu.needSpecial"), "err");
-        return;
+      const partsPayload: {
+        kind: "STORE" | "SPECIAL";
+        recipeId?: string;
+        specialProductId?: string;
+        quantity: number;
+        sortOrder: number;
+      }[] = [];
+      let sort = 0;
+      for (const p of dealParts) {
+        const qty = Number(p.qty);
+        if (!(qty > 0)) {
+          toast.push(t("menu.needMixPlates"), "err");
+          return;
+        }
+        if (p.kind === "STORE") {
+          if (!p.recipeId) continue;
+          partsPayload.push({ kind: "STORE", recipeId: p.recipeId, quantity: qty, sortOrder: sort++ });
+        } else {
+          if (!p.specialProductId) continue;
+          partsPayload.push({
+            kind: "SPECIAL",
+            specialProductId: p.specialProductId,
+            quantity: qty,
+            sortOrder: sort++,
+          });
+        }
       }
-      const plates = Number(mixPlates);
-      if (!(plates > 0)) {
-        toast.push(t("menu.needMixPlates"), "err");
+      if (!partsPayload.some((p) => p.kind === "STORE")) {
+        toast.push(t("menu.needMixRecipe"), "err");
         return;
       }
       setBusy(true);
@@ -380,9 +465,7 @@ export function MenuPage() {
           maxQty: maxQty.trim() === "" ? null : Number(maxQty),
           qtyStep: qtyStep.trim() === "" ? 1 : Number(qtyStep),
           allowCustomQty,
-          recipeId,
-          specialProductId,
-          mixSpecialPlates: plates,
+          parts: partsPayload,
         };
         if (editId) {
           await api(`/menu/${editId}`, { method: "PATCH", body: JSON.stringify(body) });
@@ -526,18 +609,31 @@ export function MenuPage() {
                 {t("menu.extrasBadge", { n: String(m.modifiers!.length) })}
               </span>
             )}
-            {m.specialProduct && (
-              <span style={{ marginLeft: "0.35rem" }}>
-                · {t("menu.mixPartCooked")}: {m.specialProduct.name}
-                {isMix && m.mixSpecialPlates != null
-                  ? ` × ${m.mixSpecialPlates}`
-                  : ""}
-              </span>
-            )}
-            {isMix && m.recipe && (
+            {isMix && (m.parts?.length ?? 0) > 0 ? (
               <div className="tiny muted" style={{ marginTop: "0.15rem" }}>
-                {t("menu.mixPartStore")}: {m.recipe.name}
+                {m.parts!.map((p, i) => (
+                  <span key={p.id || i}>
+                    {i > 0 ? " · " : ""}
+                    {p.kind === "STORE"
+                      ? `${t("menu.mixPartStore")}: ${p.recipe?.name || "?"}×${p.quantity}`
+                      : `${t("menu.mixPartCooked")}: ${p.specialProduct?.name || "?"}×${p.quantity}`}
+                  </span>
+                ))}
               </div>
+            ) : (
+              <>
+                {m.specialProduct && (
+                  <span style={{ marginLeft: "0.35rem" }}>
+                    · {t("menu.mixPartCooked")}: {m.specialProduct.name}
+                    {isMix && m.mixSpecialPlates != null ? ` × ${m.mixSpecialPlates}` : ""}
+                  </span>
+                )}
+                {isMix && m.recipe && (
+                  <div className="tiny muted" style={{ marginTop: "0.15rem" }}>
+                    {t("menu.mixPartStore")}: {m.recipe.name}
+                  </div>
+                )}
+              </>
             )}
           </div>
         </td>
@@ -545,9 +641,7 @@ export function MenuPage() {
           <span className="badge">{m.category || "—"}</span>
         </td>
         <td>
-          <span className="badge">
-            {t(`menu.station.${m.kitchenStation || "COOKING"}` as "menu.station.COOKING")}
-          </span>
+          <span className="badge">{stationLabel(m.kitchenStation)}</span>
         </td>
         <td>{unitLabel(m.sellUnit)}</td>
         <td>
@@ -778,12 +872,12 @@ export function MenuPage() {
               <label>{t("menu.kitchenStation")}</label>
               <select
                 value={kitchenStation}
-                onChange={(e) => setKitchenStation(e.target.value as KitchenStation)}
+                onChange={(e) => setKitchenStation(e.target.value)}
                 required
               >
-                {STATIONS.map((s) => (
-                  <option key={s} value={s}>
-                    {t(`menu.station.${s}` as "menu.station.COOKING")}
+                {stations.map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.name}
                   </option>
                 ))}
               </select>
@@ -809,45 +903,117 @@ export function MenuPage() {
                   style={{ marginBottom: "0.85rem", background: "var(--panel-2, rgba(0,0,0,0.03))" }}
                 >
                   <strong style={{ display: "block", marginBottom: "0.35rem" }}>
-                    1 · {t("menu.mixPartStore")}
+                    {t("menu.mixDealParts")}
                   </strong>
                   <p className="tiny muted" style={{ marginTop: 0 }}>
-                    {t("menu.mixPartStoreHint")}
+                    {t("menu.mixDealPartsHint")}
                   </p>
-                  <div className="field" style={{ marginBottom: 0 }}>
-                    <label>{t("menu.mixStoreRecipe")}</label>
-                    {selectedRecipe ? (
-                      <div className="row" style={{ gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+
+                  {dealParts.map((p) => {
+                    const recipe = recipes.find((r) => r.id === p.recipeId);
+                    const pot = specials.find((s) => s.id === p.specialProductId);
+                    return (
+                      <div
+                        key={p.key}
+                        className="row"
+                        style={{
+                          gap: "0.5rem",
+                          flexWrap: "wrap",
+                          alignItems: "center",
+                          marginBottom: "0.5rem",
+                        }}
+                      >
                         <span className="badge">
-                          {selectedRecipe.category} · {selectedRecipe.name}
+                          {p.kind === "STORE"
+                            ? `${t("menu.mixPartStore")}: ${recipe?.name || p.recipeId}`
+                            : `${t("menu.mixPartCooked")}: ${pot?.name || p.specialProductId}`}
                         </span>
+                        <label className="tiny muted" style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                          {p.kind === "STORE" ? t("menu.mixPartQty") : t("menu.mixPlates")}
+                          <input
+                            type="number"
+                            min={0.001}
+                            step="any"
+                            style={{ width: "4.5rem" }}
+                            value={p.qty}
+                            onChange={(e) =>
+                              setDealParts((prev) =>
+                                prev.map((x) => (x.key === p.key ? { ...x, qty: e.target.value } : x))
+                              )
+                            }
+                          />
+                        </label>
                         <button
                           type="button"
                           className="btn ghost sm"
-                          onClick={() => {
-                            setRecipeId("");
-                            setRecipeQ("");
-                          }}
+                          onClick={() => setDealParts((prev) => prev.filter((x) => x.key !== p.key))}
                         >
-                          {t("menu.clearPick")}
+                          {t("common.remove")}
                         </button>
                       </div>
-                    ) : (
-                      <>
-                        <input
-                          value={recipeQ}
-                          onChange={(e) => setRecipeQ(e.target.value)}
-                          placeholder={t("menu.mixRecipeSearchPh")}
-                          autoComplete="off"
-                        />
-                        <div className="suggest-list">
-                          {recipeSuggestions.map((r) => (
+                    );
+                  })}
+
+                  {!dealParts.some((p) => p.kind === "STORE") && (
+                    <p className="tiny muted">{t("menu.needMixRecipe")}</p>
+                  )}
+
+                  <div className="row" style={{ gap: "0.5rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      onClick={() => {
+                        setAddingStore(true);
+                        setAddingPot(false);
+                        setRecipeQ("");
+                      }}
+                    >
+                      {t("menu.mixAddStore")}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      onClick={() => {
+                        setAddingPot(true);
+                        setAddingStore(false);
+                      }}
+                    >
+                      {t("menu.mixAddPot")}
+                    </button>
+                    <Link className="btn ghost sm" to="/recipes">
+                      {t("menu.openRecipes")}
+                    </Link>
+                  </div>
+
+                  {addingStore && (
+                    <div className="field" style={{ marginTop: "0.65rem", marginBottom: 0 }}>
+                      <label>{t("menu.mixStoreRecipe")}</label>
+                      <input
+                        value={recipeQ}
+                        onChange={(e) => setRecipeQ(e.target.value)}
+                        placeholder={t("menu.mixRecipeSearchPh")}
+                        autoComplete="off"
+                      />
+                      <div className="suggest-list">
+                        {recipeSuggestions
+                          .filter((r) => !dealParts.some((p) => p.kind === "STORE" && p.recipeId === r.id))
+                          .map((r) => (
                             <button
                               key={r.id}
                               type="button"
                               className="suggest-item"
                               onClick={() => {
-                                setRecipeId(r.id);
+                                setDealParts((prev) => [
+                                  ...prev,
+                                  {
+                                    key: newDealKey(),
+                                    kind: "STORE",
+                                    recipeId: r.id,
+                                    specialProductId: "",
+                                    qty: "1",
+                                  },
+                                ]);
+                                setAddingStore(false);
                                 setRecipeQ("");
                               }}
                             >
@@ -855,71 +1021,66 @@ export function MenuPage() {
                               <span className="tiny muted"> · {r.category}</span>
                             </button>
                           ))}
-                          {!recipeSuggestions.length && (
-                            <div className="tiny muted" style={{ padding: "0.5rem 0.65rem" }}>
-                              {t("menu.mixNoRecipe")}{" "}
-                              <Link to="/recipes">{t("menu.openRecipes")}</Link>
-                            </div>
-                          )}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </div>
+                        {!recipeSuggestions.length && (
+                          <div className="tiny muted" style={{ padding: "0.5rem 0.65rem" }}>
+                            {t("menu.mixNoRecipe")} <Link to="/recipes">{t("menu.openRecipes")}</Link>
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        className="btn ghost sm"
+                        style={{ marginTop: "0.35rem" }}
+                        onClick={() => setAddingStore(false)}
+                      >
+                        {t("common.cancel")}
+                      </button>
+                    </div>
+                  )}
 
-                <div
-                  className="panel panel-pad"
-                  style={{ marginBottom: "0.85rem", background: "var(--panel-2, rgba(0,0,0,0.03))" }}
-                >
-                  <strong style={{ display: "block", marginBottom: "0.35rem" }}>
-                    2 · {t("menu.mixPartCooked")}
-                  </strong>
-                  <p className="tiny muted" style={{ marginTop: 0 }}>
-                    {t("menu.mixPartCookedHint")}
-                  </p>
-                  <div className="field">
-                    <label>{t("menu.specialProduct")}</label>
-                    <select
-                      value={specialProductId}
-                      onChange={(e) => setSpecialProductId(e.target.value)}
-                      required
-                    >
-                      <option value="">{t("menu.pickSpecialPot")}</option>
-                      {specials.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name} · {money(p.platePrice)} / {formatKg(p.plateGrams)}
-                        </option>
-                      ))}
-                    </select>
-                    {!specials.length && (
+                  {addingPot && (
+                    <div className="field" style={{ marginTop: "0.65rem", marginBottom: 0 }}>
+                      <label>{t("menu.specialProduct")}</label>
+                      <select
+                        defaultValue=""
+                        onChange={(e) => {
+                          const id = e.target.value;
+                          if (!id) return;
+                          setDealParts((prev) => [
+                            ...prev,
+                            {
+                              key: newDealKey(),
+                              kind: "SPECIAL",
+                              recipeId: "",
+                              specialProductId: id,
+                              qty: "1",
+                            },
+                          ]);
+                          setAddingPot(false);
+                        }}
+                      >
+                        <option value="">{t("menu.pickSpecialPot")}</option>
+                        {specials
+                          .filter((s) => !dealParts.some((p) => p.kind === "SPECIAL" && p.specialProductId === s.id))
+                          .map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name} · {money(p.platePrice)} / {formatKg(p.plateGrams)}
+                            </option>
+                          ))}
+                      </select>
                       <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
-                        {t("menu.noSpecialsYet")}{" "}
-                        <Link to="/specials">{t("menu.openSpecials")}</Link>
+                        {t("menu.mixPartCookedOptional")}
                       </p>
-                    )}
-                    {selectedSpecial && (
-                      <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
-                        {t("menu.mixSelectedPot", {
-                          name: selectedSpecial.name,
-                          kg: formatKg(selectedSpecial.plateGrams),
-                        })}
-                      </p>
-                    )}
-                  </div>
-                  <div className="field" style={{ marginBottom: 0 }}>
-                    <label>{t("menu.mixPlates")}</label>
-                    <input
-                      type="number"
-                      min={0.001}
-                      step="any"
-                      value={mixPlates}
-                      onChange={(e) => setMixPlates(e.target.value)}
-                      required
-                    />
-                    <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
-                      {t("menu.mixPlatesHint")}
-                    </p>
-                  </div>
+                      <button
+                        type="button"
+                        className="btn ghost sm"
+                        style={{ marginTop: "0.35rem" }}
+                        onClick={() => setAddingPot(false)}
+                      >
+                        {t("common.cancel")}
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 <div className="field">

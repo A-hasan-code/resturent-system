@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, money } from "../api";
 import { useAuth } from "../auth";
+import { useBusinessDay } from "../hotel-gate";
 import { useT } from "../i18n";
 import { useSocketEvent } from "../socket";
 import { DateField } from "./DateField";
@@ -12,12 +13,8 @@ const PAGE_SIZE = 15;
 type Result = {
   rows: PaymentRow[];
   summary: { count: number; bills: number; total: number };
+  dayStart?: string;
 };
-
-function isoDay(d: Date) {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
 
 const clock = (iso: string) =>
   new Date(iso).toLocaleTimeString("en-PK", { hour: "2-digit", minute: "2-digit" });
@@ -26,9 +23,16 @@ const clock = (iso: string) =>
 export function CashRecord() {
   const { user } = useAuth();
   const t = useT();
-  const [day, setDay] = useState(isoDay(new Date()));
+  const { businessDate, dayStart } = useBusinessDay();
+  const [day, setDay] = useState(businessDate);
+  const [dayTouched, setDayTouched] = useState(false);
   const [page, setPage] = useState(1);
   const [data, setData] = useState<Result | null>(null);
+
+  // Follow server business day until the cashier picks another date.
+  useEffect(() => {
+    if (!dayTouched) setDay(businessDate);
+  }, [businessDate, dayTouched]);
 
   const load = useCallback(() => {
     api<Result>(`/payments/mine?from=${day}&to=${day}`)
@@ -63,16 +67,28 @@ export function CashRecord() {
 
   const rows = data?.rows ?? [];
   const pageRows = paginate(rows, page, PAGE_SIZE);
+  const windowLabel = data?.dayStart || dayStart;
 
   return (
     <div>
       <div className="row" style={{ marginBottom: "0.85rem", justifyContent: "space-between" }}>
         <p className="muted" style={{ margin: 0 }}>
           {t("cash.recordHint")}
+          <span className="tiny" style={{ display: "block", marginTop: "0.25rem" }}>
+            {t("cash.businessDayHint", { start: windowLabel })}
+          </span>
         </p>
         <div className="field cash-day-field" style={{ margin: 0 }}>
           <label htmlFor="cash-day">{t("cash.day")}</label>
-          <DateField id="cash-day" value={day} max={isoDay(new Date())} onChange={setDay} />
+          <DateField
+            id="cash-day"
+            value={day}
+            max={businessDate}
+            onChange={(v) => {
+              setDayTouched(true);
+              setDay(v);
+            }}
+          />
         </div>
       </div>
 
@@ -123,7 +139,7 @@ export function CashRecord() {
                 const due = p.orderDue ?? p.orderTotal;
                 return (
                   <tr key={p.id}>
-                    <td>{clock(p.createdAt)}</td>
+                    <td>{clock(String(p.createdAt))}</td>
                     <td>
                       #{p.orderNo}
                       {p.isCredit ? (
@@ -154,12 +170,12 @@ export function CashRecord() {
                         </>
                       )}
                     </td>
-                    <td>{mine ? <span className="tiny muted">—</span> : clock(p.createdAt)}</td>
+                    <td>{mine ? <span className="tiny muted">—</span> : clock(String(p.createdAt))}</td>
                     <td>
                       {mine ? (
                         <span className="tiny muted">—</span>
                       ) : p.confirmedAt ? (
-                        <span className="badge paid">{clock(p.confirmedAt)}</span>
+                        <span className="badge paid">{clock(String(p.confirmedAt))}</span>
                       ) : (
                         <span className="badge pending">{t("cash.notYet")}</span>
                       )}

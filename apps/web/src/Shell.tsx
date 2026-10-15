@@ -1,9 +1,14 @@
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { AccountModal } from "./components/AccountModal";
 import { LanguageSwitcher } from "./components/LanguageSwitcher";
 import { PoweredBy } from "./components/PoweredBy";
 import { useAuth } from "./auth";
+import {
+  DEVELOPER_UNLOCK_EVENT,
+  isDeveloperUnlocked,
+  unlockDeveloper,
+} from "./developer/dev-unlock";
 import { HotelGateProvider, useHotelGate } from "./hotel-gate";
 import { MessageKey, useT } from "./i18n";
 import { useToast } from "./toast";
@@ -42,9 +47,11 @@ const GROUPS: { titleKey: MessageKey; tabs: Tab[] }[] = [
       { to: "/finance", labelKey: "nav.finance", perms: ["payments.view", "close.view", "reports.view"] },
       { to: "/audit", labelKey: "nav.audit", perms: ["payments.view"] },
       { to: "/expenses", labelKey: "nav.expenses", perms: ["expense.view", "expense.manage"] },
+      { to: "/workers", labelKey: "nav.workers", perms: ["expense.view", "expense.manage"] },
       { to: "/close", labelKey: "nav.close", perms: ["close.view", "close.manage"] },
       { to: "/users", labelKey: "nav.users", perms: ["users.manage"] },
       { to: "/table-settings", labelKey: "nav.tableSettings", perms: ["tables.manage"] },
+      { to: "/developer", labelKey: "nav.developer", perms: ["system.manage"] },
       { to: "/settings", labelKey: "nav.settings", perms: ["printers.manage", "system.manage"] },
     ],
   },
@@ -71,6 +78,12 @@ const initials = (name = "") =>
     .join("") || "?";
 
 type OrderEv = { orderNo: number; tableNo: string | null; waiter?: string | null };
+type KitchenSlowEv = OrderEv & { waitSeconds?: number };
+type KitchenLateEv = OrderEv & {
+  targetMinutes?: number;
+  lateByMinutes?: number;
+  elapsedMinutes?: number;
+};
 type PrintEv = { type: string; error?: string; printer?: string | null; orderNo?: number | null };
 type CashEv = { amount: number; orderNo: number; tableNo?: string | null; from?: string; by?: string };
 
@@ -86,6 +99,23 @@ function LiveAlerts() {
   useSocketEvent<OrderEv>("order.ready", (o) => {
     toast.push(`Order ready — pick up: ${o.tableNo || "Walk-in"} · #${o.orderNo}`, "ok");
     if (user?.roleCode === "WAITER" || user?.roleCode === "SUPERVISOR") alertBeep();
+  });
+
+  useSocketEvent<KitchenSlowEv>("kitchen.pending.slow", (o) => {
+    const where = o.tableNo || `Walk-in`;
+    toast.push(`Kitchen delay: ${where} · #${o.orderNo} still pending — start cooking`, "err");
+    alertBeep();
+  });
+
+  useSocketEvent<KitchenLateEv>("kitchen.prep.late", (o) => {
+    const where = o.tableNo || `Walk-in`;
+    const late = o.lateByMinutes ?? 1;
+    const target = o.targetMinutes ?? 15;
+    toast.push(
+      `Kitchen late: ${where} · #${o.orderNo} — ${late}m over target (${target}m)`,
+      "err"
+    );
+    alertBeep();
   });
 
   useSocketEvent<PrintEv>("print.failed", (j) => {
@@ -122,12 +152,21 @@ function ShellFrame() {
   const { gate } = useHotelGate();
   const { brand, logoSrc } = useBrand();
   const t = useT();
+  const toast = useToast();
+  const navigate = useNavigate();
   const [account, setAccount] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
+  const [devUnlocked, setDevUnlocked] = useState(() => isDeveloperUnlocked());
   const role = user?.roleCode ?? "";
   const groups = GROUPS.map((g) => ({
     ...g,
-    tabs: g.tabs.filter((tab) => !tab.hideFor?.includes(role) && (!tab.perms.length || can(...tab.perms))),
+    tabs: g.tabs.filter((tab) => {
+      if (tab.hideFor?.includes(role)) return false;
+      if (tab.perms.length && !can(...tab.perms)) return false;
+      // Developer tab stays hidden until Ctrl+Shift+D (or unlock phrase)
+      if (tab.to === "/developer" && !devUnlocked) return false;
+      return true;
+    }),
   })).filter((g) => g.tabs.length);
   const showTitles = groups.length > 1;
   const { pathname } = useLocation();
@@ -136,6 +175,30 @@ function ShellFrame() {
   useEffect(() => {
     setNavOpen(false);
   }, [pathname]);
+
+  useEffect(() => {
+    const sync = () => setDevUnlocked(isDeveloperUnlocked());
+    window.addEventListener(DEVELOPER_UNLOCK_EVENT, sync);
+    return () => window.removeEventListener(DEVELOPER_UNLOCK_EVENT, sync);
+  }, []);
+
+  /** Ctrl+Shift+D — unlock + open Developer setup (system.manage only). */
+  useEffect(() => {
+    if (!can("system.manage")) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey && e.shiftKey && (e.key === "d" || e.key === "D"))) return;
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || el?.isContentEditable) return;
+      e.preventDefault();
+      unlockDeveloper();
+      setDevUnlocked(true);
+      navigate("/developer");
+      toast.push(t("dev.tabUnlocked"), "ok");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [can, navigate, t, toast]);
 
   useEffect(() => {
     if (!navOpen) return;

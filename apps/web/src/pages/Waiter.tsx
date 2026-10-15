@@ -88,10 +88,18 @@ type MenuItem = {
     id: string;
     name: string;
     platePrice: number;
+    halfPlatePrice?: number | null;
     plateGrams: number;
     servingLabel?: string;
     sellMode?: "BOTH" | "SERVING_ONLY" | "RS_ONLY";
   } | null;
+  parts?: {
+    kind: "STORE" | "SPECIAL";
+    recipeId?: string | null;
+    specialProductId?: string | null;
+    quantity: number;
+    specialProduct?: { plateGrams?: number } | null;
+  }[];
   minQty?: number;
   maxQty?: number | null;
   qtyStep?: number | null;
@@ -103,14 +111,29 @@ type TodaySpecial = {
   id: string;
   name: string;
   platePrice: number;
+  halfPlatePrice?: number | null;
   plateGrams: number;
   servingLabel?: string;
   sellMode?: "BOTH" | "SERVING_ONLY" | "RS_ONLY";
+  cookedGrams?: number;
+  openingCarryGrams?: number;
+  soldGrams?: number;
   remainingGrams: number;
   remainingPlates: number;
   maxRs: number;
   status: string | null;
 };
+
+/** Pot ready to sell, never cooked today, or cooked/sold out. */
+function specialStockStatus(batch: TodaySpecial | null | undefined): "ok" | "not_cooked" | "out" {
+  if (!batch) return "not_cooked";
+  if (batch.remainingGrams > 0.0005) return "ok";
+  const everHad =
+    (batch.cookedGrams ?? 0) > 0.0005 ||
+    (batch.openingCarryGrams ?? 0) > 0.0005 ||
+    (batch.soldGrams ?? 0) > 0.0005;
+  return everHad ? "out" : "not_cooked";
+}
 
 type OrderItem = {
   id: string;
@@ -255,6 +278,8 @@ export function WaiterPage() {
   const [specialsToday, setSpecialsToday] = useState<TodaySpecial[]>([]);
   const [specialPick, setSpecialPick] = useState<MenuItem | null>(null);
   const [specialMode, setSpecialMode] = useState<"PLATE" | "RS">("PLATE");
+  /** Half vs full plate when pot has halfPlatePrice / Half menu row */
+  const [specialPlateSize, setSpecialPlateSize] = useState<"HALF" | "FULL">("FULL");
   const [specialRs, setSpecialRs] = useState("");
   const [modPick, setModPick] = useState<MenuItem | null>(null);
   const [modSelected, setModSelected] = useState<Record<string, boolean>>({});
@@ -289,19 +314,6 @@ export function WaiterPage() {
     | { step: "itemQty"; persons: number; item: PerHeadPkgItem; qty: string }
     | null
   >(null);
-  const [creditOn, setCreditOn] = useState(false);
-  const [creditPick, setCreditPick] = useState<{ id: string; name: string; phone: string } | null>(null);
-  const [creditQ, setCreditQ] = useState("");
-  const [creditHits, setCreditHits] = useState<{ id: string; name: string; phone: string }[]>([]);
-  const [creditLookup, setCreditLookup] = useState<"idle" | "loading" | "done">("idle");
-
-  useEffect(() => {
-    setCreditOn(false);
-    setCreditPick(null);
-    setCreditQ("");
-    setCreditHits([]);
-  }, [selected]);
-
   const selectedTable = tables.find((tbl) => tbl.id === selected) ?? null;
   const selectedTakeaway = isTwKey(selected)
     ? takeaways.find((tw) => tw.id === twId(selected!)) ?? null
@@ -313,15 +325,17 @@ export function WaiterPage() {
         ? selectedTakeaway.label || t("waiter.takeaway")
         : selectedTable?.label || selectedTable?.name || "";
 
-  const needsCashierPick = !order && !can("cash.keep");
   const isCashierRole = ["CASHIER", "MAIN_CASHIER"].includes(user?.roleCode ?? "");
   const isTakeawayView = selected === WALK_IN || isTwKey(selected);
-  /** Kitchen KOT reprint is for floor/kitchen — not cashier counters. */
-  const canReprintKot = can("print.kot") && !isCashierRole;
+  // Takeaway goes to Main Cashier automatically (API) — no cashier pick for walk-in.
+  const needsCashierPick = !order && !can("cash.keep") && !isTakeawayView;
+  /** Kitchen KOT reprint is for floor/kitchen tables — not cashier counters or takeaway. */
+  const canReprintKot = can("print.kot") && !isCashierRole && !isTakeawayView;
   /** Counter takeaway: customer is at cashier — skip request/print unpaid bill; Take payment prints PAID. */
   const showTakeawayCashierBillActions = !(isTakeawayView && isCashierRole);
   const canAddPerHead =
-    ["SUPERVISOR", "ADMIN", "MANAGER"].includes(user?.roleCode ?? "") || can("users.manage");
+    ["SUPERVISOR", "ADMIN", "MANAGER", "MAIN_CASHIER", "CASHIER"].includes(user?.roleCode ?? "") ||
+    can("users.manage");
   const showPerHeadBtn = canAddPerHead && !!perHead?.enabled && (perHead?.amount ?? 0) > 0;
   const cartHasMenu = cart.some((c) => c.kind === "MENU");
 
@@ -531,51 +545,97 @@ export function WaiterPage() {
   async function add(m: MenuItem) {
     if (m.kind === "SPECIAL") {
       const batch = m.specialProductId ? specialById.get(m.specialProductId) : null;
-      if (!batch || batch.remainingGrams <= 0) {
-        toast.push(t("waiter.specialOut"), "err");
+      const stock = specialStockStatus(batch);
+      if (stock !== "ok" || !batch) {
+        toast.push(stock === "not_cooked" ? t("waiter.specialNotCooked") : t("waiter.specialOut"), "err");
         return;
       }
       const sellMode = m.specialProduct?.sellMode || batch.sellMode || "BOTH";
-      const platePrice = m.specialProduct?.platePrice || batch.platePrice || m.sellingPrice;
-      if (sellMode === "SERVING_ONLY") {
-        if (batch.remainingPlates < startQtyOf(rulesOf(m))) {
+      const halfP =
+        m.specialProduct?.halfPlatePrice ?? batch.halfPlatePrice ?? null;
+      const hasHalf = halfP != null && halfP > 0;
+      const isHalfRow =
+        (m.mixSpecialPlates != null && m.mixSpecialPlates > 0 && m.mixSpecialPlates < 1) ||
+        /\(Half\)\s*$/i.test(m.name);
+      // Always open picker when Rs sell enabled or half/full rates exist
+      if (sellMode === "SERVING_ONLY" && !hasHalf) {
+        const platePrice = m.specialProduct?.platePrice || batch.platePrice || m.sellingPrice;
+        const plateRate = m.sellingPrice > 0 ? m.sellingPrice : platePrice;
+        const portion = m.mixSpecialPlates && m.mixSpecialPlates > 0 ? m.mixSpecialPlates : 1;
+        const needPlates = portion * startQtyOf(rulesOf(m));
+        if (batch.remainingPlates + 0.0005 < needPlates) {
           toast.push(t("waiter.specialOut"), "err");
           return;
         }
         addNormal(m, {
           cartKey: m.id,
           saleMode: "PLATE",
-          rate: platePrice,
+          rate: plateRate,
         });
         return;
       }
       setSpecialPick(m);
       setSpecialMode(sellMode === "RS_ONLY" ? "RS" : "PLATE");
+      setSpecialPlateSize(isHalfRow ? "HALF" : "FULL");
       setSpecialRs("");
       return;
     }
     if (m.kind === "MIX") {
-      const batch = m.specialProductId ? specialById.get(m.specialProductId) : null;
-      const platesPer = m.mixSpecialPlates || 1;
-      const needGrams = (m.specialProduct?.plateGrams || batch?.plateGrams || 1) * platesPer * startQtyOf(rulesOf(m));
+      // Store-only deals (no pot parts) skip special checks. Optional pot(s) may solo-fallback.
+      const potParts = (m.parts ?? []).filter((p) => p.kind === "SPECIAL" && p.specialProductId);
+      const pots =
+        potParts.length > 0
+          ? potParts
+          : m.specialProductId
+            ? [
+                {
+                  specialProductId: m.specialProductId,
+                  quantity: m.mixSpecialPlates || 1,
+                  specialProduct: m.specialProduct,
+                },
+              ]
+            : [];
       let mixOpts: {
         saleMode: "MIX";
         soloStoreFallback?: boolean;
         name?: string;
         cartKey?: string;
       } = { saleMode: "MIX" };
-      if (!batch || batch.remainingGrams + 0.0005 < needGrams) {
-        const ok = await ask({
-          title: t("waiter.mixFallbackTitle"),
-          body: t("waiter.mixFallbackBody", { name: m.name }),
-        });
-        if (!ok) return;
-        mixOpts = {
-          cartKey: `${m.id}:solo`,
-          saleMode: "MIX",
-          soloStoreFallback: true,
-          name: `${m.name} (${t("waiter.storeOnly")})`,
-        };
+      if (pots.length) {
+        const qty0 = startQtyOf(rulesOf(m));
+        let short = false;
+        for (const p of pots) {
+          const sid = p.specialProductId!;
+          const batch = specialById.get(sid);
+          if (specialStockStatus(batch) === "not_cooked") {
+            toast.push(t("waiter.specialNotCooked"), "err");
+            return;
+          }
+          const platesPer = p.quantity > 0 ? p.quantity : 1;
+          const plateGrams =
+            p.specialProduct?.plateGrams ||
+            batch?.plateGrams ||
+            m.specialProduct?.plateGrams ||
+            1;
+          const needGrams = plateGrams * platesPer * qty0;
+          if (!batch || batch.remainingGrams + 0.0005 < needGrams) {
+            short = true;
+            break;
+          }
+        }
+        if (short) {
+          const ok = await ask({
+            title: t("waiter.mixFallbackTitle"),
+            body: t("waiter.mixFallbackBody", { name: m.name }),
+          });
+          if (!ok) return;
+          mixOpts = {
+            cartKey: `${m.id}:solo`,
+            saleMode: "MIX",
+            soloStoreFallback: true,
+            name: `${m.name} (${t("waiter.storeOnly")})`,
+          };
+        }
       }
       if (m.modifiers && m.modifiers.length > 0) {
         setModPick(m);
@@ -627,7 +687,10 @@ export function WaiterPage() {
     const sellMode = m.specialProduct?.sellMode || batch?.sellMode || "BOTH";
     if (specialMode === "RS" && sellMode === "SERVING_ONLY") return;
     if (specialMode === "PLATE" && sellMode === "RS_ONLY") return;
-    const platePrice = m.specialProduct?.platePrice || batch?.platePrice || m.sellingPrice;
+    const fullPrice = m.specialProduct?.platePrice || batch?.platePrice || m.sellingPrice;
+    const halfPrice =
+      m.specialProduct?.halfPlatePrice ?? batch?.halfPlatePrice ?? null;
+    const hasHalf = halfPrice != null && halfPrice > 0;
     if (specialMode === "RS") {
       const rs = Number(specialRs);
       if (!Number.isFinite(rs) || rs < 0.01) {
@@ -638,12 +701,12 @@ export function WaiterPage() {
         toast.push(t("waiter.specialRsMax", { n: money(batch.maxRs) }), "err");
         return;
       }
-      if (!(platePrice > 0)) {
+      if (!(fullPrice > 0)) {
         toast.push(t("waiter.specialRsInvalid"), "err");
         return;
       }
       const plateGrams = m.specialProduct?.plateGrams || batch?.plateGrams || 1;
-      const plates = rs / platePrice;
+      const plates = rs / fullPrice;
       const grams = Math.round(plates * plateGrams * 1000) / 1000;
       if (batch && grams > batch.remainingGrams + 0.05) {
         toast.push(t("waiter.specialRsMax", { n: money(batch.maxRs) }), "err");
@@ -655,19 +718,60 @@ export function WaiterPage() {
         amountRs: rs,
         specialGrams: grams,
         quantity: Math.round(plates * 1000) / 1000,
-        rate: platePrice,
-        name: `${m.name} (Rs)`,
+        rate: fullPrice,
+        name: `${m.specialProduct?.name || m.name} (Rs)`,
         allowCustomQty: false,
       });
     } else {
-      if (batch && batch.remainingPlates < startQtyOf(rulesOf(m))) {
+      const wantHalf = hasHalf && specialPlateSize === "HALF";
+      const siblings = menu.filter(
+        (x) =>
+          x.kind === "SPECIAL" &&
+          x.specialProductId &&
+          x.specialProductId === m.specialProductId
+      );
+      const halfMenu =
+        siblings.find(
+          (x) =>
+            (x.mixSpecialPlates != null && x.mixSpecialPlates > 0 && x.mixSpecialPlates < 1) ||
+            /\(Half\)\s*$/i.test(x.name)
+        ) || null;
+      const fullMenu =
+        siblings.find(
+          (x) =>
+            /\(Full\)\s*$/i.test(x.name) ||
+            (x.mixSpecialPlates != null && Math.abs(x.mixSpecialPlates - 1) < 0.001)
+        ) ||
+        siblings.find((x) => x.id !== halfMenu?.id) ||
+        m;
+      const target = wantHalf ? halfMenu || m : fullMenu;
+      const plateRate = wantHalf
+        ? halfPrice!
+        : target.sellingPrice > 0
+          ? target.sellingPrice
+          : fullPrice;
+      const portion = wantHalf
+        ? halfMenu?.mixSpecialPlates && halfMenu.mixSpecialPlates > 0
+          ? halfMenu.mixSpecialPlates
+          : 0.5
+        : target.mixSpecialPlates && target.mixSpecialPlates > 0
+          ? target.mixSpecialPlates
+          : 1;
+      const needPlates = portion * startQtyOf(rulesOf(target));
+      if (batch && batch.remainingPlates + 0.0005 < needPlates) {
         toast.push(t("waiter.specialOut"), "err");
         return;
       }
-      addNormal(m, {
-        cartKey: m.id,
+      const labelBase = (m.specialProduct?.name || m.name).replace(/\s*\((Half|Full)\)\s*$/i, "");
+      addNormal(target, {
+        cartKey: `${target.id}:${wantHalf ? "half" : "full"}`,
         saleMode: "PLATE",
-        rate: platePrice,
+        rate: plateRate,
+        name: wantHalf
+          ? `${labelBase} (${t("waiter.halfPlate")})`
+          : hasHalf
+            ? `${labelBase} (${t("waiter.fullPlate")})`
+            : labelBase,
       });
     }
     setSpecialPick(null);
@@ -875,48 +979,14 @@ export function WaiterPage() {
     setCart((prev) => prev.map((p) => (p.cartKey === id ? { ...p, notes } : p)));
   }
 
-  useEffect(() => {
-    if (!creditOn || creditPick) return;
-    const term = creditQ.trim();
-    if (term.length < 1) {
-      setCreditHits([]);
-      setCreditLookup("idle");
-      return;
-    }
-    setCreditLookup("loading");
-    let cancelled = false;
-    const handle = window.setTimeout(() => {
-      void api<{ id: string; name: string; phone: string }[]>(`/credit-customers?q=${encodeURIComponent(term)}`)
-        .then((rows) => {
-          if (cancelled) return;
-          setCreditHits(rows);
-          setCreditLookup("done");
-        })
-        .catch((e) => {
-          if (cancelled) return;
-          setCreditHits([]);
-          setCreditLookup("done");
-          toast.push(e instanceof Error ? e.message : t("credit.loadFailed"), "err");
-        });
-    }, 280);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(handle);
-    };
-  }, [creditQ, creditOn, creditPick]);
-
   async function releaseCreditTable() {
     if (!order) return;
     setBusy(true);
     try {
-      const updated = await api<Order>(`/orders/${order.id}/release-credit`, { method: "POST" });
+      await api<Order>(`/orders/${order.id}/release-credit`, { method: "POST" });
       setOrder(null);
       setCart([]);
       setQtyDraft({});
-      if (updated.creditCustomer) {
-        setCreditOn(true);
-        setCreditPick(updated.creditCustomer);
-      }
       toast.push(t("waiter.released"), "ok");
       void loadTables();
     } catch (e) {
@@ -930,10 +1000,6 @@ export function WaiterPage() {
     if (!cart.length) return;
     if (cart.some((l) => lineQtyIssue(l) != null)) {
       toast.push(t("waiter.qtyFixFirst"), "err");
-      return;
-    }
-    if (can("order.pay") && !isTakeawayView && creditOn && !creditPick && !order?.creditCustomer) {
-      toast.push(t("waiter.creditNeed"), "err");
       return;
     }
     setPickServer(true);
@@ -982,21 +1048,20 @@ export function WaiterPage() {
               ...(c.modifiers?.length ? { modifiers: c.modifiers } : {}),
             }
       );
-    const preview = hasMenu && previewFirst && canReprintKot;
     try {
       const isNewWalkIn = selected === WALK_IN;
       const isTakeaway = isNewWalkIn || isTwKey(selected);
+      // Takeaway is Main Cashier counter — no kitchen KOT preview/print.
+      const preview = !isTakeaway && hasMenu && previewFirst && canReprintKot;
       const tableNo = isTakeaway
         ? walkInName.trim() || order?.tableNo || "Takeaway"
         : selectedTable?.label || selectedTable?.name || "";
       const visitClosed = !!order?.creditCustomer && order.status === "COMPLETED";
       const openOrder = order && !visitClosed ? order : null;
-      const creditId = !isTakeaway && creditPick && (!openOrder || !openOrder.creditCustomer) ? creditPick.id : undefined;
       const body = {
         items,
-        printKot: hasMenu && !preview,
+        printKot: !isTakeaway && hasMenu && !preview,
         servedByName: serverName,
-        ...(creditId ? { creditCustomerId: creditId } : {}),
       };
       const res = openOrder
         ? await api<Order>(`/orders/${openOrder.id}/items`, { method: "POST", body: JSON.stringify(body) })
@@ -1011,6 +1076,8 @@ export function WaiterPage() {
           });
       if (!hasMenu) {
         toast.push(t("waiter.sentBillOnly", { n: res.orderNo }), "ok");
+      } else if (isTakeaway) {
+        toast.push(t("waiter.sent", { n: res.orderNo }), "ok");
       } else if (preview) {
         toast.push(t("waiter.sent", { n: res.orderNo }), "ok");
         setKot({ orderId: res.id, round: res.kotRounds, reprint: false });
@@ -1194,9 +1261,20 @@ export function WaiterPage() {
     }
   }
 
-  function paid(fullyPaid = true) {
+  function paid(fullyPaid = true, onCredit = false, tableFreed = false) {
     setPaying(false);
     void loadTables();
+    if (onCredit) {
+      if (tableFreed) {
+        setOrder(null);
+        setCart([]);
+        setQtyDraft({});
+        back();
+        return;
+      }
+      if (order) void loadOrder(order.id);
+      return;
+    }
     if (fullyPaid) back();
     else if (order) void loadOrder(order.id);
   }
@@ -1438,17 +1516,48 @@ export function WaiterPage() {
               const inCart = cart.find(
                 (c) => c.menuItemId === m.id || c.cartKey === m.id || c.cartKey.startsWith(`${m.id}:`)
               );
+              const mixHasPot =
+                m.kind === "MIX" &&
+                ((m.parts ?? []).some((p) => p.kind === "SPECIAL" && p.specialProductId) ||
+                  !!m.specialProductId);
               const batch = m.specialProductId ? specialById.get(m.specialProductId) : null;
               const serving =
                 m.specialProduct?.servingLabel || batch?.servingLabel || t("specials.plate");
+              const stock =
+                m.kind === "SPECIAL" || (m.kind === "MIX" && mixHasPot)
+                  ? specialStockStatus(batch)
+                  : "ok";
               const remHint =
-                m.kind === "SPECIAL" || m.kind === "MIX"
-                  ? batch
+                m.kind === "SPECIAL" || (m.kind === "MIX" && mixHasPot)
+                  ? stock === "ok" && batch
                     ? ` · ${batch.remainingPlates.toFixed(1)} ${serving}`
-                    : ` · ${t("waiter.specialOutShort")}`
+                    : stock === "not_cooked"
+                      ? ` · ${t("waiter.specialNotCookedShort")}`
+                      : ` · ${t("waiter.specialOutShort")}`
                   : "";
+              // SPECIAL: block if pot empty. MIX with pot: block only if never cooked (store-only fallback when sold out).
+              const blocked =
+                (m.kind === "SPECIAL" && stock !== "ok") ||
+                (m.kind === "MIX" && mixHasPot && stock === "not_cooked");
               return (
-                <button key={m.id} type="button" className={`waiter-item ${inCart ? "in-cart" : ""}`} onClick={() => void add(m)}>
+                <button
+                  key={m.id}
+                  type="button"
+                  className={`waiter-item ${inCart ? "in-cart" : ""} ${blocked ? "is-unavailable" : ""}`}
+                  disabled={blocked}
+                  aria-disabled={blocked}
+                  title={
+                    blocked
+                      ? stock === "not_cooked"
+                        ? t("waiter.specialNotCooked")
+                        : t("waiter.specialOut")
+                      : undefined
+                  }
+                  onClick={() => {
+                    if (blocked) return;
+                    void add(m);
+                  }}
+                >
                   <strong>{m.name}</strong>
                   <span className="tiny muted">
                     {m.kind === "SPECIAL"
@@ -1872,55 +1981,6 @@ export function WaiterPage() {
             </div>
           )}
 
-          {can("order.pay") && !isTakeawayView && !order?.creditCustomer && (
-            <div className="waiter-credit">
-              <label className="check tiny">
-                <input type="checkbox" checked={creditOn} onChange={(e) => setCreditOn(e.target.checked)} />
-                {t("waiter.credit")}
-              </label>
-              {creditOn && (
-                <>
-                  <p className="tiny muted" style={{ margin: "0.35rem 0" }}>
-                    {t("waiter.creditHint")}
-                  </p>
-                  {creditPick ? (
-                    <div className="row" style={{ justifyContent: "space-between" }}>
-                      <strong>
-                        {creditPick.name} <span className="tiny muted">{creditPick.phone}</span>
-                      </strong>
-                      <button type="button" className="btn ghost sm" onClick={() => setCreditPick(null)}>
-                        {t("credit.change")}
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <SearchField value={creditQ} onChange={setCreditQ} placeholder={t("waiter.creditSearch")} />
-                      {creditLookup === "done" && creditQ.trim() && !creditHits.length && (
-                        <div className="tiny muted" style={{ marginTop: "0.35rem" }}>
-                          {t("credit.noMatch")}
-                        </div>
-                      )}
-                      {creditHits.length > 0 && (
-                        <div className="suggest-list">
-                          {creditHits.map((hit) => (
-                            <button
-                              key={hit.id}
-                              type="button"
-                              className="suggest-item"
-                              onClick={() => setCreditPick(hit)}
-                            >
-                              <strong>{hit.name}</strong>
-                              <span className="tiny muted">{hit.phone}</span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </>
-                  )}
-                </>
-              )}
-            </div>
-          )}
           {order?.creditCustomer && (
             <div className="waiter-credit">
               <strong>
@@ -1948,7 +2008,7 @@ export function WaiterPage() {
             {busy
               ? t("waiter.sending")
               : cartHasMenu
-                ? t("waiter.sendKitchen", { n: cart.length })
+                ? t(isTakeawayView ? "waiter.sendCashier" : "waiter.sendKitchen", { n: cart.length })
                 : t("waiter.addToBill", { n: cart.length })}
           </button>
           {canReprintKot && cartHasMenu && (
@@ -2075,24 +2135,50 @@ export function WaiterPage() {
               const sellMode = specialPick.specialProduct?.sellMode || b?.sellMode || "BOTH";
               const unit =
                 specialPick.specialProduct?.servingLabel || b?.servingLabel || t("specials.plate");
-              if (sellMode !== "BOTH") return null;
+              const halfP =
+                specialPick.specialProduct?.halfPlatePrice ?? b?.halfPlatePrice ?? null;
+              const hasHalf = halfP != null && halfP > 0;
+              const fullP =
+                specialPick.specialProduct?.platePrice || b?.platePrice || specialPick.sellingPrice;
               return (
-            <div className="chips" style={{ margin: "0.75rem 0" }}>
-              <button
-                type="button"
-                className={`chip ${specialMode === "PLATE" ? "active" : ""}`}
-                onClick={() => setSpecialMode("PLATE")}
-              >
-                {t("waiter.saleServing", { unit })}
-              </button>
-              <button
-                type="button"
-                className={`chip ${specialMode === "RS" ? "active" : ""}`}
-                onClick={() => setSpecialMode("RS")}
-              >
-                {t("waiter.saleRs")}
-              </button>
-            </div>
+                <>
+                  {sellMode !== "SERVING_ONLY" && sellMode !== "RS_ONLY" && (
+                    <div className="chips" style={{ margin: "0.75rem 0" }}>
+                      <button
+                        type="button"
+                        className={`chip ${specialMode === "PLATE" ? "active" : ""}`}
+                        onClick={() => setSpecialMode("PLATE")}
+                      >
+                        {t("waiter.saleServing", { unit })}
+                      </button>
+                      <button
+                        type="button"
+                        className={`chip ${specialMode === "RS" ? "active" : ""}`}
+                        onClick={() => setSpecialMode("RS")}
+                      >
+                        {t("waiter.saleRs")}
+                      </button>
+                    </div>
+                  )}
+                  {specialMode === "PLATE" && hasHalf && (
+                    <div className="chips" style={{ margin: "0.5rem 0 0.75rem" }}>
+                      <button
+                        type="button"
+                        className={`chip ${specialPlateSize === "HALF" ? "active" : ""}`}
+                        onClick={() => setSpecialPlateSize("HALF")}
+                      >
+                        {t("waiter.halfPlate")} · {money(halfP!)}
+                      </button>
+                      <button
+                        type="button"
+                        className={`chip ${specialPlateSize === "FULL" ? "active" : ""}`}
+                        onClick={() => setSpecialPlateSize("FULL")}
+                      >
+                        {t("waiter.fullPlate")} · {money(fullP)}
+                      </button>
+                    </div>
+                  )}
+                </>
               );
             })()}
             {specialMode === "RS" && (

@@ -9,9 +9,9 @@ import { SearchField, matchesSearch } from "../components/SearchField";
 import { ThermalPreview } from "../components/ThermalPreview";
 import { Pagination, paginate } from "../components/Pagination";
 import { useSocketEvent } from "../socket";
-import { serverOrigin, apiBase } from "../server";
+import { serverOrigin } from "../server";
 import { applyAccent, THEME_PRESETS, useBrand } from "../brand";
-import { useT, type MessageKey } from "../i18n";
+import { useT } from "../i18n";
 
 const PAGE_SIZE = 15;
 
@@ -45,6 +45,7 @@ type Printer = {
   paperWidth: number;
   printsKot: boolean;
   printsBill: boolean;
+  printsOther: boolean;
   station: string;
   categories: string;
   active: boolean;
@@ -90,15 +91,6 @@ type Job = {
   createdAt: string;
 };
 
-type Backup = { file: string; size: number; createdAt: string; auto: boolean; kind?: "daily" | "monthly" | "manual" | "safety" };
-
-const BACKUP_KIND_KEY: Record<string, MessageKey> = {
-  daily: "settings.kindDaily",
-  monthly: "settings.kindMonthly",
-  manual: "settings.kindManual",
-  safety: "settings.kindBefore",
-};
-
 const EMPTY_PRINTER: Omit<Printer, "id"> = {
   name: "",
   kind: "NETWORK",
@@ -106,6 +98,7 @@ const EMPTY_PRINTER: Omit<Printer, "id"> = {
   paperWidth: 80,
   printsKot: false,
   printsBill: true,
+  printsOther: false,
   station: "",
   categories: "",
   active: true,
@@ -127,16 +120,318 @@ export function SettingsPage() {
         </div>
       </div>
       <ServerSection canEdit={can("system.manage")} />
-      {can("system.manage") && <BillDesignSection />}
+      {/* Tax UI hidden for now — backend tax still works if settings exist
       {can("system.manage") && <TaxBillingSection />}
+      */}
       {can("system.manage") && <TipPrintSection />}
+      {can("system.manage") && <BillDesignPreviewSection />}
       {can("printers.manage") && <PrintersSection />}
       {can("printers.manage") && <JobsSection />}
-      {can("system.manage") && <BackupSection />}
+      {can("system.manage") && (
+        <div className="panel panel-pad settings-block">
+          <h2 className="settings-h" style={{ margin: 0 }}>{t("dev.title")}</h2>
+          <p className="tiny muted" style={{ margin: "0.35rem 0 0.75rem" }}>{t("dev.settingsLinkHint")}</p>
+          <p className="tiny muted" style={{ margin: "0 0 0.75rem" }}>{t("dev.tabShortcut")}</p>
+        </div>
+      )}
     </div>
   );
 }
 
+/** Saved bill layout preview — always visible in Settings (builder stays in Developer). */
+function BillDesignPreviewSection() {
+  const toast = useToast();
+  const t = useT();
+  const { logoSrc } = useBrand();
+  const [title, setTitle] = useState("Customer Bill");
+  const [footer, setFooter] = useState("Thanks for your Visit..");
+  const [showLogo, setShowLogo] = useState(true);
+  const [showName, setShowName] = useState(true);
+  const [showTagline, setShowTagline] = useState(true);
+  const [showAddress, setShowAddress] = useState(true);
+  const [showPhone, setShowPhone] = useState(true);
+  const [showOrderBy, setShowOrderBy] = useState(true);
+  const [showServedBy, setShowServedBy] = useState(true);
+  const [showCashier, setShowCashier] = useState(true);
+  const [showTip, setShowTip] = useState(true);
+  const [showPaidStamp, setShowPaidStamp] = useState(true);
+  const [paperWidth, setPaperWidth] = useState<58 | 72 | 80 | 112>(80);
+  const [busy, setBusy] = useState(false);
+  const [previewErr, setPreviewErr] = useState(false);
+  const [preview, setPreview] = useState<{
+    text: string;
+    paperWidth: number;
+    logoUrl?: string | null;
+    paidStampUrl?: string | null;
+    unpaidStampUrl?: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    api<{
+      print: {
+        bill: {
+          title?: string;
+          footer?: string;
+          template?: string;
+          showLogo?: boolean;
+          showName?: boolean;
+          showTagline?: boolean;
+          showAddress?: boolean;
+          showPhone?: boolean;
+          showOrderBy?: boolean;
+          showServedBy?: boolean;
+          showCashier?: boolean;
+          showTip?: boolean;
+          showPaidStamp?: boolean;
+        };
+      };
+    }>("/system/settings")
+      .then((s) => {
+        const b = s.print?.bill;
+        if (!b) return;
+        setTitle(b.title || "Customer Bill");
+        setFooter(b.footer ?? "Thanks for your Visit..");
+        setShowLogo(b.showLogo !== false);
+        setShowName(b.showName !== false);
+        setShowTagline(b.showTagline !== false);
+        setShowAddress(b.showAddress !== false);
+        setShowPhone(b.showPhone !== false);
+        setShowOrderBy(b.showOrderBy !== false);
+        setShowServedBy(b.showServedBy !== false);
+        setShowCashier(b.showCashier !== false);
+        setShowTip(b.showTip !== false);
+        setShowPaidStamp(b.showPaidStamp !== false);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      setPreviewErr(false);
+      api<{
+        text: string;
+        paperWidth: number;
+        logoUrl?: string | null;
+        paidStampUrl?: string | null;
+        unpaidStampUrl?: string | null;
+      }>("/system/bill-preview", {
+        method: "POST",
+        body: JSON.stringify({
+          // Always use server saved/default template (code layout) — not a stale grapes dump
+          title,
+          footer,
+          paperWidth,
+          showLogo: showLogo ? "1" : "0",
+          showName: showName ? "1" : "0",
+          showTagline: showTagline ? "1" : "0",
+          showAddress: showAddress ? "1" : "0",
+          showPhone: showPhone ? "1" : "0",
+          showOrderBy: showOrderBy ? "1" : "0",
+          showServedBy: showServedBy ? "1" : "0",
+          showCashier: showCashier ? "1" : "0",
+          showTip: showTip ? "1" : "0",
+          showPaidStamp: showPaidStamp ? "1" : "0",
+        }),
+      })
+        .then((r) => {
+          setPreview(r);
+          setPreviewErr(false);
+        })
+        .catch(() => {
+          setPreview(null);
+          setPreviewErr(true);
+        });
+    }, 280);
+    return () => window.clearTimeout(handle);
+  }, [
+    title,
+    footer,
+    paperWidth,
+    showLogo,
+    showName,
+    showTagline,
+    showAddress,
+    showPhone,
+    showOrderBy,
+    showServedBy,
+    showCashier,
+    showTip,
+    showPaidStamp,
+    logoSrc,
+  ]);
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api("/system/settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          billTitle: title.trim() || "Customer Bill",
+          billFooter: footer,
+          billShowLogo: showLogo ? "1" : "0",
+          billShowName: showName ? "1" : "0",
+          billShowTagline: showTagline ? "1" : "0",
+          billShowAddress: showAddress ? "1" : "0",
+          billShowPhone: showPhone ? "1" : "0",
+          billShowOrderBy: showOrderBy ? "1" : "0",
+          billShowServedBy: showServedBy ? "1" : "0",
+          billShowCashier: showCashier ? "1" : "0",
+          billShowTip: showTip ? "1" : "0",
+          billShowPaidStamp: showPaidStamp ? "1" : "0",
+        }),
+      });
+      toast.push(t("settings.saved"), "ok");
+    } catch (err) {
+      toast.push(errMsg(err, t("settings.saveFailed")), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="panel panel-pad settings-block" onSubmit={save}>
+      <h2 className="settings-h" style={{ margin: 0 }}>
+        {t("settings.billDesign")}
+      </h2>
+      <p className="muted" style={{ margin: "0.35rem 0 1rem" }}>
+        {t("settings.billDesignHint")}
+      </p>
+
+      <div className="bill-settings-grid">
+        <div className="bill-settings-controls">
+          <div className="field">
+            <label>{t("settings.paperWidth")}</label>
+            <div className="paper-size-tabs" role="tablist">
+              {([58, 72, 80, 112] as const).map((mm) => (
+                <button
+                  key={mm}
+                  type="button"
+                  className={paperWidth === mm ? "active" : undefined}
+                  onClick={() => setPaperWidth(mm)}
+                >
+                  {mm} mm
+                </button>
+              ))}
+            </div>
+            <p className="tiny muted">{t("settings.paperSizesHint")}</p>
+          </div>
+
+          <div className="field">
+            <label htmlFor="bill-title-settings">{t("settings.billTitle")}</label>
+            <input
+              id="bill-title-settings"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              maxLength={40}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="bill-footer-settings">{t("settings.billFooter")}</label>
+            <input
+              id="bill-footer-settings"
+              value={footer}
+              onChange={(e) => setFooter(e.target.value)}
+              maxLength={120}
+            />
+          </div>
+
+          <h3 className="settings-h" style={{ fontSize: "0.95rem", marginTop: "0.5rem" }}>
+            {t("settings.billHeader")}
+          </h3>
+          <label className="switch-row">
+            <input type="checkbox" checked={showLogo} onChange={(e) => setShowLogo(e.target.checked)} />
+            <span>{t("settings.showLogo")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={showName} onChange={(e) => setShowName(e.target.checked)} />
+            <span>{t("settings.showRestaurantName")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={showTagline} onChange={(e) => setShowTagline(e.target.checked)} />
+            <span>{t("settings.showTagline")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={showAddress} onChange={(e) => setShowAddress(e.target.checked)} />
+            <span>{t("settings.showAddress")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={showPhone} onChange={(e) => setShowPhone(e.target.checked)} />
+            <span>{t("settings.showPhone")}</span>
+          </label>
+
+          <div className="bill-staff-block">
+            <h3 className="settings-h" style={{ fontSize: "0.95rem", margin: 0 }}>
+              {t("settings.billFields")}
+            </h3>
+            <p className="tiny muted" style={{ margin: "0.25rem 0 0.5rem" }}>
+              {t("settings.billStaffBlockHint")}
+            </p>
+            <label className="switch-row">
+              <input type="checkbox" checked={showCashier} onChange={(e) => setShowCashier(e.target.checked)} />
+              <span>{t("settings.showCashier")}</span>
+            </label>
+            <label className="switch-row">
+              <input type="checkbox" checked={showOrderBy} onChange={(e) => setShowOrderBy(e.target.checked)} />
+              <span>{t("settings.showOrderBy")}</span>
+            </label>
+            <label className="switch-row">
+              <input type="checkbox" checked={showServedBy} onChange={(e) => setShowServedBy(e.target.checked)} />
+              <span>{t("settings.showServedBy")}</span>
+            </label>
+          </div>
+
+          <label className="switch-row">
+            <input type="checkbox" checked={showTip} onChange={(e) => setShowTip(e.target.checked)} />
+            <span>{t("settings.showTip")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={showPaidStamp} onChange={(e) => setShowPaidStamp(e.target.checked)} />
+            <span>{t("settings.showPaidStamp")}</span>
+          </label>
+          <p className="tiny muted">{t("settings.paidStampGraphicHint")}</p>
+
+          <div className="row" style={{ marginTop: "1rem", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button className="btn" type="submit" disabled={busy}>
+              {busy ? t("common.saving") : t("common.save")}
+            </button>
+          </div>
+        </div>
+
+        <div className="bill-settings-preview">
+          <h3 className="settings-h" style={{ fontSize: "0.95rem", margin: "0 0 0.5rem" }}>
+            {t("settings.billPreview")}
+          </h3>
+          <p className="tiny muted" style={{ margin: "0 0 0.75rem" }}>
+            {t("settings.billDesignPreviewNote")}
+          </p>
+          <div
+            className="bill-design-preview-frame"
+            style={{ ["--preview-mm" as string]: `${paperWidth}mm` }}
+          >
+            {preview?.text ? (
+              <ThermalPreview
+                text={preview.text}
+                paperWidth={preview.paperWidth || paperWidth}
+                logoUrl={logoSrc || preview.logoUrl}
+                paidStampUrl={preview.paidStampUrl}
+                unpaidStampUrl={preview.unpaidStampUrl}
+              />
+            ) : previewErr ? (
+              <p className="tiny" style={{ color: "var(--danger)" }}>
+                {t("settings.billPreviewFailed")}
+              </p>
+            ) : (
+              <p className="tiny muted">{t("settings.billPreviewLoading")}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </form>
+  );
+}
+
+/* Tax & legal settings panel — restore when needed in UI
 function TaxBillingSection() {
   const toast = useToast();
   const t = useT();
@@ -222,6 +517,7 @@ function TaxBillingSection() {
     </form>
   );
 }
+*/
 
 function ServerSection({ canEdit }: { canEdit: boolean }) {
   const toast = useToast();
@@ -448,299 +744,6 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
       </div>
     </div>
   );
-}
-
-type BillDesignState = {
-  showLogo: boolean;
-  showName: boolean;
-  showTagline: boolean;
-  showAddress: boolean;
-  showPhone: boolean;
-  title: string;
-  showOrderBy: boolean;
-  showServedBy: boolean;
-  showCashier: boolean;
-  showTip: boolean;
-  showPaidStamp: boolean;
-  paidStampText: string;
-  paidStampBig: boolean;
-  footer: string;
-};
-
-const DEFAULT_BILL_DESIGN: BillDesignState = {
-  showLogo: true,
-  showName: true,
-  showTagline: true,
-  showAddress: true,
-  showPhone: true,
-  title: "Customer Bill",
-  showOrderBy: true,
-  showServedBy: true,
-  showCashier: true,
-  showTip: true,
-  showPaidStamp: true,
-  paidStampText: "*** PAID ***",
-  paidStampBig: true,
-  footer: "Thanks for your Visit..",
-};
-
-function BillDesignSection() {
-  const toast = useToast();
-  const t = useT();
-  const { logoSrc } = useBrand();
-  const [d, setD] = useState<BillDesignState>(DEFAULT_BILL_DESIGN);
-  const [paperWidth, setPaperWidth] = useState<58 | 72 | 80 | 112>(80);
-  const [busy, setBusy] = useState(false);
-  const [preview, setPreview] = useState<{
-    text: string;
-    paperWidth: number;
-    logoUrl?: string | null;
-    paidStampUrl?: string | null;
-    unpaidStampUrl?: string | null;
-  } | null>(null);
-
-  useEffect(() => {
-    api<{
-      print: { bill: Partial<BillDesignState> };
-    }>("/system/settings")
-      .then((s) => {
-        const b = s.print?.bill || {};
-        setD({
-          showLogo: b.showLogo !== false,
-          showName: b.showName !== false,
-          showTagline: b.showTagline !== false,
-          showAddress: b.showAddress !== false,
-          showPhone: b.showPhone !== false,
-          title: b.title || "Customer Bill",
-          showOrderBy: b.showOrderBy !== false,
-          showServedBy: b.showServedBy !== false,
-          showCashier: b.showCashier !== false,
-          showTip: b.showTip !== false,
-          showPaidStamp: b.showPaidStamp !== false,
-          paidStampText: b.paidStampText || "*** PAID ***",
-          paidStampBig: b.paidStampBig !== false,
-          footer: b.footer || "Thanks for your Visit..",
-        });
-      })
-      .catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
-    const handle = window.setTimeout(() => {
-      api<{
-        text: string;
-        paperWidth: number;
-        logoUrl?: string | null;
-        paidStampUrl?: string | null;
-        unpaidStampUrl?: string | null;
-      }>("/system/bill-preview", {
-        method: "POST",
-        body: JSON.stringify({
-          showLogo: d.showLogo ? "1" : "0",
-          showName: d.showName ? "1" : "0",
-          showTagline: d.showTagline ? "1" : "0",
-          showAddress: d.showAddress ? "1" : "0",
-          showPhone: d.showPhone ? "1" : "0",
-          title: d.title,
-          showOrderBy: d.showOrderBy ? "1" : "0",
-          showServedBy: d.showServedBy ? "1" : "0",
-          showCashier: d.showCashier ? "1" : "0",
-          showTip: d.showTip ? "1" : "0",
-          showPaidStamp: d.showPaidStamp ? "1" : "0",
-          paidStampText: d.paidStampText,
-          paidStampBig: d.paidStampBig ? "1" : "0",
-          footer: d.footer,
-          paperWidth,
-        }),
-      })
-        .then(setPreview)
-        .catch(() => undefined);
-    }, 200);
-    return () => window.clearTimeout(handle);
-  }, [d, paperWidth]);
-
-  function patch(p: Partial<BillDesignState>) {
-    setD((prev) => ({ ...prev, ...p }));
-  }
-
-  async function save(e: FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      await api("/system/settings", {
-        method: "PATCH",
-        body: JSON.stringify({
-          billShowLogo: d.showLogo ? "1" : "0",
-          billShowName: d.showName ? "1" : "0",
-          billShowTagline: d.showTagline ? "1" : "0",
-          billShowAddress: d.showAddress ? "1" : "0",
-          billShowPhone: d.showPhone ? "1" : "0",
-          billTitle: d.title.trim() || "Customer Bill",
-          billShowOrderBy: d.showOrderBy ? "1" : "0",
-          billShowServedBy: d.showServedBy ? "1" : "0",
-          billShowCashier: d.showCashier ? "1" : "0",
-          billShowTip: d.showTip ? "1" : "0",
-          billShowPaidStamp: d.showPaidStamp ? "1" : "0",
-          billPaidStampText: d.paidStampText.trim() || "*** PAID ***",
-          billPaidStampBig: d.paidStampBig ? "1" : "0",
-          billFooter: d.footer,
-        }),
-      });
-      toast.push(t("settings.saved"), "ok");
-    } catch (err) {
-      toast.push(errMsg(err, t("settings.saveFailed")), "err");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form className="panel panel-pad bill-design" onSubmit={save} style={{ marginBottom: "1rem" }}>
-      <h2 className="settings-h">{t("settings.billDesign")}</h2>
-      <p className="muted" style={{ marginTop: 0 }}>
-        {t("settings.billDesignHint")}
-      </p>
-
-      <div className="bill-design-grid">
-        <div>
-          <h3 className="settings-h" style={{ fontSize: "1rem" }}>
-            {t("settings.billHeader")}
-          </h3>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showLogo} onChange={(e) => patch({ showLogo: e.target.checked })} />
-            <span>
-              {t("settings.showLogo")}
-              {!logoSrc ? <small className="muted"> — {t("settings.uploadLogoFirst")}</small> : null}
-            </span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showName} onChange={(e) => patch({ showName: e.target.checked })} />
-            <span>{t("settings.showRestaurantName")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showTagline} onChange={(e) => patch({ showTagline: e.target.checked })} />
-            <span>{t("settings.showTagline")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showAddress} onChange={(e) => patch({ showAddress: e.target.checked })} />
-            <span>{t("settings.showAddress")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showPhone} onChange={(e) => patch({ showPhone: e.target.checked })} />
-            <span>{t("settings.showPhone")}</span>
-          </label>
-
-          <div className="field">
-            <label>{t("settings.billTitle")}</label>
-            <input value={d.title} onChange={(e) => patch({ title: e.target.value })} maxLength={40} />
-          </div>
-
-          <h3 className="settings-h" style={{ fontSize: "1rem" }}>
-            {t("settings.billFields")}
-          </h3>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showOrderBy} onChange={(e) => patch({ showOrderBy: e.target.checked })} />
-            <span>{t("settings.showOrderBy")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showServedBy} onChange={(e) => patch({ showServedBy: e.target.checked })} />
-            <span>{t("settings.showServedBy")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showCashier} onChange={(e) => patch({ showCashier: e.target.checked })} />
-            <span>{t("settings.showCashier")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showTip} onChange={(e) => patch({ showTip: e.target.checked })} />
-            <span>{t("settings.showTip")}</span>
-          </label>
-
-          <h3 className="settings-h" style={{ fontSize: "1rem" }}>
-            {t("settings.paidStamp")}
-          </h3>
-          <label className="switch-row">
-            <input
-              type="checkbox"
-              checked={d.showPaidStamp}
-              onChange={(e) => patch({ showPaidStamp: e.target.checked })}
-            />
-            <span>{t("settings.showPaidStamp")}</span>
-          </label>
-          {d.showPaidStamp ? (
-            <div className="paid-stamp-sample" aria-hidden>
-              <img src={brandingUrl("/branding/paid-stamp.png?v=4")} alt="" />
-              <img src={brandingUrl("/branding/unpaid-stamp.png?v=4")} alt="" />
-              <span className="tiny muted">{t("settings.paidStampGraphicHint")}</span>
-            </div>
-          ) : null}
-
-          <div className="field">
-            <label>{t("settings.billFooter")}</label>
-            <input value={d.footer} onChange={(e) => patch({ footer: e.target.value })} maxLength={120} />
-          </div>
-
-          <p className="tiny muted">{t("settings.billLogoHint")}</p>
-
-          <div className="form-footer">
-            <button className="btn" type="submit" disabled={busy}>
-              {busy ? t("common.saving") : t("common.save")}
-            </button>
-          </div>
-        </div>
-
-        <div>
-          <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem", gap: "0.5rem", flexWrap: "wrap" }}>
-            <h3 className="settings-h" style={{ fontSize: "1rem", margin: 0 }}>
-              {t("settings.billPreview")}
-            </h3>
-            <div className="paper-size-tabs" role="tablist" aria-label={t("settings.paperWidth")}>
-              {(
-                [
-                  [58, "settings.paper58Narrow"],
-                  [72, "settings.paper72"],
-                  [80, "settings.paper80Standard"],
-                  [112, "settings.paper112"],
-                ] as const
-              ).map(([mm, key]) => (
-                <button
-                  key={mm}
-                  type="button"
-                  className={paperWidth === mm ? "active" : undefined}
-                  onClick={() => setPaperWidth(mm)}
-                >
-                  {t(key)}
-                </button>
-              ))}
-            </div>
-          </div>
-          <p className="tiny muted" style={{ marginTop: 0 }}>
-            {t("settings.paperSizesHint")}
-          </p>
-          <div className="bill-design-preview-frame" style={{ ["--preview-mm" as string]: `${paperWidth}mm` }}>
-            {preview?.text ? (
-              <ThermalPreview
-                text={preview.text}
-                paperWidth={preview.paperWidth || paperWidth}
-                logoUrl={preview.logoUrl}
-                paidStampUrl={preview.paidStampUrl}
-                unpaidStampUrl={preview.unpaidStampUrl}
-              />
-            ) : (
-              <p className="tiny muted">{t("settings.billPreviewLoading")}</p>
-            )}
-          </div>
-        </div>
-      </div>
-    </form>
-  );
-}
-
-function brandingUrl(path: string) {
-  const origin =
-    apiBase().replace(/\/api\/?$/, "") ||
-    serverOrigin() ||
-    (typeof location !== "undefined" ? location.origin : "");
-  return `${origin}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 type PerHeadPkgRow = {
@@ -1135,7 +1138,7 @@ function PrintersSection() {
   }, [load]);
 
   async function openEditor(p?: Printer) {
-    setEdit(p ? { ...p } : { ...EMPTY_PRINTER });
+    setEdit(p ? { ...p, printsOther: !!p.printsOther } : { ...EMPTY_PRINTER });
     if (p?.kind === "AGENT") {
       setSystem([]);
       return;
@@ -1306,6 +1309,7 @@ function PrintersSection() {
             <th>{t("settings.target")}</th>
             <th>{t("settings.kitchenSlip")}</th>
             <th>{t("settings.bill")}</th>
+            <th>{t("settings.otherPrint")}</th>
             <th>{t("common.active")}</th>
             <th />
           </tr>
@@ -1338,6 +1342,15 @@ function PrintersSection() {
                 <input type="checkbox" checked={p.printsBill} onChange={(e) => void toggle(p, { printsBill: e.target.checked })} />
               </td>
               <td>
+                <input
+                  type="checkbox"
+                  checked={!!p.printsOther}
+                  disabled={p.kind !== "WINDOWS"}
+                  title={p.kind !== "WINDOWS" ? t("settings.otherPrintWindowsOnly") : undefined}
+                  onChange={(e) => void toggle(p, { printsOther: e.target.checked })}
+                />
+              </td>
+              <td>
                 <input type="checkbox" checked={p.active} onChange={(e) => void toggle(p, { active: e.target.checked })} />
               </td>
               <td className="row">
@@ -1355,7 +1368,7 @@ function PrintersSection() {
           ))}
           {!printers.length && (
             <tr>
-              <td colSpan={8} className="empty">
+              <td colSpan={9} className="empty">
                 {t("settings.noPrinters")}
               </td>
             </tr>
@@ -1397,7 +1410,18 @@ function PrintersSection() {
                   )}
                 </>
               ) : (
-                <select value={edit.kind} onChange={(e) => setEdit({ ...edit, kind: e.target.value as Printer["kind"], target: "" })}>
+                <select
+                  value={edit.kind}
+                  onChange={(e) => {
+                    const kind = e.target.value as Printer["kind"];
+                    setEdit({
+                      ...edit,
+                      kind,
+                      target: "",
+                      printsOther: kind === "WINDOWS" ? edit.printsOther : false,
+                    });
+                  }}
+                >
                   <option value="NETWORK">{t("settings.lan")}</option>
                   <option value="WINDOWS">{t("settings.usbServer")}</option>
                   <option value="FILE">{t("settings.previewFile")}</option>
@@ -1448,7 +1472,7 @@ function PrintersSection() {
                 <option value={112}>{t("settings.paper112")}</option>
               </select>
             </div>
-            <div className="row">
+            <div className="row" style={{ flexWrap: "wrap", gap: "0.75rem" }}>
               <label className="check">
                 <input type="checkbox" checked={edit.printsKot} onChange={(e) => setEdit({ ...edit, printsKot: e.target.checked })} /> {t("settings.kitchenSlip")}
               </label>
@@ -1456,9 +1480,21 @@ function PrintersSection() {
                 <input type="checkbox" checked={edit.printsBill} onChange={(e) => setEdit({ ...edit, printsBill: e.target.checked })} /> {t("settings.bill")}
               </label>
               <label className="check">
+                <input
+                  type="checkbox"
+                  checked={!!edit.printsOther}
+                  disabled={edit.kind !== "WINDOWS"}
+                  onChange={(e) => setEdit({ ...edit, printsOther: e.target.checked })}
+                />{" "}
+                {t("settings.otherPrint")}
+              </label>
+              <label className="check">
                 <input type="checkbox" checked={edit.active} onChange={(e) => setEdit({ ...edit, active: e.target.checked })} /> {t("common.active")}
               </label>
             </div>
+            {edit.kind === "WINDOWS" && (
+              <p className="tiny muted">{t("settings.otherPrintHint")}</p>
+            )}
             <div className="field">
               <label>{t("settings.categoriesHint")}</label>
               <input
@@ -1622,115 +1658,6 @@ function JobsSection() {
           ) : null}
         </div>
       </Modal>
-    </div>
-  );
-}
-
-function BackupSection() {
-  const toast = useToast();
-  const t = useT();
-  const ask = useConfirm();
-  const [dir, setDir] = useState("");
-  const [files, setFiles] = useState<Backup[]>([]);
-  const [page, setPage] = useState(1);
-  const [busy, setBusy] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      const r = await api<{ dir: string; files: Backup[] }>("/system/backups");
-      setDir(r.dir);
-      setFiles(r.files);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  async function backupNow() {
-    setBusy(true);
-    try {
-      await api("/system/backups", { method: "POST", body: "{}" });
-      toast.push(t("settings.backupCreated"), "ok");
-      void load();
-    } catch (e) {
-      toast.push(errMsg(e, t("common.failed")), "err");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function restore(b: Backup) {
-    if (!(await ask({ title: t("settings.restoreTitle"), body: t("settings.restoreConfirm", { file: b.file }), danger: true, confirmLabel: t("settings.restore") }))) return;
-    setBusy(true);
-    try {
-      await api(`/system/backups/${encodeURIComponent(b.file)}/restore`, { method: "POST", body: "{}" });
-      toast.push(t("settings.restoreOk"), "ok");
-      setTimeout(() => location.reload(), 1500);
-    } catch (e) {
-      toast.push(errMsg(e, t("common.failed")), "err");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="panel panel-pad settings-block">
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <div>
-          <h2 className="settings-h" style={{ margin: 0 }}>{t("settings.backup")}</h2>
-          <p className="tiny muted" style={{ margin: "0.2rem 0 0" }}>
-            {t("settings.backupHint")} <code>{dir}</code>
-          </p>
-          <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
-            {t("settings.restoreHint")}
-          </p>
-        </div>
-        <button type="button" className="btn sm" disabled={busy} onClick={() => void backupNow()}>
-          {busy ? t("settings.working") : t("settings.backupNow")}
-        </button>
-      </div>
-      <div className="table-wrap" style={{ marginTop: "0.75rem" }}>
-      <table>
-        <thead>
-          <tr>
-            <th>{t("settings.file")}</th>
-            <th>{t("settings.size")}</th>
-            <th>{t("settings.date")}</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {paginate(files, page, PAGE_SIZE).map((b) => (
-            <tr key={b.file}>
-              <td className="tiny">
-                {b.file}{" "}
-                <span className={`badge ${b.kind === "monthly" ? "paid" : "ready"}`}>
-                  {t(BACKUP_KIND_KEY[b.kind || (b.auto ? "daily" : "manual")] ?? "settings.kindManual")}
-                </span>
-              </td>
-              <td>{(b.size / 1024).toFixed(0)} KB</td>
-              <td className="tiny">{new Date(b.createdAt).toLocaleString("en-PK")}</td>
-              <td>
-                <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void restore(b)}>
-                  {t("settings.restore")}
-                </button>
-              </td>
-            </tr>
-          ))}
-          {!files.length && (
-            <tr>
-              <td colSpan={4} className="empty">
-                {t("settings.noBackups")}
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-      </div>
-      <Pagination page={page} pageSize={PAGE_SIZE} total={files.length} onChange={setPage} />
     </div>
   );
 }

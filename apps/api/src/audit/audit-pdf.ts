@@ -1,4 +1,5 @@
 import PDFDocument from "pdfkit";
+import { forEachBufferedPage } from "../common/pdf-page";
 import { VENDOR } from "../common/vendor";
 import type { AuditReport } from "./audit.service";
 
@@ -362,24 +363,26 @@ function ensureSpace(doc: PDFKit.PDFDocument, need: number, onNewPage?: () => vo
 }
 
 function footer(doc: PDFKit.PDFDocument, hotel: Hotel) {
-  const range = doc.bufferedPageRange();
-  for (let i = range.start; i < range.start + range.count; i++) {
-    doc.switchToPage(i);
-    const n = i - range.start + 1;
+  forEachBufferedPage(doc, (n, total) => {
     doc.save();
-    doc.strokeColor(LINE).lineWidth(0.7).moveTo(PAGE.margin, PAGE.height - 28).lineTo(PAGE.width - PAGE.margin, PAGE.height - 28).stroke();
+    doc
+      .strokeColor(LINE)
+      .lineWidth(0.7)
+      .moveTo(PAGE.margin, PAGE.height - 28)
+      .lineTo(PAGE.width - PAGE.margin, PAGE.height - 28)
+      .stroke();
     doc.fillColor(MUTED).font("Helvetica").fontSize(8);
     doc.text(
       `${hotel.name} · Sales & audit report · ${VENDOR.line} · ${VENDOR.phoneDisplay}`,
       PAGE.margin,
       PAGE.height - 22,
-      { lineBreak: false, width: PAGE.width - PAGE.margin * 2 - 90 },
+      { lineBreak: false, width: PAGE.width - PAGE.margin * 2 - 90 }
     );
-    doc.text(`Page ${n} of ${range.count}`, PAGE.width - PAGE.margin - 80, PAGE.height - 22, {
+    doc.text(`Page ${n} of ${total}`, PAGE.width - PAGE.margin - 80, PAGE.height - 22, {
       width: 80,
       align: "right",
       lineBreak: false,
     });
     doc.restore();
-  }
+  });
 }

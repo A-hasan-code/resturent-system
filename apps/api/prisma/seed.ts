@@ -1,5 +1,6 @@
-import { KitchenStation, PrismaClient, UnitType } from "@prisma/client";
+import { KitchenStation, PackUnit, PrismaClient, UnitType } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { FULL_MENU_RECIPES } from "./full-menu-recipes";
 
 const prisma = new PrismaClient();
 
@@ -43,6 +44,7 @@ const ROLE_PERMS: Record<string, string[]> = {
     "reports.view",
     "bill.view",
     "order.edit",
+    "kitchen.view",
     "expense.view",
     "expense.manage",
     "menu.view",
@@ -58,8 +60,6 @@ const ROLE_PERMS: Record<string, string[]> = {
     "print.kot",
     "kitchen.view",
     "kitchen.update",
-    "expense.view",
-    "expense.manage",
   ],
   MAIN_CASHIER: [
     "menu.view",
@@ -126,11 +126,13 @@ const SETTINGS: Record<string, string> = {
 type StoreDef = {
   key: string;
   name: string;
-  cat: "FRESH" | "DRY" | "LIQUID";
+  cat: "FRESH" | "DRY" | "LIQUID" | "GROCERY";
   unit: UnitType;
   qty: number;
   rate: number;
   reorder?: number;
+  packUnit?: PackUnit;
+  unitsPerPack?: number;
 };
 
 /** Inventory items used by standard recipes (starting stock approx). */
@@ -140,7 +142,12 @@ const STORE_ITEMS: StoreDef[] = [
   { key: "chicken_mince", name: "Chicken Mince", cat: "FRESH", unit: UnitType.KG, qty: 10, rate: 700, reorder: 3 },
   { key: "chicken_breast", name: "Chicken Breast", cat: "FRESH", unit: UnitType.KG, qty: 8, rate: 820, reorder: 2 },
   { key: "beef", name: "Beef (with bone)", cat: "FRESH", unit: UnitType.KG, qty: 25, rate: 1400, reorder: 5 },
+  { key: "beef_mince", name: "Beef Mince", cat: "FRESH", unit: UnitType.KG, qty: 10, rate: 1500, reorder: 3 },
   { key: "mutton", name: "Mutton", cat: "FRESH", unit: UnitType.KG, qty: 20, rate: 1800, reorder: 5 },
+  { key: "paneer", name: "Paneer", cat: "FRESH", unit: UnitType.KG, qty: 5, rate: 900, reorder: 1 },
+  { key: "fish", name: "Fish (grill)", cat: "FRESH", unit: UnitType.KG, qty: 8, rate: 1200, reorder: 2 },
+  { key: "cucumber", name: "Cucumber", cat: "FRESH", unit: UnitType.KG, qty: 5, rate: 80, reorder: 1 },
+  { key: "lettuce", name: "Lettuce / Salad leaves", cat: "FRESH", unit: UnitType.KG, qty: 3, rate: 120, reorder: 0.5 },
   { key: "tomato", name: "Tomato", cat: "FRESH", unit: UnitType.KG, qty: 25, rate: 80, reorder: 5 },
   { key: "onion", name: "Onion", cat: "FRESH", unit: UnitType.KG, qty: 30, rate: 60, reorder: 5 },
   { key: "garlic", name: "Garlic", cat: "FRESH", unit: UnitType.KG, qty: 5, rate: 400, reorder: 1 },
@@ -153,7 +160,17 @@ const STORE_ITEMS: StoreDef[] = [
   { key: "coriander", name: "Fresh Coriander", cat: "FRESH", unit: UnitType.KG, qty: 2, rate: 120, reorder: 0.5 },
   { key: "mint", name: "Fresh Mint", cat: "FRESH", unit: UnitType.KG, qty: 1, rate: 150, reorder: 0.3 },
   { key: "lemon", name: "Lemon", cat: "FRESH", unit: UnitType.PCS, qty: 50, rate: 15, reorder: 10 },
-  { key: "egg", name: "Egg", cat: "FRESH", unit: UnitType.PCS, qty: 120, rate: 30, reorder: 24 },
+  {
+    key: "egg",
+    name: "Egg",
+    cat: "FRESH",
+    unit: UnitType.PCS,
+    qty: 120,
+    rate: 30,
+    reorder: 24,
+    packUnit: PackUnit.TRAY,
+    unitsPerPack: 30,
+  },
   { key: "potato", name: "Potato", cat: "FRESH", unit: UnitType.KG, qty: 20, rate: 70, reorder: 5 },
 
   { key: "rice", name: "Rice (Sella/Basmati)", cat: "DRY", unit: UnitType.KG, qty: 50, rate: 280, reorder: 10 },
@@ -193,6 +210,129 @@ const STORE_ITEMS: StoreDef[] = [
   { key: "soy", name: "Soy Sauce", cat: "LIQUID", unit: UnitType.L, qty: 3, rate: 400, reorder: 0.5 },
   { key: "vinegar", name: "Vinegar", cat: "LIQUID", unit: UnitType.L, qty: 3, rate: 250, reorder: 0.5 },
   { key: "honey", name: "Honey", cat: "LIQUID", unit: UnitType.KG, qty: 2, rate: 900, reorder: 0.3 },
+
+  /** Counter grocery — stock in sell unit; pack = how bought. */
+  {
+    key: "biscuit",
+    name: "Biscuit",
+    cat: "GROCERY",
+    unit: UnitType.PCS,
+    qty: 240,
+    rate: 5,
+    reorder: 48,
+    packUnit: PackUnit.BOX,
+    unitsPerPack: 240,
+  },
+  {
+    key: "nimko",
+    name: "Nimko",
+    cat: "GROCERY",
+    unit: UnitType.PCS,
+    qty: 48,
+    rate: 40,
+    reorder: 12,
+    packUnit: PackUnit.BOX,
+    unitsPerPack: 24,
+  },
+  {
+    key: "cigarette",
+    name: "Cigarette Pack",
+    cat: "GROCERY",
+    unit: UnitType.PCS,
+    qty: 20,
+    rate: 450,
+    reorder: 5,
+    packUnit: PackUnit.CARTON,
+    unitsPerPack: 10,
+  },
+  {
+    key: "cold_drink_regular",
+    name: "Regular Cold Drink",
+    cat: "GROCERY",
+    unit: UnitType.PCS,
+    qty: 48,
+    rate: 55,
+    reorder: 12,
+    packUnit: PackUnit.CRATE,
+    unitsPerPack: 24,
+  },
+  {
+    key: "cold_drink_can",
+    name: "Cold Drink Can",
+    cat: "GROCERY",
+    unit: UnitType.PCS,
+    qty: 48,
+    rate: 90,
+    reorder: 12,
+    packUnit: PackUnit.CARTON,
+    unitsPerPack: 24,
+  },
+  {
+    key: "cold_drink_can_sf",
+    name: "Cold Drink Can (Sugar Free)",
+    cat: "GROCERY",
+    unit: UnitType.PCS,
+    qty: 24,
+    rate: 100,
+    reorder: 6,
+    packUnit: PackUnit.CARTON,
+    unitsPerPack: 24,
+  },
+  {
+    key: "cold_drink_1l",
+    name: "Cold Drink 1 Litre",
+    cat: "GROCERY",
+    unit: UnitType.PCS,
+    qty: 24,
+    rate: 140,
+    reorder: 6,
+    packUnit: PackUnit.CARTON,
+    unitsPerPack: 12,
+  },
+  {
+    key: "cold_drink_1_5l",
+    name: "Cold Drink 1.5 Litre",
+    cat: "GROCERY",
+    unit: UnitType.PCS,
+    qty: 18,
+    rate: 170,
+    reorder: 4,
+    packUnit: PackUnit.CARTON,
+    unitsPerPack: 6,
+  },
+  {
+    key: "cold_drink_2l",
+    name: "Cold Drink 2 Litre",
+    cat: "GROCERY",
+    unit: UnitType.PCS,
+    qty: 12,
+    rate: 220,
+    reorder: 3,
+    packUnit: PackUnit.CARTON,
+    unitsPerPack: 6,
+  },
+  {
+    key: "mineral_water_small",
+    name: "Mineral Water Small",
+    cat: "GROCERY",
+    unit: UnitType.PCS,
+    qty: 48,
+    rate: 30,
+    reorder: 12,
+    packUnit: PackUnit.CRATE,
+    unitsPerPack: 24,
+  },
+  {
+    key: "mineral_water_large",
+    name: "Mineral Water Large",
+    cat: "GROCERY",
+    unit: UnitType.PCS,
+    qty: 24,
+    rate: 70,
+    reorder: 6,
+    packUnit: PackUnit.CRATE,
+    unitsPerPack: 12,
+  },
 ];
 
 type MenuSeed = {
@@ -215,7 +355,10 @@ const PCS_FIXED: Pick<MenuSeed, "minQty" | "qtyStep" | "allowCustomQty" | "maxQt
   maxQty: null,
 };
 
-/** Half band by weight: custom from 225g up to 1 kg. Price = per KG (0.5 kg ≈ card half). */
+/**
+ * Half band (KG). Card half price is for ~500g — pass (half×2) as pricePerKg
+ * so 0.5 kg bills the printed half rate. Orders: 250g–750g in 250g steps.
+ */
 function halfKg(
   name: string,
   category: string,
@@ -230,14 +373,14 @@ function halfKg(
     unit: UnitType.KG,
     price: pricePerKg,
     recipeKey,
-    minQty: 0.225,
-    maxQty: 1,
-    qtyStep: 0.025,
+    minQty: 0.25,
+    maxQty: 0.75,
+    qtyStep: 0.25,
     allowCustomQty: true,
   };
 }
 
-/** Full band by weight: from 1 kg upward in 0.5 kg steps. */
+/** Full band (KG): from 1 kg upward in 0.5 kg steps. Price = per KG. */
 function fullKg(
   name: string,
   category: string,
@@ -259,17 +402,56 @@ function fullKg(
   };
 }
 
+/** Handi Full pot fixed at exactly 1 KG (not PCS). */
+function fullHandiKg(
+  name: string,
+  category: string,
+  station: KitchenStation,
+  pricePerKg: number,
+  recipeKey?: string
+): MenuSeed {
+  return {
+    name: `${name} (Full)`,
+    category,
+    station,
+    unit: UnitType.KG,
+    price: pricePerKg,
+    recipeKey,
+    minQty: 1,
+    maxQty: 1,
+    qtyStep: 1,
+    allowCustomQty: false,
+  };
+}
+
 /** Bowl / plate portions (not weight) — keep as separate PCS lines. */
 function halfFull(
   base: string,
   category: string,
   station: KitchenStation,
   half: number,
-  full: number
+  full: number,
+  recipeKey?: string
 ): MenuSeed[] {
   return [
-    { name: `${base} (Half)`, category, station, unit: UnitType.PCS, price: half, ...PCS_FIXED },
-    { name: `${base} (Full)`, category, station, unit: UnitType.PCS, price: full, ...PCS_FIXED },
+    {
+      name: `${base} (Half)`,
+      category,
+      station,
+      unit: UnitType.PCS,
+      price: half,
+      recipeKey,
+      ...PCS_FIXED,
+    },
+    {
+      name: `${base} (Full)`,
+      category,
+      station,
+      unit: UnitType.PCS,
+      price: full,
+      recipeKey,
+      ...PCS_FIXED,
+    },
   ];
 }
 
@@ -303,6 +485,7 @@ const MENU: MenuSeed[] = [
     station: KitchenStation.COOKING,
     unit: UnitType.PCS,
     price: 4500,
+    recipeKey: "mutton_khada_sijji",
     ...PCS_FIXED,
   },
   {
@@ -311,6 +494,7 @@ const MENU: MenuSeed[] = [
     station: KitchenStation.COOKING,
     unit: UnitType.PCS,
     price: 4500,
+    recipeKey: "ranjha_goshat",
     ...PCS_FIXED,
   },
   {
@@ -319,31 +503,22 @@ const MENU: MenuSeed[] = [
     station: KitchenStation.COOKING,
     unit: UnitType.PCS,
     price: 2000,
+    recipeKey: "chicken_khada_sijji",
     ...PCS_FIXED,
   },
   // Shinwari: card half/full ≈ 950/1800 & 2200/4100 → per-kg rates on Half/Full lines
   halfKg("Chicken Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 1900, "chicken_shinwari_karahi"),
   fullKg("Chicken Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 1800, "chicken_shinwari_karahi"),
-  halfKg("Mutton Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 4400),
-  fullKg("Mutton Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 4100),
-  {
-    name: "Banu Pulao",
-    category: "Live Kitchen",
-    station: KitchenStation.COOKING,
-    unit: UnitType.KG,
-    price: 1000,
-    recipeKey: "bannu_beef_pulao",
-    minQty: 0.5,
-    maxQty: null,
-    qtyStep: 0.5,
-    allowCustomQty: true,
-  },
+  halfKg("Mutton Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 4400, "mutton_shinwari_karahi"),
+  fullKg("Mutton Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 4100, "mutton_shinwari_karahi"),
+  // Banu Pulao → Special Pakistani (KG) — see below
   {
     name: "Dam Pukhat",
     category: "Live Kitchen",
     station: KitchenStation.COOKING,
     unit: UnitType.PCS,
     price: 1000,
+    recipeKey: "dam_pukhat",
     ...PCS_FIXED,
   },
   {
@@ -361,6 +536,7 @@ const MENU: MenuSeed[] = [
     station: KitchenStation.BBQ,
     unit: UnitType.PCS,
     price: 400,
+    recipeKey: "paneer_bbq",
     ...PCS_FIXED,
   },
   {
@@ -369,6 +545,7 @@ const MENU: MenuSeed[] = [
     station: KitchenStation.BBQ,
     unit: UnitType.PCS,
     price: 350,
+    recipeKey: "beef_bbq_live",
     ...PCS_FIXED,
   },
   {
@@ -377,12 +554,27 @@ const MENU: MenuSeed[] = [
     station: KitchenStation.BBQ,
     unit: UnitType.PCS,
     price: 200,
+    recipeKey: "afghani_boti_live",
     ...PCS_FIXED,
   },
 
   // Breakfast
-  { name: "Plain Paratha", category: "Breakfast & Paratha", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 60 },
-  { name: "Aloo Paratha", category: "Breakfast & Paratha", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 100 },
+  {
+    name: "Plain Paratha",
+    category: "Breakfast & Paratha",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 60,
+    recipeKey: "plain_paratha",
+  },
+  {
+    name: "Aloo Paratha",
+    category: "Breakfast & Paratha",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 100,
+    recipeKey: "aloo_paratha",
+  },
   {
     name: "Special Chicken Paratha",
     category: "Breakfast & Paratha",
@@ -391,19 +583,68 @@ const MENU: MenuSeed[] = [
     price: 200,
     recipeKey: "special_chicken_paratha",
   },
-  { name: "Egg Paratha", category: "Breakfast & Paratha", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 150 },
-  { name: "Omelette", category: "Breakfast & Paratha", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 100 },
-  ...halfFull("Yogurt", "Breakfast & Paratha", KitchenStation.COOKING, 100, 200),
+  {
+    name: "Egg Paratha",
+    category: "Breakfast & Paratha",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 150,
+    recipeKey: "egg_paratha",
+  },
+  {
+    name: "Omelette",
+    category: "Breakfast & Paratha",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 100,
+    recipeKey: "omelette",
+  },
+  ...halfFull("Yogurt", "Breakfast & Paratha", KitchenStation.COOKING, 100, 200, "yogurt_bowl"),
 
   // Appetizers (bowl portions)
-  ...halfFull("Quetta Sangat Special Soup", "Appetizers", KitchenStation.COOKING, 450, 700),
-  ...halfFull("Chicken Hot & Sour Soup", "Appetizers", KitchenStation.COOKING, 400, 650),
-  ...halfFull("Chicken Corn Soup", "Appetizers", KitchenStation.COOKING, 400, 600),
-  ...halfFull("Chicken Vegetable Soup", "Appetizers", KitchenStation.COOKING, 400, 600),
-  { name: "Quetta Sangat Special Fries", category: "Appetizers", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 300 },
+  ...halfFull(
+    "Quetta Sangat Special Soup",
+    "Appetizers",
+    KitchenStation.COOKING,
+    450,
+    700,
+    "sangat_special_soup"
+  ),
+  ...halfFull(
+    "Chicken Hot & Sour Soup",
+    "Appetizers",
+    KitchenStation.COOKING,
+    400,
+    650,
+    "chicken_hot_sour_soup"
+  ),
+  ...halfFull("Chicken Corn Soup", "Appetizers", KitchenStation.COOKING, 400, 600, "chicken_corn_soup"),
+  ...halfFull(
+    "Chicken Vegetable Soup",
+    "Appetizers",
+    KitchenStation.COOKING,
+    400,
+    600,
+    "chicken_veg_soup"
+  ),
+  {
+    name: "Quetta Sangat Special Fries",
+    category: "Appetizers",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 300,
+    recipeKey: "special_fries",
+  },
 
   // BBQ
-  { name: "Chicken Tikka Boti", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 200 },
+  {
+    name: "Chicken Tikka Boti",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 200,
+    recipeKey: "chicken_tikka_boti",
+  },
   {
     name: "Chicken Malai Boti",
     category: "BBQ",
@@ -412,10 +653,38 @@ const MENU: MenuSeed[] = [
     price: 300,
     recipeKey: "chicken_malai_boti",
   },
-  { name: "Chicken Kasturi Boti", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 350 },
-  { name: "Chicken Afghani Boti", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 200 },
-  { name: "Chicken Makhmali Kabab", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 250 },
-  { name: "Chicken Kalmi Tikka", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 450 },
+  {
+    name: "Chicken Kasturi Boti",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 350,
+    recipeKey: "chicken_kasturi_boti",
+  },
+  {
+    name: "Chicken Afghani Boti",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 200,
+    recipeKey: "chicken_afghani_boti",
+  },
+  {
+    name: "Chicken Makhmali Kabab",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 250,
+    recipeKey: "chicken_makhmali_kabab",
+  },
+  {
+    name: "Chicken Kalmi Tikka",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 450,
+    recipeKey: "chicken_kalmi_tikka",
+  },
   {
     name: "Chicken Seekh Kabab",
     category: "BBQ",
@@ -424,79 +693,370 @@ const MENU: MenuSeed[] = [
     price: 180,
     recipeKey: "chicken_seekh_kabab",
   },
-  { name: "Chicken Reshmi Kabab", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 220 },
-  { name: "Beef Kabab", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 230 },
-  { name: "Chicken Turkish Kabab", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 300 },
-  { name: "Chicken Tikka Chest Piece", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 400 },
-  { name: "Chicken Tikka Leg Piece", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 350 },
-  { name: "Afghani Tikka Chest Piece", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 450 },
-  { name: "Afghani Tikka Leg Piece", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.PCS, price: 400 },
-  { name: "Special Grill Fish (By Weight)", category: "BBQ", station: KitchenStation.BBQ, unit: UnitType.KG, price: 900 },
+  {
+    name: "Chicken Reshmi Kabab",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 220,
+    recipeKey: "chicken_reshmi_kabab",
+  },
+  {
+    name: "Beef Kabab",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 230,
+    recipeKey: "beef_kabab",
+  },
+  {
+    name: "Chicken Turkish Kabab",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 300,
+    recipeKey: "chicken_turkish_kabab",
+  },
+  {
+    name: "Chicken Tikka Chest Piece",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 400,
+    recipeKey: "chicken_tikka_chest",
+  },
+  {
+    name: "Chicken Tikka Leg Piece",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 350,
+    recipeKey: "chicken_tikka_leg",
+  },
+  {
+    name: "Afghani Tikka Chest Piece",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 450,
+    recipeKey: "afghani_tikka_chest",
+  },
+  {
+    name: "Afghani Tikka Leg Piece",
+    category: "BBQ",
+    station: KitchenStation.BBQ,
+    unit: UnitType.PCS,
+    price: 400,
+    recipeKey: "afghani_tikka_leg",
+  },
+  // PDF Special Grill Fish Rs 600–1200 by weight — mid list rate
+  byKg("Special Grill Fish (By Weight)", "BBQ", KitchenStation.BBQ, 900, "grill_fish"),
 
-  // Quetta Sangat Special — meat by KG
-  byKg("Mutton Namkeen Gosht Special", "Quetta Sangat Special", KitchenStation.COOKING, 4000),
-  byKg("Beef Namkeen Gosht", "Quetta Sangat Special", KitchenStation.COOKING, 2400),
+  // Pakistani Special — Quetta Sangat Special meat (PDF half|full = 500g|1kg)
+  halfKg(
+    "Mutton Namkeen Gosht Special",
+    "Pakistani Special",
+    KitchenStation.COOKING,
+    4000,
+    "mutton_namkeen_gosht"
+  ),
+  fullKg(
+    "Mutton Namkeen Gosht Special",
+    "Pakistani Special",
+    KitchenStation.COOKING,
+    4000,
+    "mutton_namkeen_gosht"
+  ),
+  halfKg("Beef Namkeen Gosht", "Pakistani Special", KitchenStation.COOKING, 2600, "beef_namkeen_gosht"),
+  fullKg("Beef Namkeen Gosht", "Pakistani Special", KitchenStation.COOKING, 2400, "beef_namkeen_gosht"),
   {
     name: "Mutton Rosh (Special Daal)",
-    category: "Quetta Sangat Special",
+    category: "Pakistani Special",
     station: KitchenStation.COOKING,
     unit: UnitType.PCS,
     price: 1500,
     recipeKey: "mutton_namkeen_rosh",
+    ...PCS_FIXED,
   },
-  { name: "Beef Namkeen Platter", category: "Quetta Sangat Special", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 1000 },
+  {
+    name: "Beef Namkeen Platter",
+    category: "Pakistani Special",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 1000,
+    recipeKey: "beef_namkeen_platter",
+    ...PCS_FIXED,
+  },
+  // Daal & sabzi → SPECIAL_PRODUCTS pots (Half/Full rates on pot)
 
-  // Daal & Sabzi (bowl portions)
-  { name: "Special Shahi Daal", category: "Daal & Sabzi", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 550 },
-  { name: "Special Mix Vegetable", category: "Daal & Sabzi", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 400 },
-  ...halfFull("Special Daal Moong", "Daal & Sabzi", KitchenStation.COOKING, 120, 200),
-  ...halfFull("Chicken Qorma", "Daal & Sabzi", KitchenStation.COOKING, 180, 280),
-  ...halfFull("Special Daal Mash", "Daal & Sabzi", KitchenStation.COOKING, 150, 250),
+  // Chicken Karahi — PDF 900|1700 … 1650|3200 (half×2 / full)
+  halfKg(
+    "Quetta Sangat Special Chicken Karahi",
+    "Chicken Karahi",
+    KitchenStation.COOKING,
+    1800,
+    "sangat_chicken_karahi"
+  ),
+  fullKg(
+    "Quetta Sangat Special Chicken Karahi",
+    "Chicken Karahi",
+    KitchenStation.COOKING,
+    1700,
+    "sangat_chicken_karahi"
+  ),
+  halfKg("Special Desi Murgha Karahi", "Chicken Karahi", KitchenStation.COOKING, 3300, "desi_murgha_karahi"),
+  fullKg("Special Desi Murgha Karahi", "Chicken Karahi", KitchenStation.COOKING, 3200, "desi_murgha_karahi"),
+  halfKg(
+    "Chicken Lahori Karahi (Red Chilli)",
+    "Chicken Karahi",
+    KitchenStation.COOKING,
+    1800,
+    "chicken_lahori_karahi"
+  ),
+  fullKg(
+    "Chicken Lahori Karahi (Red Chilli)",
+    "Chicken Karahi",
+    KitchenStation.COOKING,
+    1700,
+    "chicken_lahori_karahi"
+  ),
+  halfKg(
+    "Chicken Karahi (Black Pepper)",
+    "Chicken Karahi",
+    KitchenStation.COOKING,
+    1900,
+    "chicken_black_pepper_karahi"
+  ),
+  fullKg(
+    "Chicken Karahi (Black Pepper)",
+    "Chicken Karahi",
+    KitchenStation.COOKING,
+    1800,
+    "chicken_black_pepper_karahi"
+  ),
+  halfKg("Chicken Afghani Karahi (White)", "Chicken Karahi", KitchenStation.COOKING, 1900, "chicken_afghani_handi"),
+  fullKg("Chicken Afghani Karahi (White)", "Chicken Karahi", KitchenStation.COOKING, 1800, "chicken_afghani_handi"),
+  halfKg("Chicken Achari Karahi", "Chicken Karahi", KitchenStation.COOKING, 1900, "chicken_achari_karahi"),
+  fullKg("Chicken Achari Karahi", "Chicken Karahi", KitchenStation.COOKING, 1800, "chicken_achari_karahi"),
+  halfKg(
+    "Chicken Peshawari Karahi (Shinwari)",
+    "Chicken Karahi",
+    KitchenStation.COOKING,
+    1800,
+    "chicken_shinwari_karahi"
+  ),
+  fullKg(
+    "Chicken Peshawari Karahi (Shinwari)",
+    "Chicken Karahi",
+    KitchenStation.COOKING,
+    1700,
+    "chicken_shinwari_karahi"
+  ),
 
-  // Chicken Karahi — KG (0.5 = Half, 1 = Full)
-  byKg("Quetta Sangat Special Chicken Karahi", "Chicken Karahi", KitchenStation.COOKING, 1700),
-  byKg("Special Desi Murgha Karahi", "Chicken Karahi", KitchenStation.COOKING, 3200),
-  byKg("Chicken Lahori Karahi (Red Chilli)", "Chicken Karahi", KitchenStation.COOKING, 1700),
-  byKg("Chicken Karahi (Black Pepper)", "Chicken Karahi", KitchenStation.COOKING, 1800),
-  byKg("Chicken Afghani Karahi (White)", "Chicken Karahi", KitchenStation.COOKING, 1800, "chicken_afghani_handi"),
-  byKg("Chicken Achari Karahi", "Chicken Karahi", KitchenStation.COOKING, 1800),
-  byKg("Chicken Peshawari Karahi (Shinwari)", "Chicken Karahi", KitchenStation.COOKING, 1700, "chicken_shinwari_karahi"),
+  // Beef Karahi — PDF 1300|2500
+  halfKg(
+    "Quetta Sangat Special Beef Karahi",
+    "Beef Karahi",
+    KitchenStation.COOKING,
+    2600,
+    "sangat_beef_karahi"
+  ),
+  fullKg(
+    "Quetta Sangat Special Beef Karahi",
+    "Beef Karahi",
+    KitchenStation.COOKING,
+    2500,
+    "sangat_beef_karahi"
+  ),
+  halfKg("Beef Lahori Karahi (Red Chilli)", "Beef Karahi", KitchenStation.COOKING, 2600, "beef_lahori_karahi"),
+  fullKg("Beef Lahori Karahi (Red Chilli)", "Beef Karahi", KitchenStation.COOKING, 2500, "beef_lahori_karahi"),
+  halfKg("Beef Karahi (Black Pepper)", "Beef Karahi", KitchenStation.COOKING, 2600, "beef_black_pepper_karahi"),
+  fullKg("Beef Karahi (Black Pepper)", "Beef Karahi", KitchenStation.COOKING, 2500, "beef_black_pepper_karahi"),
+  halfKg("Beef Afghani Karahi (White)", "Beef Karahi", KitchenStation.COOKING, 2600, "beef_afghani_karahi"),
+  fullKg("Beef Afghani Karahi (White)", "Beef Karahi", KitchenStation.COOKING, 2500, "beef_afghani_karahi"),
 
-  // Beef Karahi
-  byKg("Quetta Sangat Special Beef Karahi", "Beef Karahi", KitchenStation.COOKING, 2500),
-  byKg("Beef Lahori Karahi (Red Chilli)", "Beef Karahi", KitchenStation.COOKING, 2500),
-  byKg("Beef Karahi (Black Pepper)", "Beef Karahi", KitchenStation.COOKING, 2500),
-  byKg("Beef Afghani Karahi (White)", "Beef Karahi", KitchenStation.COOKING, 2500),
+  // Mutton Karahi — PDF 2100|4000, 2000|3800, 2100|4000, 2200|4100
+  halfKg(
+    "Quetta Sangat Special Mutton Karahi",
+    "Mutton Karahi",
+    KitchenStation.COOKING,
+    4200,
+    "sangat_mutton_karahi"
+  ),
+  fullKg(
+    "Quetta Sangat Special Mutton Karahi",
+    "Mutton Karahi",
+    KitchenStation.COOKING,
+    4000,
+    "sangat_mutton_karahi"
+  ),
+  halfKg(
+    "Mutton Lahori Karahi (Red Chilli)",
+    "Mutton Karahi",
+    KitchenStation.COOKING,
+    4000,
+    "mutton_lahori_karahi"
+  ),
+  fullKg(
+    "Mutton Lahori Karahi (Red Chilli)",
+    "Mutton Karahi",
+    KitchenStation.COOKING,
+    3800,
+    "mutton_lahori_karahi"
+  ),
+  halfKg(
+    "Mutton Karahi (Black Pepper)",
+    "Mutton Karahi",
+    KitchenStation.COOKING,
+    4000,
+    "mutton_black_pepper_karahi"
+  ),
+  fullKg(
+    "Mutton Karahi (Black Pepper)",
+    "Mutton Karahi",
+    KitchenStation.COOKING,
+    3800,
+    "mutton_black_pepper_karahi"
+  ),
+  halfKg("Mutton Afghani Karahi (White)", "Mutton Karahi", KitchenStation.COOKING, 4200, "mutton_afghani_karahi"),
+  fullKg("Mutton Afghani Karahi (White)", "Mutton Karahi", KitchenStation.COOKING, 4000, "mutton_afghani_karahi"),
+  halfKg(
+    "Mutton Peshawari Karahi (Shinwari)",
+    "Mutton Karahi",
+    KitchenStation.COOKING,
+    4400,
+    "mutton_peshawari_karahi"
+  ),
+  fullKg(
+    "Mutton Peshawari Karahi (Shinwari)",
+    "Mutton Karahi",
+    KitchenStation.COOKING,
+    4100,
+    "mutton_peshawari_karahi"
+  ),
 
-  // Mutton Karahi
-  byKg("Quetta Sangat Special Mutton Karahi", "Mutton Karahi", KitchenStation.COOKING, 4100),
-  byKg("Mutton Lahori Karahi (Red Chilli)", "Mutton Karahi", KitchenStation.COOKING, 4100),
-  byKg("Mutton Karahi (Black Pepper)", "Mutton Karahi", KitchenStation.COOKING, 4100),
-  byKg("Mutton Afghani Karahi (White)", "Mutton Karahi", KitchenStation.COOKING, 4300),
-  byKg("Mutton Peshawari Karahi (Shinwari)", "Mutton Karahi", KitchenStation.COOKING, 4100),
+  // Mutton Handi — PDF 2200|4100, 2200|4100, 2250|4300, 2200|4100
+  halfKg(
+    "Special Mutton Handi (With Bone)",
+    "Mutton Handi",
+    KitchenStation.COOKING,
+    4400,
+    "special_mutton_handi"
+  ),
+  fullHandiKg(
+    "Special Mutton Handi (With Bone)",
+    "Mutton Handi",
+    KitchenStation.COOKING,
+    4100,
+    "special_mutton_handi"
+  ),
+  halfKg("Mutton Handi (With Bone)", "Mutton Handi", KitchenStation.COOKING, 4400, "mutton_handi"),
+  fullHandiKg("Mutton Handi (With Bone)", "Mutton Handi", KitchenStation.COOKING, 4100, "mutton_handi"),
+  halfKg(
+    "Mutton Hari Mirch Handi (With Bone)",
+    "Mutton Handi",
+    KitchenStation.COOKING,
+    4500,
+    "mutton_hari_mirch_handi"
+  ),
+  fullHandiKg(
+    "Mutton Hari Mirch Handi (With Bone)",
+    "Mutton Handi",
+    KitchenStation.COOKING,
+    4300,
+    "mutton_hari_mirch_handi"
+  ),
+  halfKg(
+    "Mutton Afghani Handi (White / With Bone)",
+    "Mutton Handi",
+    KitchenStation.COOKING,
+    4400,
+    "mutton_afghani_handi"
+  ),
+  fullHandiKg(
+    "Mutton Afghani Handi (White / With Bone)",
+    "Mutton Handi",
+    KitchenStation.COOKING,
+    4100,
+    "mutton_afghani_handi"
+  ),
 
-  // Mutton Handi
-  byKg("Special Mutton Handi (With Bone)", "Mutton Handi", KitchenStation.COOKING, 4000),
-  byKg("Mutton Handi (With Bone)", "Mutton Handi", KitchenStation.COOKING, 3800),
-  byKg("Mutton Hari Mirch Handi (With Bone)", "Mutton Handi", KitchenStation.COOKING, 3800),
-  byKg("Mutton Afghani Handi (White / With Bone)", "Mutton Handi", KitchenStation.COOKING, 4000),
-
-  // Chicken Handi
-  byKg("Quetta Sangat Special Chicken Handi", "Chicken Handi", KitchenStation.COOKING, 1900),
-  byKg("Chicken Handi", "Chicken Handi", KitchenStation.COOKING, 1700),
-  { name: "Chicken Hari Mirch Handi", category: "Chicken Handi", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 1200 },
-  byKg("Chicken Afghani Handi (White)", "Chicken Handi", KitchenStation.COOKING, 1900, "chicken_afghani_handi"),
-  byKg("Chicken Achari Handi", "Chicken Handi", KitchenStation.COOKING, 1750),
-  { name: "Chicken Jalfrezi", category: "Chicken Handi", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 900 },
-  { name: "Chicken Chatkhara", category: "Chicken Handi", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 900 },
-  { name: "Chicken Ginger", category: "Chicken Handi", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 1000 },
+  // Chicken Handi — PDF 1000|1900, 900|1700, |1200, 950|1900, 950|1750
+  halfKg(
+    "Quetta Sangat Special Chicken Handi",
+    "Chicken Handi",
+    KitchenStation.COOKING,
+    2000,
+    "sangat_chicken_handi"
+  ),
+  fullHandiKg(
+    "Quetta Sangat Special Chicken Handi",
+    "Chicken Handi",
+    KitchenStation.COOKING,
+    1900,
+    "sangat_chicken_handi"
+  ),
+  halfKg("Chicken Handi", "Chicken Handi", KitchenStation.COOKING, 1800, "chicken_handi"),
+  fullHandiKg("Chicken Handi", "Chicken Handi", KitchenStation.COOKING, 1700, "chicken_handi"),
+  // Hari Mirch — card full only 1200
+  fullHandiKg(
+    "Chicken Hari Mirch Handi",
+    "Chicken Handi",
+    KitchenStation.COOKING,
+    1200,
+    "chicken_hari_mirch_handi"
+  ),
+  halfKg("Chicken Afghani Handi (White)", "Chicken Handi", KitchenStation.COOKING, 1900, "chicken_afghani_handi"),
+  fullHandiKg(
+    "Chicken Afghani Handi (White)",
+    "Chicken Handi",
+    KitchenStation.COOKING,
+    1900,
+    "chicken_afghani_handi"
+  ),
+  halfKg("Chicken Achari Handi", "Chicken Handi", KitchenStation.COOKING, 1900, "chicken_achari_handi"),
+  fullHandiKg("Chicken Achari Handi", "Chicken Handi", KitchenStation.COOKING, 1750, "chicken_achari_handi"),
+  {
+    name: "Chicken Jalfrezi",
+    category: "Chicken Handi",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 900,
+    recipeKey: "chicken_jalfrezi",
+    ...PCS_FIXED,
+  },
+  {
+    name: "Chicken Chatkhara",
+    category: "Chicken Handi",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 900,
+    recipeKey: "chicken_chatkhara",
+    ...PCS_FIXED,
+  },
+  {
+    name: "Chicken Ginger",
+    category: "Chicken Handi",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 1000,
+    recipeKey: "chicken_ginger",
+    ...PCS_FIXED,
+  },
 
   // Chinese Rice (plate portions)
-  ...halfFull("Quetta Sangat Special Rice", "Chinese Rice", KitchenStation.COOKING, 450, 900),
-  ...halfFull("Chicken Fried Rice", "Chinese Rice", KitchenStation.COOKING, 400, 800),
-  ...halfFull("Chicken Masala Rice", "Chinese Rice", KitchenStation.COOKING, 400, 800),
-  ...halfFull("Egg Fried Rice", "Chinese Rice", KitchenStation.COOKING, 350, 700),
-  ...halfFull("Vegetable Rice", "Chinese Rice", KitchenStation.COOKING, 350, 700),
+  ...halfFull(
+    "Quetta Sangat Special Rice",
+    "Chinese Rice",
+    KitchenStation.COOKING,
+    450,
+    900,
+    "sangat_special_rice"
+  ),
+  ...halfFull("Chicken Fried Rice", "Chinese Rice", KitchenStation.COOKING, 400, 800, "chicken_fried_rice"),
+  ...halfFull("Chicken Masala Rice", "Chinese Rice", KitchenStation.COOKING, 400, 800, "chicken_masala_rice"),
+  ...halfFull("Egg Fried Rice", "Chinese Rice", KitchenStation.COOKING, 350, 700, "egg_fried_rice"),
+  ...halfFull("Vegetable Rice", "Chinese Rice", KitchenStation.COOKING, 350, 700, "vegetable_rice"),
 
   // Chinese Combo
   {
@@ -507,22 +1067,114 @@ const MENU: MenuSeed[] = [
     price: 1050,
     recipeKey: "chicken_manchurian_fried_rice",
   },
-  { name: "Chicken Garlic + Fried Rice", category: "Chinese Combo", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 800 },
-  { name: "Chicken Black Pepper + Fried Rice", category: "Chinese Combo", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 800 },
+  {
+    name: "Chicken Garlic + Fried Rice",
+    category: "Chinese Combo",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 800,
+    recipeKey: "chicken_garlic_fried_rice",
+  },
+  {
+    name: "Chicken Black Pepper + Fried Rice",
+    category: "Chinese Combo",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 800,
+    recipeKey: "chicken_black_pepper_fried_rice",
+  },
 
   // Salad
-  { name: "Green Salad", category: "Salad", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 100 },
-  { name: "Kachumar Salad", category: "Salad", station: KitchenStation.COOKING, unit: UnitType.PCS, price: 120 },
+  {
+    name: "Green Salad",
+    category: "Salad",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 100,
+    recipeKey: "green_salad",
+  },
+  {
+    name: "Kachumar Salad",
+    category: "Salad",
+    station: KitchenStation.COOKING,
+    unit: UnitType.PCS,
+    price: 120,
+    recipeKey: "kachumar_salad",
+  },
 
-  // Beverages (null market prices filled with local estimates)
-  { name: "Regular Cold Drink", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.PCS, price: 80 },
-  { name: "Can Pack", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.PCS, price: 120 },
-  { name: "Can Pack (Sugar Free)", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.PCS, price: 130 },
-  { name: "1 Litre Drink", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.PCS, price: 180 },
-  { name: "1.5 Litre Drink", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.PCS, price: 220 },
-  { name: "2 Litre Drink", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.PCS, price: 280 },
-  { name: "Mineral Water (Small)", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.PCS, price: 50 },
-  { name: "Mineral Water (Large)", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.PCS, price: 100 },
+  // Cold drinks — PDF lists names only (no Rs); Chaye Khana rates from card
+  {
+    name: "Regular Cold Drink",
+    category: "Beverages",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 80,
+    recipeKey: "regular_cold_drink",
+    ...PCS_FIXED,
+  },
+  {
+    name: "Can Pack",
+    category: "Beverages",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 120,
+    recipeKey: "can_pack",
+    ...PCS_FIXED,
+  },
+  {
+    name: "Can Pack (Sugar Free)",
+    category: "Beverages",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 130,
+    recipeKey: "can_pack_sf",
+    ...PCS_FIXED,
+  },
+  {
+    name: "1 Litre Drink",
+    category: "Beverages",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 180,
+    recipeKey: "drink_1l",
+    ...PCS_FIXED,
+  },
+  {
+    name: "1.5 Litre Drink",
+    category: "Beverages",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 220,
+    recipeKey: "drink_1_5l",
+    ...PCS_FIXED,
+  },
+  {
+    name: "2 Litre Drink",
+    category: "Beverages",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 280,
+    recipeKey: "drink_2l",
+    ...PCS_FIXED,
+  },
+  {
+    name: "Mineral Water (Small)",
+    category: "Beverages",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 50,
+    recipeKey: "water_small",
+    ...PCS_FIXED,
+  },
+  {
+    name: "Mineral Water (Large)",
+    category: "Beverages",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 100,
+    recipeKey: "water_large",
+    ...PCS_FIXED,
+  },
   {
     name: "Quetta Sangat Special Doodh Patti",
     category: "Beverages",
@@ -530,6 +1182,7 @@ const MENU: MenuSeed[] = [
     unit: UnitType.PCS,
     price: 70,
     recipeKey: "doodh_patti",
+    ...PCS_FIXED,
   },
   {
     name: "Gur Wali Chaye",
@@ -538,8 +1191,17 @@ const MENU: MenuSeed[] = [
     unit: UnitType.PCS,
     price: 100,
     recipeKey: "gur_wali_chaye",
+    ...PCS_FIXED,
   },
-  { name: "Green Tea", category: "Beverages", station: KitchenStation.BEVERAGES, unit: UnitType.PCS, price: 70 },
+  {
+    name: "Green Tea",
+    category: "Beverages",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 70,
+    recipeKey: "green_tea_cup",
+    ...PCS_FIXED,
+  },
   {
     name: "Sulaimani Qehwa",
     category: "Beverages",
@@ -547,6 +1209,45 @@ const MENU: MenuSeed[] = [
     unit: UnitType.PCS,
     price: 70,
     recipeKey: "sulaimani_qehwa",
+    ...PCS_FIXED,
+  },
+
+  // Counter grocery (box/carton in store → piece / packet / pack on menu)
+  {
+    name: "Biscuit",
+    category: "Grocery",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 20,
+    recipeKey: "biscuit_1pc",
+    ...PCS_FIXED,
+  },
+  {
+    name: "Nimko",
+    category: "Grocery",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 50,
+    recipeKey: "nimko_1pk",
+    ...PCS_FIXED,
+  },
+  {
+    name: "Cigarette (Full)",
+    category: "Grocery",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 500,
+    recipeKey: "cigarette_full",
+    ...PCS_FIXED,
+  },
+  {
+    name: "Cigarette (Half)",
+    category: "Grocery",
+    station: KitchenStation.BEVERAGES,
+    unit: UnitType.PCS,
+    price: 260,
+    recipeKey: "cigarette_half",
+    ...PCS_FIXED,
   },
 ];
 
@@ -557,8 +1258,7 @@ const RECIPE_CATEGORIES = [
   "Karahi & Handi",
   "Chinese",
   "Chaye Khana",
-  "Quetta Sangat Special",
-  "Daal & Sabzi",
+  "Pakistani Special",
   "Chicken Karahi",
   "Beef Karahi",
   "Mutton Karahi",
@@ -568,6 +1268,7 @@ const RECIPE_CATEGORIES = [
   "Chinese Combo",
   "Salad",
   "Beverages",
+  "Grocery",
   "Appetizers",
 ];
 
@@ -578,17 +1279,19 @@ type RecipeDef = {
   category: string;
   baseUnit: UnitType;
   baseQty: number;
+  prepMinutes?: number;
   ingredients: Ing[];
 };
 
 /** tbsp≈15g/ml, tsp≈5g — normalized for stock deduct. Water skipped. */
-const RECIPES: RecipeDef[] = [
+const CORE_RECIPES: RecipeDef[] = [
   {
     key: "chicken_shinwari_karahi",
     name: "Chicken Shinwari Karahi",
     category: "Karahi & Handi",
     baseUnit: UnitType.KG,
     baseQty: 1,
+    prepMinutes: 25,
     ingredients: [
       { key: "chicken", quantity: 1, unit: UnitType.KG },
       { key: "tomato", quantity: 500, unit: UnitType.G },
@@ -603,9 +1306,10 @@ const RECIPES: RecipeDef[] = [
   {
     key: "bannu_beef_pulao",
     name: "Bannu Beef Pulao",
-    category: "Live Kitchen",
+    category: "Pakistani Special",
     baseUnit: UnitType.KG,
     baseQty: 1,
+    prepMinutes: 40,
     ingredients: [
       { key: "beef", quantity: 1, unit: UnitType.KG },
       { key: "rice", quantity: 1, unit: UnitType.KG },
@@ -625,9 +1329,10 @@ const RECIPES: RecipeDef[] = [
   {
     key: "mutton_namkeen_rosh",
     name: "Mutton Namkeen Rosh",
-    category: "Quetta Sangat Special",
+    category: "Pakistani Special",
     baseUnit: UnitType.KG,
     baseQty: 1,
+    prepMinutes: 35,
     ingredients: [
       { key: "mutton", quantity: 1, unit: UnitType.KG },
       { key: "garlic", quantity: 100, unit: UnitType.G },
@@ -643,6 +1348,7 @@ const RECIPES: RecipeDef[] = [
     category: "Breakfast & Paratha",
     baseUnit: UnitType.PCS,
     baseQty: 2,
+    prepMinutes: 12,
     ingredients: [
       { key: "flour", quantity: 280, unit: UnitType.G },
       { key: "chicken_breast", quantity: 200, unit: UnitType.G },
@@ -662,6 +1368,7 @@ const RECIPES: RecipeDef[] = [
     category: "BBQ",
     baseUnit: UnitType.PCS,
     baseQty: 4,
+    prepMinutes: 16,
     ingredients: [
       { key: "chicken_boneless", quantity: 500, unit: UnitType.G },
       { key: "cream", quantity: 50, unit: UnitType.ML },
@@ -681,6 +1388,7 @@ const RECIPES: RecipeDef[] = [
     category: "BBQ",
     baseUnit: UnitType.PCS,
     baseQty: 7,
+    prepMinutes: 16,
     ingredients: [
       { key: "chicken_mince", quantity: 500, unit: UnitType.G },
       { key: "onion", quantity: 120, unit: UnitType.G },
@@ -703,6 +1411,7 @@ const RECIPES: RecipeDef[] = [
     category: "Karahi & Handi",
     baseUnit: UnitType.KG,
     baseQty: 1,
+    prepMinutes: 25,
     ingredients: [
       { key: "chicken_boneless", quantity: 1, unit: UnitType.KG },
       { key: "oil", quantity: 120, unit: UnitType.ML },
@@ -725,6 +1434,7 @@ const RECIPES: RecipeDef[] = [
     category: "Chinese",
     baseUnit: UnitType.PCS,
     baseQty: 1,
+    prepMinutes: 20,
     ingredients: [
       { key: "chicken_boneless", quantity: 300, unit: UnitType.G },
       { key: "egg", quantity: 2.5, unit: UnitType.PCS },
@@ -751,6 +1461,7 @@ const RECIPES: RecipeDef[] = [
     category: "Chaye Khana",
     baseUnit: UnitType.PCS,
     baseQty: 2,
+    prepMinutes: 5,
     ingredients: [
       { key: "milk", quantity: 400, unit: UnitType.ML },
       { key: "tea", quantity: 8, unit: UnitType.G },
@@ -764,6 +1475,7 @@ const RECIPES: RecipeDef[] = [
     category: "Chaye Khana",
     baseUnit: UnitType.PCS,
     baseQty: 2,
+    prepMinutes: 5,
     ingredients: [
       { key: "milk", quantity: 350, unit: UnitType.ML },
       { key: "gur", quantity: 35, unit: UnitType.G },
@@ -778,6 +1490,7 @@ const RECIPES: RecipeDef[] = [
     category: "Chaye Khana",
     baseUnit: UnitType.PCS,
     baseQty: 2,
+    prepMinutes: 4,
     ingredients: [
       { key: "green_tea", quantity: 3, unit: UnitType.G },
       { key: "cardamom", quantity: 2, unit: UnitType.G },
@@ -786,21 +1499,156 @@ const RECIPES: RecipeDef[] = [
       { key: "honey", quantity: 10, unit: UnitType.G },
     ],
   },
+  {
+    key: "special_shahi_daal",
+    name: "Special Shahi Daal",
+    category: "Pakistani Special",
+    baseUnit: UnitType.KG,
+    baseQty: 1,
+    prepMinutes: 30,
+    ingredients: [
+      { key: "onion", quantity: 150, unit: UnitType.G },
+      { key: "tomato", quantity: 100, unit: UnitType.G },
+      { key: "oil", quantity: 80, unit: UnitType.ML },
+      { key: "garlic", quantity: 20, unit: UnitType.G },
+      { key: "ginger", quantity: 15, unit: UnitType.G },
+      { key: "salt", quantity: 12, unit: UnitType.G },
+      { key: "chilli_flakes", quantity: 8, unit: UnitType.G },
+      { key: "butter", quantity: 40, unit: UnitType.G },
+    ],
+  },
+  {
+    key: "special_mix_vegetable",
+    name: "Special Mix Vegetable",
+    category: "Pakistani Special",
+    baseUnit: UnitType.KG,
+    baseQty: 1,
+    prepMinutes: 25,
+    ingredients: [
+      { key: "potato", quantity: 300, unit: UnitType.G },
+      { key: "carrot", quantity: 150, unit: UnitType.G },
+      { key: "capsicum", quantity: 100, unit: UnitType.G },
+      { key: "onion", quantity: 120, unit: UnitType.G },
+      { key: "tomato", quantity: 100, unit: UnitType.G },
+      { key: "oil", quantity: 60, unit: UnitType.ML },
+      { key: "salt", quantity: 10, unit: UnitType.G },
+    ],
+  },
+  {
+    key: "special_daal_moong",
+    name: "Special Daal Moong",
+    category: "Pakistani Special",
+    baseUnit: UnitType.KG,
+    baseQty: 1,
+    prepMinutes: 25,
+    ingredients: [
+      { key: "onion", quantity: 100, unit: UnitType.G },
+      { key: "tomato", quantity: 80, unit: UnitType.G },
+      { key: "oil", quantity: 50, unit: UnitType.ML },
+      { key: "garlic", quantity: 15, unit: UnitType.G },
+      { key: "salt", quantity: 10, unit: UnitType.G },
+      { key: "cumin", quantity: 5, unit: UnitType.G },
+    ],
+  },
+  {
+    key: "chicken_qorma",
+    name: "Chicken Qorma",
+    category: "Pakistani Special",
+    baseUnit: UnitType.KG,
+    baseQty: 1,
+    prepMinutes: 30,
+    ingredients: [
+      { key: "chicken", quantity: 1, unit: UnitType.KG },
+      { key: "yogurt", quantity: 200, unit: UnitType.G },
+      { key: "onion", quantity: 250, unit: UnitType.G },
+      { key: "oil", quantity: 100, unit: UnitType.ML },
+      { key: "garlic_paste", quantity: 30, unit: UnitType.G },
+      { key: "ginger", quantity: 25, unit: UnitType.G },
+      { key: "garam_masala", quantity: 8, unit: UnitType.G },
+      { key: "salt", quantity: 12, unit: UnitType.G },
+    ],
+  },
+  {
+    key: "special_daal_mash",
+    name: "Special Daal Mash",
+    category: "Pakistani Special",
+    baseUnit: UnitType.KG,
+    baseQty: 1,
+    prepMinutes: 25,
+    ingredients: [
+      { key: "onion", quantity: 100, unit: UnitType.G },
+      { key: "tomato", quantity: 80, unit: UnitType.G },
+      { key: "oil", quantity: 50, unit: UnitType.ML },
+      { key: "garlic", quantity: 15, unit: UnitType.G },
+      { key: "salt", quantity: 10, unit: UnitType.G },
+      { key: "chilli_flakes", quantity: 6, unit: UnitType.G },
+    ],
+  },
+  {
+    key: "biscuit_1pc",
+    name: "Biscuit (1 piece)",
+    category: "Grocery",
+    baseUnit: UnitType.PCS,
+    baseQty: 1,
+    prepMinutes: 1,
+    ingredients: [{ key: "biscuit", quantity: 1, unit: UnitType.PCS }],
+  },
+  {
+    key: "nimko_1pk",
+    name: "Nimko (1 packet)",
+    category: "Grocery",
+    baseUnit: UnitType.PCS,
+    baseQty: 1,
+    prepMinutes: 1,
+    ingredients: [{ key: "nimko", quantity: 1, unit: UnitType.PCS }],
+  },
+  {
+    key: "cigarette_full",
+    name: "Cigarette (Full pack)",
+    category: "Grocery",
+    baseUnit: UnitType.PCS,
+    baseQty: 1,
+    prepMinutes: 1,
+    ingredients: [{ key: "cigarette", quantity: 1, unit: UnitType.PCS }],
+  },
+  {
+    key: "cigarette_half",
+    name: "Cigarette (Half pack)",
+    category: "Grocery",
+    baseUnit: UnitType.PCS,
+    baseQty: 1,
+    prepMinutes: 1,
+    ingredients: [{ key: "cigarette", quantity: 0.5, unit: UnitType.PCS }],
+  },
 ];
 
-/** Daily pots sold by plate / Rs from residual batch (linked to cook recipes above). */
+/** Core + full menu catalog (menu Half/Full share one recipe key). */
+const RECIPES: RecipeDef[] = (() => {
+  const byKey = new Map<string, RecipeDef>();
+  for (const def of [...CORE_RECIPES, ...FULL_MENU_RECIPES]) {
+    byKey.set(def.key, def);
+  }
+  return [...byKey.values()];
+})();
+
+/**
+ * Daily pots (Specials page). sellMode BOTH = plate + Rs.
+ * halfPlatePrice set → menu Half (0.5× plateGrams) + Full (1×); else single serving.
+ */
 const SPECIAL_PRODUCTS: {
   name: string;
   category: string;
   platePrice: number;
   plateGrams: number;
   cookRecipeKey: string;
+  /** Card half plate Rs; omit = single size only */
+  halfPlatePrice?: number;
 }[] = [
   {
     name: "Bannu Palao",
     category: "Pakistani Special",
-    platePrice: 400,
-    plateGrams: 400,
+    platePrice: 1000,
+    plateGrams: 1000,
     cookRecipeKey: "bannu_beef_pulao",
   },
   {
@@ -810,13 +1658,55 @@ const SPECIAL_PRODUCTS: {
     plateGrams: 350,
     cookRecipeKey: "mutton_namkeen_rosh",
   },
+  {
+    name: "Special Shahi Daal",
+    category: "Pakistani Special",
+    platePrice: 550,
+    plateGrams: 350,
+    cookRecipeKey: "special_shahi_daal",
+  },
+  {
+    name: "Special Mix Vegetable",
+    category: "Pakistani Special",
+    platePrice: 400,
+    plateGrams: 350,
+    cookRecipeKey: "special_mix_vegetable",
+  },
+  {
+    name: "Special Daal Moong",
+    category: "Pakistani Special",
+    platePrice: 200,
+    plateGrams: 400,
+    halfPlatePrice: 120,
+    cookRecipeKey: "special_daal_moong",
+  },
+  {
+    name: "Chicken Qorma",
+    category: "Pakistani Special",
+    platePrice: 280,
+    plateGrams: 400,
+    halfPlatePrice: 180,
+    cookRecipeKey: "chicken_qorma",
+  },
+  {
+    name: "Special Daal Mash",
+    category: "Pakistani Special",
+    platePrice: 250,
+    plateGrams: 400,
+    halfPlatePrice: 150,
+    cookRecipeKey: "special_daal_mash",
+  },
 ];
 
 async function upsertStoreItem(categoryId: string, def: StoreDef) {
+  const packUnit = def.packUnit ?? PackUnit.NONE;
+  const unitsPerPack = packUnit === PackUnit.NONE ? 1 : Math.max(1, def.unitsPerPack ?? 1);
   return prisma.storeItem.upsert({
     where: { categoryId_name: { categoryId, name: def.name } },
     update: {
       unit: def.unit,
+      packUnit,
+      unitsPerPack,
       quantityOnHand: def.qty,
       ratePerUnit: def.rate,
       reorderLevel: def.reorder ?? 1,
@@ -826,6 +1716,8 @@ async function upsertStoreItem(categoryId: string, def: StoreDef) {
       name: def.name,
       categoryId,
       unit: def.unit,
+      packUnit,
+      unitsPerPack,
       quantityOnHand: def.qty,
       ratePerUnit: def.rate,
       reorderLevel: def.reorder ?? 1,
@@ -837,12 +1729,24 @@ async function ensureRecipe(
   def: RecipeDef,
   storeIds: Record<string, string>
 ) {
-  const ingredients = def.ingredients.map((i) => {
+  // Merge duplicate store lines (helpers sometimes re-add the same key).
+  const merged = new Map<string, { storeItemId: string; quantity: number; unit: UnitType }>();
+  for (const i of def.ingredients) {
     const storeItemId = storeIds[i.key];
-    if (!storeItemId) throw new Error(`Missing store item key: ${i.key}`);
-    return { storeItemId, quantity: i.quantity, unit: i.unit };
-  });
+    if (!storeItemId) throw new Error(`Missing store item key: ${i.key} (recipe ${def.key})`);
+    const prev = merged.get(storeItemId);
+    if (prev) {
+      if (prev.unit !== i.unit) {
+        throw new Error(`Recipe ${def.key}: unit clash for ${i.key}`);
+      }
+      prev.quantity += i.quantity;
+    } else {
+      merged.set(storeItemId, { storeItemId, quantity: i.quantity, unit: i.unit });
+    }
+  }
+  const ingredients = [...merged.values()];
 
+  const prepMinutes = def.prepMinutes ?? 15;
   const existing = await prisma.recipe.findUnique({ where: { name: def.name } });
   if (existing) {
     await prisma.recipeIngredient.deleteMany({ where: { recipeId: existing.id } });
@@ -852,6 +1756,7 @@ async function ensureRecipe(
         category: def.category,
         baseUnit: def.baseUnit,
         baseQty: def.baseQty,
+        prepMinutes,
         active: true,
         ingredients: { create: ingredients },
       },
@@ -863,6 +1768,7 @@ async function ensureRecipe(
       category: def.category,
       baseUnit: def.baseUnit,
       baseQty: def.baseQty,
+      prepMinutes,
       ingredients: { create: ingredients },
     },
   });
@@ -923,6 +1829,7 @@ async function seedCatalog() {
     { code: "FRESH", name: "Fresh", sortOrder: 1 },
     { code: "DRY", name: "Dry", sortOrder: 2 },
     { code: "LIQUID", name: "Liquid", sortOrder: 3 },
+    { code: "GROCERY", name: "Grocery", sortOrder: 4 },
   ]) {
     await prisma.storeCategory.upsert({
       where: { code: c.code },
@@ -935,6 +1842,7 @@ async function seedCatalog() {
     FRESH: await prisma.storeCategory.findUniqueOrThrow({ where: { code: "FRESH" } }),
     DRY: await prisma.storeCategory.findUniqueOrThrow({ where: { code: "DRY" } }),
     LIQUID: await prisma.storeCategory.findUniqueOrThrow({ where: { code: "LIQUID" } }),
+    GROCERY: await prisma.storeCategory.findUniqueOrThrow({ where: { code: "GROCERY" } }),
   };
 
   const storeIds: Record<string, string> = {};
@@ -947,6 +1855,12 @@ async function seedCatalog() {
   for (const def of RECIPES) {
     const row = await ensureRecipe(def, storeIds);
     recipeIds[def.key] = row.id;
+  }
+
+  for (const m of MENU) {
+    if (m.recipeKey && !recipeIds[m.recipeKey]) {
+      throw new Error(`Menu "${m.name}" recipeKey missing: ${m.recipeKey}`);
+    }
   }
 
   // Upsert demo/catalog menu rows only — never delete or disable restaurant-owned items.
@@ -993,10 +1907,76 @@ async function seedCatalog() {
     }
   }
 
-  // Special pots (Bannu Palao, Rosh, …) + auto SPECIAL menu rows
+  // Hide old category duplicates + Live Kitchen Banu (pots live under Pakistani Special).
+  await prisma.menuItem.updateMany({
+    where: {
+      OR: [
+        { category: { in: ["Quetta Sangat Special", "Daal & Sabzi", "Special Pakistani"] } },
+        { name: { in: ["Banu Pulao", "Bannu Palao", "Bannu Beef Pulao"] }, category: "Live Kitchen" },
+        // NORMAL Bannu KG row — sell via pot SPECIAL instead
+        { name: "Bannu Palao", kind: "NORMAL", category: "Pakistani Special" },
+        { name: "Bannu Palao", kind: "NORMAL", category: "Special Pakistani" },
+      ],
+      active: true,
+    },
+    data: { active: false },
+  });
+  // Drop lowercase duplicate pot if present
+  await prisma.specialProduct.updateMany({
+    where: { name: "bannu palao" },
+    data: { active: false },
+  });
+
+  // Old single-line Karahi/Handi (before Half/Full split) — hide from waiter.
+  const legacySingleLines = [
+    "Quetta Sangat Special Chicken Karahi",
+    "Special Desi Murgha Karahi",
+    "Chicken Lahori Karahi (Red Chilli)",
+    "Chicken Karahi (Black Pepper)",
+    "Chicken Afghani Karahi (White)",
+    "Chicken Achari Karahi",
+    "Chicken Peshawari Karahi (Shinwari)",
+    "Quetta Sangat Special Beef Karahi",
+    "Beef Lahori Karahi (Red Chilli)",
+    "Beef Karahi (Black Pepper)",
+    "Beef Afghani Karahi (White)",
+    "Quetta Sangat Special Mutton Karahi",
+    "Mutton Lahori Karahi (Red Chilli)",
+    "Mutton Karahi (Black Pepper)",
+    "Mutton Afghani Karahi (White)",
+    "Mutton Peshawari Karahi (Shinwari)",
+    "Special Mutton Handi (With Bone)",
+    "Mutton Handi (With Bone)",
+    "Mutton Hari Mirch Handi (With Bone)",
+    "Mutton Afghani Handi (White / With Bone)",
+    "Quetta Sangat Special Chicken Handi",
+    "Chicken Handi",
+    "Chicken Hari Mirch Handi",
+    "Chicken Afghani Handi (White)",
+    "Chicken Achari Handi",
+    // Old single-line namkeen (now Half/Full)
+    "Mutton Namkeen Gosht Special",
+    "Beef Namkeen Gosht",
+  ];
+  await prisma.menuItem.updateMany({
+    where: {
+      name: { in: legacySingleLines },
+      active: true,
+    },
+    data: { active: false },
+  });
+  // Hari Mirch was full-only on card — hide leftover Half band
+  await prisma.menuItem.updateMany({
+    where: { name: "Chicken Hari Mirch Handi (Half)", active: true },
+    data: { active: false },
+  });
+
+  // Special pots + SPECIAL menu (Half/Full when halfPlatePrice set; sellMode BOTH = plate + Rs)
   for (const sp of SPECIAL_PRODUCTS) {
     const cookRecipeId = recipeIds[sp.cookRecipeKey];
     if (!cookRecipeId) throw new Error(`Missing cook recipe key: ${sp.cookRecipeKey}`);
+    const halfPlate =
+      sp.halfPlatePrice != null && sp.halfPlatePrice > 0 ? sp.halfPlatePrice : null;
     const existing = await prisma.specialProduct.findUnique({ where: { name: sp.name } });
     const product = existing
       ? await prisma.specialProduct.update({
@@ -1004,8 +1984,11 @@ async function seedCatalog() {
           data: {
             category: sp.category,
             platePrice: sp.platePrice,
+            halfPlatePrice: halfPlate,
             plateGrams: sp.plateGrams,
             cookRecipeId,
+            sellMode: "BOTH",
+            servingLabel: "Plate",
             active: true,
           },
         })
@@ -1014,54 +1997,104 @@ async function seedCatalog() {
             name: sp.name,
             category: sp.category,
             platePrice: sp.platePrice,
+            halfPlatePrice: halfPlate,
             plateGrams: sp.plateGrams,
             cookRecipeId,
+            sellMode: "BOTH",
+            servingLabel: "Plate",
           },
         });
 
-    const menu = await prisma.menuItem.findFirst({
-      where: { specialProductId: product.id, kind: "SPECIAL" },
-      orderBy: { createdAt: "asc" },
-    });
-    if (menu) {
-      await prisma.menuItem.update({
-        where: { id: menu.id },
-        data: {
-          name: product.name,
-          category: product.category,
-          sellingPrice: sp.platePrice,
-          sellUnit: UnitType.PCS,
-          kind: "SPECIAL",
+    const baseMenu = {
+      category: product.category,
+      kitchenStation: KitchenStation.COOKING,
+      kind: "SPECIAL" as const,
+      sellUnit: UnitType.PCS,
+      specialProductId: product.id,
+      recipeId: null as string | null,
+      listPortionQty: 1,
+      minQty: 1,
+      qtyStep: 1,
+      allowCustomQty: false,
+      active: true,
+    };
+
+    if (halfPlate != null) {
+      const fullName = `${sp.name} (Full)`;
+      const halfName = `${sp.name} (Half)`;
+      const upsertPortion = async (name: string, price: number, mix: number) => {
+        const row =
+          (await prisma.menuItem.findFirst({
+            where: { specialProductId: product.id, kind: "SPECIAL", name },
+          })) ??
+          (await prisma.menuItem.findFirst({
+            where: { name, category: product.category, kind: "SPECIAL" },
+          }));
+        if (row) {
+          await prisma.menuItem.update({
+            where: { id: row.id },
+            data: { ...baseMenu, name, sellingPrice: price, mixSpecialPlates: mix },
+          });
+        } else {
+          await prisma.menuItem.create({
+            data: { ...baseMenu, name, sellingPrice: price, mixSpecialPlates: mix },
+          });
+        }
+      };
+      await upsertPortion(fullName, sp.platePrice, 1);
+      await upsertPortion(halfName, halfPlate, 0.5);
+      // Hide bare pot name if leftover from older sync
+      await prisma.menuItem.updateMany({
+        where: {
           specialProductId: product.id,
-          recipeId: null,
-          mixSpecialPlates: null,
-          listPortionQty: 1,
+          kind: "SPECIAL",
+          name: sp.name,
           active: true,
-          minQty: 1,
-          qtyStep: 1,
-          allowCustomQty: false,
-          kitchenStation: KitchenStation.COOKING,
         },
+        data: { active: false },
       });
     } else {
-      await prisma.menuItem.create({
-        data: {
-          name: product.name,
-          category: product.category,
-          kitchenStation: KitchenStation.COOKING,
-          kind: "SPECIAL",
-          sellUnit: UnitType.PCS,
-          sellingPrice: sp.platePrice,
-          listPortionQty: 1,
-          minQty: 1,
-          qtyStep: 1,
-          allowCustomQty: false,
-          specialProductId: product.id,
-          recipeId: null,
-        },
+      const menu = await prisma.menuItem.findFirst({
+        where: { specialProductId: product.id, kind: "SPECIAL" },
+        orderBy: { createdAt: "asc" },
       });
+      if (menu) {
+        await prisma.menuItem.update({
+          where: { id: menu.id },
+          data: {
+            ...baseMenu,
+            name: product.name,
+            sellingPrice: sp.platePrice,
+            mixSpecialPlates: 1,
+          },
+        });
+      } else {
+        await prisma.menuItem.create({
+          data: {
+            ...baseMenu,
+            name: product.name,
+            sellingPrice: sp.platePrice,
+            mixSpecialPlates: 1,
+          },
+        });
+      }
     }
   }
+
+  // Hide old NORMAL daal/sabzi lines (now special pots)
+  await prisma.menuItem.updateMany({
+    where: {
+      kind: "NORMAL",
+      active: true,
+      OR: [
+        { name: { in: ["Special Shahi Daal", "Special Mix Vegetable"] } },
+        { name: { startsWith: "Special Daal Moong" } },
+        { name: { startsWith: "Chicken Qorma" } },
+        { name: { startsWith: "Special Daal Mash" } },
+      ],
+    },
+    data: { active: false },
+  });
 
   const [tableCount, menuActive, menuKg] = await Promise.all([
     prisma.restaurantTable.count(),

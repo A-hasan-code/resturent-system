@@ -13,16 +13,17 @@
     "dev:desktop": "pnpm --filter @hotel/desktop run dev",
     "build": "pnpm --filter @hotel/api run build && pnpm --filter @hotel/web run build",
     "typecheck": "pnpm --filter @hotel/api exec tsc --noEmit && pnpm --filter @hotel/web exec tsc -b",
-    "db:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-db.ps1 start",
-    "db:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-db.ps1 stop",
-    "db:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-db.ps1 status",
-    "db:reset": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-db.ps1 reset",
+    "db:start": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./scripts/dev-db.ps1\" start",
+    "db:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./scripts/dev-db.ps1\" stop",
+    "db:status": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./scripts/dev-db.ps1\" status",
+    "db:reset": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./scripts/dev-db.ps1\" reset",
     "db:generate": "pnpm --filter @hotel/api run db:generate",
     "db:migrate": "pnpm --filter @hotel/api run db:migrate",
     "db:deploy": "pnpm --filter @hotel/api run db:deploy",
     "db:seed": "pnpm --filter @hotel/api run db:seed",
-    "smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1",
-    "apk": "powershell -NoProfile -ExecutionPolicy Bypass -File packaging/android/Build-Apk.ps1",
-    "release": "powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/Build-Release.ps1"
+    "hotel:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./scripts/dev-setup.ps1\"",
+    "smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./scripts/smoke-test.ps1\"",
+    "apk": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./packaging/android/Build-Apk.ps1\"",
+    "release": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./packaging/windows/Build-Release.ps1\""
   }
 }

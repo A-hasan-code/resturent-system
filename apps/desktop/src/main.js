@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const { discover, probe } = require("./discovery");
 const { PrintAgent, resetAgentIdentity } = require("./print-agent");
+const { checkAndApplyUpdate, localVersion, compareVersions } = require("./auto-update");
 
 const HEALTH_EVERY_MS = 8000;
 const RETRY_MS = 3000;
@@ -13,6 +14,8 @@ let searching = false;
 let healthTimer = null;
 let misses = 0;
 let printAgent = null;
+let updateCheckInFlight = false;
+let lastUpdateCheckAt = 0;
 
 const configFile = () => path.join(app.getPath("userData"), "config.json");
 
@@ -58,6 +61,7 @@ async function connect() {
         await win.loadURL(hit.origin);
         startHealth();
         startPrintAgent();
+        void maybeAutoUpdate(hit.origin, hit.health);
         return;
       }
       status("Server not found. Check that the server PC is on and on the same network. Retrying…");
@@ -77,6 +81,9 @@ function startHealth() {
     const cfg = loadConfig();
     if (h && (!cfg.serverId || cfg.serverId === h.serverId)) {
       misses = 0;
+      if (h.version && compareVersions(localVersion(), h.version) < 0) {
+        void maybeAutoUpdate(current, h);
+      }
       return;
     }
     misses += 1;
@@ -106,6 +113,23 @@ function startPrintAgent() {
   refreshMenu();
 }
 
+async function maybeAutoUpdate(origin, health, force = false) {
+  if (!app.isPackaged || !origin || updateCheckInFlight) return;
+  const now = Date.now();
+  if (!force && now - lastUpdateCheckAt < 5 * 60 * 1000) return;
+  // Fast path: server version already known from discovery health.
+  if (!force && health && health.version && compareVersions(localVersion(), health.version) >= 0) return;
+
+  updateCheckInFlight = true;
+  lastUpdateCheckAt = now;
+  try {
+    await checkAndApplyUpdate({ origin, status });
+  } finally {
+    updateCheckInFlight = false;
+    refreshMenu();
+  }
+}
+
 function stopPrintAgent() {
   if (printAgent) printAgent.stop();
 }
@@ -133,6 +157,12 @@ function buildMenu() {
         { label: "Reload", accelerator: "F5", click: () => (current ? win.reload() : connect()) },
         { label: "Reconnect to server", click: () => connect() },
         { label: "Change server…", click: () => forgetServer() },
+        {
+          label: `Check for desktop update (v${localVersion()})`,
+          click: () => {
+            if (current) void maybeAutoUpdate(current, null, true);
+          },
+        },
         { type: "separator" },
         {
           label: agentLabel,

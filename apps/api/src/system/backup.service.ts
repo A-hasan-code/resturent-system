@@ -14,7 +14,7 @@ export type BackupFile = {
   kind: "daily" | "monthly" | "manual" | "safety";
 };
 
-type CreateKind = "manual" | "pre-restore" | "pre-upgrade" | "auto" | "monthly";
+type CreateKind = "manual" | "pre-restore" | "pre-upgrade" | "pre-seed" | "auto" | "monthly";
 
 /** Reject tiny / empty dumps before touching live. */
 const MIN_DUMP_BYTES = 8_192;
@@ -371,7 +371,7 @@ export class BackupService implements OnModuleInit, OnModuleDestroy {
 function kindOf(file: string): BackupFile["kind"] {
   if (file.includes("-monthly")) return "monthly";
   if (file.includes("-auto")) return "daily";
-  if (file.includes("-pre-restore") || file.includes("-pre-upgrade")) return "safety";
+  if (file.includes("-pre-restore") || file.includes("-pre-upgrade") || file.includes("-pre-seed")) return "safety";
   return "manual";
 }
 

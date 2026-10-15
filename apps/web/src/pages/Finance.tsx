@@ -4,6 +4,7 @@ import { useAuth } from "../auth";
 import { DateField } from "../components/DateField";
 import { Pagination, paginate } from "../components/Pagination";
 import { PoweredBy } from "../components/PoweredBy";
+import { useBusinessDay } from "../hotel-gate";
 import { MessageKey, useT } from "../i18n";
 import { useToast } from "../toast";
 
@@ -63,21 +64,23 @@ const BUCKET_KEY: Record<string, MessageKey> = {
   "90+": "finance.bucket.90+",
 };
 
-function isoToday() {
-  return new Date().toISOString().slice(0, 10);
-}
-
 export function FinancePage() {
   const t = useT();
   const toast = useToast();
   const { can } = useAuth();
-  const [date, setDate] = useState(isoToday);
+  const { businessDate, dayStart } = useBusinessDay();
+  const [date, setDate] = useState(businessDate);
+  const [dateTouched, setDateTouched] = useState(false);
   const [pnl, setPnl] = useState<DayPnl | null>(null);
   const [ex, setEx] = useState<Exceptions | null>(null);
   const [aging, setAging] = useState<Aging | null>(null);
   const [busy, setBusy] = useState(false);
   const [exTab, setExTab] = useState<ExTab>("cancels");
   const [agingPage, setAgingPage] = useState(1);
+
+  useEffect(() => {
+    if (!dateTouched) setDate(businessDate);
+  }, [businessDate, dateTouched]);
 
   async function load() {
     setBusy(true);
@@ -137,6 +140,9 @@ export function FinancePage() {
           <h1>{t("finance.title")}</h1>
           <p>
             {t("finance.hint")}
+            <span className="tiny muted" style={{ display: "block" }}>
+              {t("cash.businessDayHint", { start: dayStart })}
+            </span>
             {pnl?.locked ? (
               <>
                 {" · "}
@@ -148,7 +154,15 @@ export function FinancePage() {
         <div className="page-head-actions">
           <div className="field" style={{ margin: 0 }}>
             <label htmlFor="finance-date">{t("finance.date")}</label>
-            <DateField id="finance-date" value={date} max={isoToday()} onChange={setDate} />
+            <DateField
+              id="finance-date"
+              value={date}
+              max={businessDate}
+              onChange={(v) => {
+                setDateTouched(true);
+                setDate(v);
+              }}
+            />
           </div>
           <button
             type="button"

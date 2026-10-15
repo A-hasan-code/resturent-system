@@ -1,4 +1,5 @@
 import PDFDocument from "pdfkit";
+import { forEachBufferedPage } from "../common/pdf-page";
 import { VENDOR } from "../common/vendor";
 
 type Hotel = { name: string; tagline: string; address: string; phone: string };
@@ -16,6 +17,8 @@ export type ClosePdfSheet = {
     kind: string;
     label: string;
     cashSales: number;
+    walkInCash?: number;
+    creditCash?: number;
     tipTotal: number;
     expectedCash: number;
     collectedCash: number;
@@ -24,6 +27,8 @@ export type ClosePdfSheet = {
     missReason: string;
     billCount: number;
     paymentCount: number;
+    creditBillCount?: number;
+    creditPaymentCount?: number;
   }[];
   soldItems: { name: string; qty: number; amount: number }[];
   specialsClose?: {
@@ -50,6 +55,29 @@ export type ClosePdfSheet = {
     isCredit?: boolean;
     creditCustomerName?: string | null;
   }[];
+  creditTodayBills?: {
+    orderNo: number;
+    tableNo: string | null;
+    amount: number;
+    paymentStatus: string;
+    creditCustomerName?: string | null;
+  }[];
+  creditPaidBills?: {
+    orderNo: number;
+    tableNo: string | null;
+    amount: number;
+    creditCustomerName?: string | null;
+    cashier?: string | null;
+    createdAt: string;
+  }[];
+  creditUnpaidBills?: {
+    orderNo: number;
+    tableNo: string | null;
+    balance: number;
+    paymentStatus: string;
+    isCredit?: boolean;
+    creditCustomerName?: string | null;
+  }[];
   totals: {
     cashSales: number;
     tipTotal: number;
@@ -69,7 +97,12 @@ export type ClosePdfSheet = {
     supplierPaid: number;
     selfExtra: number;
     cashOutTotal: number;
+    creditTodayAmount?: number;
+    creditTodayCount?: number;
+    creditPaidAmount?: number;
+    creditPaidCount?: number;
     creditUnpaidAmount: number;
+    creditUnpaidCount?: number;
     drawerFormula: string;
   };
 };
@@ -158,27 +191,40 @@ export function renderClosePdf(sheet: ClosePdfSheet, hotel: Hotel): Promise<Buff
       { label: "Card", value: money(t.cardTotal), note: "Not in drawer" },
       { label: "Wallet", value: money(t.walletTotal), note: "Not in drawer" },
       { label: "Bank", value: money(t.bankTotal), note: "Not in drawer" },
-      { label: "Pending", value: money(t.pendingAmount), note: `${t.pendingCount} bills` },
+      {
+        label: "Table pending",
+        value: money(t.pendingAmount),
+        note: `${t.pendingCount} open tables`,
+      },
     ]);
 
-    section(doc, "Cash counters", "Expected = cash + tips (+ float − cash out on C1)");
+    section(doc, "Cash counters", "Expected = walk-in cash + credit cash + tips (+ float − cash out on C1)");
     table(
       doc,
       w,
-      ["Counter", "Cash", "Tips", "Expected", "Collected", "Miss"],
+      ["Counter", "Walk-in", "Credit", "Tips", "Expected", "Miss"],
       sheet.counters.map((c) => [
         c.label,
-        money(c.cashSales),
+        money(c.walkInCash ?? c.cashSales),
+        money(c.creditCash ?? 0),
         money(c.tipTotal),
         money(c.expectedCash),
-        money(c.collectedCash),
         money(c.missCash),
       ]),
-      [0.26, 0.14, 0.12, 0.16, 0.16, 0.16]
+      [0.22, 0.16, 0.14, 0.12, 0.18, 0.18]
     );
     for (const c of sheet.counters) {
       if (c.missCash > 0 && c.missReason) {
         doc.fillColor(MUTED).font("Helvetica").fontSize(8).text(`${c.label} miss reason: ${c.missReason}`);
+      }
+      if ((c.creditCash ?? 0) > 0) {
+        doc
+          .fillColor(MUTED)
+          .font("Helvetica")
+          .fontSize(8)
+          .text(
+            `${c.label} credit collections: ${money(c.creditCash ?? 0)} · ${c.creditPaymentCount ?? 0} payments (in drawer, listed separately from walk-in)`
+          );
       }
     }
 
@@ -192,7 +238,6 @@ export function renderClosePdf(sheet: ClosePdfSheet, hotel: Hotel): Promise<Buff
         ["Supplier payments", money(t.supplierPaid)],
         ["Self-paid extras", money(t.selfExtra)],
         ["Total cash out", money(t.cashOutTotal)],
-        ["Credit unpaid", money(t.creditUnpaidAmount)],
       ],
       [0.7, 0.3]
     );
@@ -242,34 +287,106 @@ export function renderClosePdf(sheet: ClosePdfSheet, hotel: Hotel): Promise<Buff
       }
     }
 
-    section(doc, "Pending / unpaid", "Still open at close");
+    section(doc, "Pending table bills", "Open tables only — not in expected cash");
     table(
       doc,
       w,
       ["Bill", "Table", "Balance", "Status"],
       sheet.pendingBills.slice(0, 30).map((b) => [
-        `#${b.orderNo}${b.isCredit ? " · Credit" : ""}`,
+        `#${b.orderNo}`,
         b.tableNo || "—",
         money(b.balance),
-        b.creditCustomerName || b.paymentStatus,
+        b.paymentStatus,
       ]),
       [0.28, 0.18, 0.24, 0.3]
     );
 
-    const pages = doc.bufferedPageRange();
-    for (let i = 0; i < pages.count; i++) {
-      doc.switchToPage(pages.start + i);
+    section(
+      doc,
+      "Credit summary",
+      "New today · paid today · total outstanding (not in expected cash)"
+    );
+    table(
+      doc,
+      w,
+      ["Kind", "Amount", "Count"],
+      [
+        ["Credit today (new)", money(t.creditTodayAmount ?? 0), String(t.creditTodayCount ?? 0)],
+        ["Credit paid today", money(t.creditPaidAmount ?? 0), String(t.creditPaidCount ?? 0)],
+        [
+          "Total credit outstanding",
+          money(t.creditUnpaidAmount),
+          String(t.creditUnpaidCount ?? 0),
+        ],
+      ],
+      [0.5, 0.3, 0.2]
+    );
+
+    const creditToday = sheet.creditTodayBills ?? [];
+    if (creditToday.length) {
+      section(doc, "Credit bills today", "Opened / put on credit this day");
+      table(
+        doc,
+        w,
+        ["Bill", "Table", "Amount", "Customer"],
+        creditToday.slice(0, 30).map((b) => [
+          `#${b.orderNo}`,
+          b.tableNo || "—",
+          money(b.amount),
+          b.creditCustomerName || "Credit",
+        ]),
+        [0.22, 0.18, 0.22, 0.38]
+      );
+    }
+
+    const creditPaid = sheet.creditPaidBills ?? [];
+    if (creditPaid.length) {
+      section(doc, "Credit payments today", "Cash collected against credit");
+      table(
+        doc,
+        w,
+        ["Bill", "Amount", "Customer", "Cashier"],
+        creditPaid.slice(0, 30).map((b) => [
+          `#${b.orderNo}`,
+          money(b.amount),
+          b.creditCustomerName || "Credit",
+          b.cashier || "—",
+        ]),
+        [0.2, 0.2, 0.35, 0.25]
+      );
+    }
+
+    const creditBills = sheet.creditUnpaidBills ?? [];
+    section(
+      doc,
+      "All credit outstanding",
+      `${t.creditUnpaidCount ?? creditBills.length} receivables — not in expected cash`
+    );
+    table(
+      doc,
+      w,
+      ["Bill", "Table", "Balance", "Customer"],
+      creditBills.slice(0, 40).map((b) => [
+        `#${b.orderNo}`,
+        b.tableNo || "—",
+        money(b.balance),
+        b.creditCustomerName || "Credit",
+      ]),
+      [0.22, 0.18, 0.22, 0.38]
+    );
+
+    forEachBufferedPage(doc, (n, total) => {
       doc
         .fillColor(MUTED)
         .font("Helvetica")
         .fontSize(7)
         .text(
-          `${VENDOR.line} · Close report · ${dayLabel(sheet.businessDate)} · Page ${i + 1}/${pages.count}`,
+          `${VENDOR.line} · Close report · ${dayLabel(sheet.businessDate)} · Page ${n}/${total}`,
           PAGE.margin,
           PAGE.height - 28,
-          { width: w, align: "center" }
+          { width: w, align: "center", lineBreak: false }
         );
-    }
+    });
     doc.end();
   });
 }

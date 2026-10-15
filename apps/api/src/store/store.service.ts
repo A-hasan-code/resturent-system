@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
+import { PackUnit } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { toNumber } from "../common/units";
 import {
@@ -12,6 +13,16 @@ import {
   StockOutDto,
   UpdateStoreItemDto,
 } from "./dto";
+
+function normalizePack(
+  packUnit: PackUnit | undefined,
+  unitsPerPack: number | undefined
+): { packUnit: PackUnit; unitsPerPack: number } {
+  const unit = packUnit ?? PackUnit.NONE;
+  if (unit === PackUnit.NONE) return { packUnit: PackUnit.NONE, unitsPerPack: 1 };
+  const n = Math.max(1, Number(unitsPerPack ?? 1));
+  return { packUnit: unit, unitsPerPack: Number(n.toFixed(3)) };
+}
 
 /** Net plate usage: SALE − RESTORE (COOK excluded — that is pot cook, not bill). */
 function applySaleRestoreNet(
@@ -52,6 +63,8 @@ export class StoreService {
           id: i.id,
           name: i.name,
           unit: i.unit,
+          packUnit: i.packUnit,
+          unitsPerPack: toNumber(i.unitsPerPack),
           quantityOnHand: qty,
           ratePerUnit: rate,
           reorderLevel: reorder,
@@ -99,14 +112,71 @@ export class StoreService {
     };
   }
 
+  private mapItem(item: {
+    quantityOnHand: unknown;
+    ratePerUnit: unknown;
+    reorderLevel: unknown;
+    unitsPerPack: unknown;
+    [key: string]: unknown;
+  }) {
+    return {
+      ...item,
+      quantityOnHand: toNumber(item.quantityOnHand as never),
+      ratePerUnit: toNumber(item.ratePerUnit as never),
+      reorderLevel: toNumber(item.reorderLevel as never),
+      unitsPerPack: toNumber(item.unitsPerPack as never),
+    };
+  }
+
   async createItem(dto: CreateStoreItemDto) {
     const opening = Math.max(0, Number(dto.quantityOnHand ?? 0));
+    const pack = normalizePack(dto.packUnit, dto.unitsPerPack);
+    const name = dto.name.trim();
+    if (!name) throw new BadRequestException("Name required");
+
     return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.storeItem.findUnique({
+        where: { categoryId_name: { categoryId: dto.categoryId, name } },
+      });
+      if (existing?.active) {
+        throw new BadRequestException(`Item "${name}" already exists in this category`);
+      }
+
+      // Re-add after soft-delete: reactivate same row so recipes/history stay linked.
+      if (existing && !existing.active) {
+        const item = await tx.storeItem.update({
+          where: { id: existing.id },
+          data: {
+            unit: dto.unit,
+            packUnit: pack.packUnit,
+            unitsPerPack: pack.unitsPerPack,
+            quantityOnHand: opening,
+            ratePerUnit: dto.ratePerUnit ?? 0,
+            reorderLevel: dto.reorderLevel ?? 0,
+            active: true,
+          },
+        });
+        if (opening > 0) {
+          await tx.stockMovement.create({
+            data: {
+              storeItemId: item.id,
+              type: "IN",
+              quantity: opening,
+              ratePerUnit: dto.ratePerUnit ?? 0,
+              note: "Re-added · opening stock",
+            },
+          });
+        }
+        return this.mapItem(item);
+      }
+
       const item = await tx.storeItem.create({
         data: {
-          name: dto.name,
+          name,
           categoryId: dto.categoryId,
           unit: dto.unit,
+          packUnit: pack.packUnit,
+          unitsPerPack: pack.unitsPerPack,
           quantityOnHand: opening,
           ratePerUnit: dto.ratePerUnit ?? 0,
           reorderLevel: dto.reorderLevel ?? 0,
@@ -123,15 +193,77 @@ export class StoreService {
           },
         });
       }
-      return item;
+      return this.mapItem(item);
     });
   }
 
+  /** Soft-delete: hide from stock list. Same name can be re-added later. */
+  async deleteItem(id: string) {
+    const item = await this.prisma.storeItem.findUnique({ where: { id } });
+    if (!item || !item.active) throw new NotFoundException("Item not found");
+
+    const recipeLinks = await this.prisma.recipeIngredient.findMany({
+      where: { storeItemId: id, recipe: { active: true } },
+      include: { recipe: { select: { name: true } } },
+      take: 8,
+    });
+    const recipeNames = [...new Set(recipeLinks.map((r) => r.recipe.name))];
+
+    const updated = await this.prisma.storeItem.update({
+      where: { id },
+      data: { active: false },
+    });
+    return {
+      id: updated.id,
+      name: updated.name,
+      active: false,
+      usedInRecipes: recipeNames,
+    };
+  }
+
   async updateItem(id: string, dto: UpdateStoreItemDto) {
+    const current = await this.prisma.storeItem.findUnique({ where: { id } });
+    if (!current || !current.active) throw new NotFoundException("Item not found");
+
+    const data: {
+      name?: string;
+      ratePerUnit?: number;
+      reorderLevel?: number;
+      active?: boolean;
+      packUnit?: PackUnit;
+      unitsPerPack?: number;
+    } = {};
+
+    if (dto.name != null) {
+      const name = dto.name.trim();
+      if (!name) throw new BadRequestException("Name required");
+      if (name !== current.name) {
+        const clash = await this.prisma.storeItem.findUnique({
+          where: { categoryId_name: { categoryId: current.categoryId, name } },
+        });
+        if (clash && clash.id !== id) {
+          throw new BadRequestException(`Item "${name}" already exists in this category`);
+        }
+        data.name = name;
+      }
+    }
+
+    if (dto.ratePerUnit != null) data.ratePerUnit = dto.ratePerUnit;
+    if (dto.reorderLevel != null) data.reorderLevel = dto.reorderLevel;
+    if (dto.active !== undefined) data.active = dto.active;
+    if (dto.packUnit != null || dto.unitsPerPack != null) {
+      const pack = normalizePack(
+        dto.packUnit ?? current.packUnit,
+        dto.unitsPerPack ?? toNumber(current.unitsPerPack)
+      );
+      data.packUnit = pack.packUnit;
+      data.unitsPerPack = pack.unitsPerPack;
+    }
+
     try {
       return await this.prisma.storeItem.update({
         where: { id },
-        data: dto,
+        data,
       });
     } catch {
       throw new NotFoundException("Item not found");
@@ -331,6 +463,8 @@ export class StoreService {
         name: i.name,
         category: i.category.name,
         unit: i.unit,
+        packUnit: i.packUnit,
+        unitsPerPack: toNumber(i.unitsPerPack),
         quantityOnHand: toNumber(i.quantityOnHand),
         reorderLevel: toNumber(i.reorderLevel),
         ratePerUnit: toNumber(i.ratePerUnit),

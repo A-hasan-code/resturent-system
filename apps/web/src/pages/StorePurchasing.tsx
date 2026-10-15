@@ -1,7 +1,19 @@
 import { FormEvent, Fragment, useEffect, useMemo, useState } from "react";
-import { api, authBlobUrl, downloadApi, money, unitLabel, uploadApi } from "../api";
+import {
+  PACK_UNITS,
+  api,
+  authBlobUrl,
+  downloadApi,
+  hasPack,
+  money,
+  packUnitLabel,
+  unitLabel,
+  uploadApi,
+} from "../api";
 import { Modal } from "../components/Modal";
 import { useConfirm } from "../components/ConfirmModal";
+import { OtherPrintButton } from "../components/OtherPrintButton";
+import { SearchField, matchesSearch } from "../components/SearchField";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
 import { DateField } from "../components/DateField";
@@ -14,6 +26,8 @@ export type PurchaseItem = {
   name: string;
   category: string;
   unit: string;
+  packUnit?: string;
+  unitsPerPack?: number;
   ratePerUnit: number;
   quantityOnHand: number;
 };
@@ -81,7 +95,7 @@ type Ledger = SupplierRow & {
   payments: { id: string; paidOn: string; amount: number; note: string | null }[];
 };
 
-type DraftLine = { itemId: string; qty: string; rate: string };
+type DraftLine = { itemId: string; qty: string; rate: string; inPacks: boolean };
 
 type Cat = { id: string; code: string; name: string };
 
@@ -140,10 +154,12 @@ function BuyView({
   const [extraPaidBy, setExtraPaidBy] = useState<"SUPPLIER" | "SELF">("SELF");
   const [lineMode, setLineMode] = useState<"existing" | "new">("existing");
   const [filterCat, setFilterCat] = useState("");
-  const [pick, setPick] = useState("");
+  const [itemSearch, setItemSearch] = useState("");
   const [newItemName, setNewItemName] = useState("");
   const [newItemCat, setNewItemCat] = useState("");
   const [newItemUnit, setNewItemUnit] = useState<string>("KG");
+  const [newItemPackUnit, setNewItemPackUnit] = useState("NONE");
+  const [newItemUnitsPerPack, setNewItemUnitsPerPack] = useState("1");
   const [lines, setLines] = useState<DraftLine[]>([]);
   const [billFile, setBillFile] = useState<File | null>(null);
   const [billPreview, setBillPreview] = useState<string | null>(null);
@@ -181,10 +197,17 @@ function BuyView({
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [allItems, categories]);
 
-  const filteredItems = useMemo(
-    () => (filterCat ? allItems.filter((i) => i.category === filterCat) : allItems),
-    [allItems, filterCat]
-  );
+  const addedIds = useMemo(() => new Set(lines.map((l) => l.itemId)), [lines]);
+
+  const itemHits = useMemo(() => {
+    const q = itemSearch.trim();
+    if (!q) return [];
+    return allItems
+      .filter((i) => !addedIds.has(i.id))
+      .filter((i) => !filterCat || i.category === filterCat)
+      .filter((i) => matchesSearch(q, i.name, i.category, i.unit))
+      .slice(0, 12);
+  }, [allItems, addedIds, filterCat, itemSearch]);
 
   async function load() {
     const [s, r, cats] = await Promise.all([
@@ -239,11 +262,24 @@ function BuyView({
   function addLine(itemId: string, catalog = allItems) {
     const item = catalog.find((i) => i.id === itemId);
     if (!item) return;
+    const packed = hasPack(item.packUnit, item.unitsPerPack);
+    const per = Number(item.unitsPerPack) || 1;
+    const packRate = packed
+      ? Math.round(Number(item.ratePerUnit || 0) * per * 100) / 100
+      : Number(item.ratePerUnit || 0);
     setLines((prev) => {
       if (prev.some((l) => l.itemId === itemId)) return prev;
-      return [...prev, { itemId, qty: "", rate: String(item.ratePerUnit || "") }];
+      return [
+        ...prev,
+        {
+          itemId,
+          qty: "",
+          rate: String(packRate || ""),
+          inPacks: packed,
+        },
+      ];
     });
-    setPick("");
+    setItemSearch("");
   }
 
   async function addNewItemLine() {
@@ -258,10 +294,13 @@ function BuyView({
     }
     setBusy(true);
     try {
+      const packUnit = newItemPackUnit || "NONE";
       const created = await api<{
         id: string;
         name: string;
         unit: string;
+        packUnit?: string;
+        unitsPerPack?: number | string;
         ratePerUnit: number | string;
         quantityOnHand: number | string;
       }>("/store/items", {
@@ -270,6 +309,8 @@ function BuyView({
           name,
           categoryId: newItemCat,
           unit: newItemUnit,
+          packUnit,
+          unitsPerPack: packUnit === "NONE" ? 1 : Math.max(1, Number(newItemUnitsPerPack) || 1),
           quantityOnHand: 0,
           ratePerUnit: 0,
         }),
@@ -280,12 +321,16 @@ function BuyView({
         name: created.name,
         category: catName,
         unit: created.unit,
+        packUnit: created.packUnit || packUnit,
+        unitsPerPack: Number(created.unitsPerPack) || (packUnit === "NONE" ? 1 : Number(newItemUnitsPerPack) || 1),
         ratePerUnit: Number(created.ratePerUnit) || 0,
         quantityOnHand: Number(created.quantityOnHand) || 0,
       };
       setExtraItems((prev) => [...prev.filter((p) => p.id !== row.id), row]);
       addLine(row.id, [...allItems, row]);
       setNewItemName("");
+      setNewItemPackUnit("NONE");
+      setNewItemUnitsPerPack("1");
       toast.push(t("store.itemAdded"), "ok");
       onChanged();
     } catch (err) {
@@ -335,7 +380,12 @@ function BuyView({
       return;
     }
     const payload = lines
-      .map((l) => ({ storeItemId: l.itemId, quantity: Number(l.qty), ratePerUnit: Number(l.rate) }))
+      .map((l) => ({
+        storeItemId: l.itemId,
+        quantity: Number(l.qty),
+        ratePerUnit: Number(l.rate),
+        inPacks: l.inPacks || undefined,
+      }))
       .filter((l) => l.quantity > 0 && l.ratePerUnit >= 0);
     if (!payload.length) {
       toast.push(t("store.noLines"), "err");
@@ -533,35 +583,54 @@ function BuyView({
           </div>
 
           {lineMode === "existing" ? (
-            <div className="grid-2" style={{ marginTop: "0.6rem" }}>
-              <div className="field">
-                <label>{t("common.category")}</label>
-                <select
-                  value={filterCat}
-                  onChange={(e) => {
-                    setFilterCat(e.target.value);
-                    setPick("");
-                  }}
-                >
-                  <option value="">{t("store.allCategories")}</option>
-                  {categoryNames.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
+            <div style={{ marginTop: "0.6rem" }}>
+              <div className="grid-2">
+                <div className="field">
+                  <label>{t("common.category")}</label>
+                  <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)}>
+                    <option value="">{t("store.allCategories")}</option>
+                    {categoryNames.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>{t("store.addLine")}</label>
+                  <SearchField
+                    value={itemSearch}
+                    onChange={setItemSearch}
+                    placeholder={t("store.searchItemPh")}
+                  />
+                </div>
               </div>
-              <div className="field">
-                <label>{t("common.item")}</label>
-                <select value={pick} onChange={(e) => addLine(e.target.value)}>
-                  <option value="">{t("store.addLine")}</option>
-                  {filteredItems.map((i) => (
-                    <option key={i.id} value={i.id}>
-                      {i.name} · {money(i.ratePerUnit)}/{unitLabel(i.unit)}
-                    </option>
+              {itemSearch.trim() ? (
+                <div className="suggest-list">
+                  {itemHits.map((i) => (
+                    <button
+                      key={i.id}
+                      type="button"
+                      className="suggest-item"
+                      onClick={() => addLine(i.id)}
+                    >
+                      <strong>{i.name}</strong>
+                      <span className="tiny muted">
+                        {" "}
+                        · {i.category} · {money(i.ratePerUnit)}/{unitLabel(i.unit)}
+                        {hasPack(i.packUnit, i.unitsPerPack)
+                          ? ` · 1 ${packUnitLabel(i.packUnit)} = ${i.unitsPerPack} ${unitLabel(i.unit)}`
+                          : ""}
+                      </span>
+                    </button>
                   ))}
-                </select>
-              </div>
+                  {!itemHits.length ? (
+                    <div className="tiny muted" style={{ padding: "0.5rem 0.65rem" }}>
+                      {t("store.noItemMatch")}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           ) : (
             <div style={{ marginTop: "0.6rem" }}>
@@ -589,6 +658,29 @@ function BuyView({
                       </option>
                     ))}
                   </select>
+                </div>
+              </div>
+              <div className="grid-2">
+                <div className="field">
+                  <label>{t("store.packUnit")}</label>
+                  <select value={newItemPackUnit} onChange={(e) => setNewItemPackUnit(e.target.value)}>
+                    {PACK_UNITS.map((u) => (
+                      <option key={u} value={u}>
+                        {u === "NONE" ? t("store.packUnitNone") : packUnitLabel(u)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>{t("store.unitsPerPack")}</label>
+                  <input
+                    type="number"
+                    min={1}
+                    step="1"
+                    value={newItemUnitsPerPack}
+                    disabled={newItemPackUnit === "NONE"}
+                    onChange={(e) => setNewItemUnitsPerPack(e.target.value)}
+                  />
                 </div>
               </div>
               <div className="row" style={{ gap: "0.5rem", alignItems: "flex-end" }}>
@@ -628,13 +720,23 @@ function BuyView({
                 <tbody>
                   {lines.map((l) => {
                     const item = allItems.find((i) => i.id === l.itemId);
+                    const packed = Boolean(l.inPacks && item && hasPack(item.packUnit, item.unitsPerPack));
+                    const per = Number(item?.unitsPerPack) || 1;
                     const amount = (Number(l.qty) || 0) * (Number(l.rate) || 0);
+                    const stockQty = packed ? Number(((Number(l.qty) || 0) * per).toFixed(3)) : Number(l.qty) || 0;
                     return (
                       <tr key={l.itemId}>
                         <td data-label={t("common.item")}>
                           {item?.name}
                           <div className="tiny muted">
                             {item?.category} · {unitLabel(item?.unit || "")}
+                            {packed
+                              ? ` · ${t("store.packHint", {
+                                  pack: packUnitLabel(item?.packUnit),
+                                  n: String(per),
+                                  unit: unitLabel(item?.unit || ""),
+                                })}`
+                              : ""}
                           </div>
                         </td>
                         <td data-label={t("store.quantity")}>
@@ -648,6 +750,14 @@ function BuyView({
                               setLines((prev) => prev.map((p) => (p.itemId === l.itemId ? { ...p, qty: e.target.value } : p)))
                             }
                           />
+                          <div className="tiny muted">
+                            {packed
+                              ? `${t("store.qtyInPacks")} (${packUnitLabel(item?.packUnit)}) · ${t("store.stockEquals", {
+                                  n: String(stockQty),
+                                  unit: unitLabel(item?.unit || ""),
+                                })}`
+                              : unitLabel(item?.unit || "")}
+                          </div>
                         </td>
                         <td data-label={t("common.rate")}>
                           <input
@@ -660,6 +770,9 @@ function BuyView({
                               setLines((prev) => prev.map((p) => (p.itemId === l.itemId ? { ...p, rate: e.target.value } : p)))
                             }
                           />
+                          <div className="tiny muted">
+                            {packed ? t("store.ratePerPack") : `${t("common.rate")}/${unitLabel(item?.unit || "")}`}
+                          </div>
                         </td>
                         <td data-label={t("common.amount")} className="nowrap">
                           {money(amount)}
@@ -937,6 +1050,7 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
   const ask = useConfirm();
   const [rows, setRows] = useState<SupplierRow[]>([]);
   const [addOpen, setAddOpen] = useState(false);
+  const [editFor, setEditFor] = useState<SupplierRow | null>(null);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [supplyOf, setSupplyOf] = useState("");
@@ -968,6 +1082,21 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
     setSupplyOf("");
     setBrand("");
     setAddress("");
+  }
+
+  function openEdit(s: SupplierRow) {
+    setEditFor(s);
+    setName(s.name);
+    setPhone(s.phone || "");
+    setSupplyOf(s.supplyOf || "");
+    setBrand(s.brand || "");
+    setAddress(s.address || "");
+  }
+
+  function closeEdit() {
+    if (busy) return;
+    setEditFor(null);
+    resetAddForm();
   }
 
   async function load() {
@@ -1025,6 +1154,65 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
       await load();
     } catch (err) {
       toast.push(err instanceof Error ? err.message : t("common.failed"), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveEdit(e: FormEvent) {
+    e.preventDefault();
+    if (!editFor || !name.trim()) return;
+    setBusy(true);
+    try {
+      await api(`/store/suppliers/${editFor.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: name.trim(),
+          phone: phone.trim() || "",
+          supplyOf: supplyOf.trim() || "",
+          brand: brand.trim() || "",
+          address: address.trim() || "",
+        }),
+      });
+      toast.push(t("store.supplierUpdated"), "ok");
+      const id = editFor.id;
+      setEditFor(null);
+      resetAddForm();
+      await load();
+      if (ledger?.id === id) {
+        const next = await api<Ledger>(`/store/suppliers/${id}/ledger`);
+        setLedger(next);
+      }
+    } catch (err) {
+      toast.push(err instanceof Error ? err.message : t("common.failed"), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeSupplier(s: SupplierRow) {
+    if (s.outstanding > 0.009) {
+      toast.push(t("store.supplierDeleteBlocked", { amount: money(s.outstanding) }), "err");
+      return;
+    }
+    const ok = await ask({
+      title: t("store.supplierDeleteTitle"),
+      body: t("store.supplierDeleteBody", { name: s.name }),
+      danger: true,
+      confirmLabel: t("common.delete"),
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api(`/store/suppliers/${s.id}`, { method: "DELETE" });
+      toast.push(t("store.supplierDeleted"), "ok");
+      if (ledger?.id === s.id) {
+        setLedger(null);
+        setOpenBillId(null);
+      }
+      await load();
+    } catch (err) {
+      toast.push(err instanceof Error ? err.message : t("store.supplierDeleteFailed"), "err");
     } finally {
       setBusy(false);
     }
@@ -1175,6 +1363,51 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
         </form>
       </Modal>
 
+      <Modal open={!!editFor} title={t("store.editSupplier")} onClose={closeEdit} size="md">
+        <form onSubmit={saveEdit}>
+          <div className="modal-scroll">
+            <div className="field">
+              <label>{t("store.supplierName")}</label>
+              <input value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
+            </div>
+            <div className="field">
+              <label>{t("store.supplierSupplyOf")}</label>
+              <input
+                value={supplyOf}
+                onChange={(e) => setSupplyOf(e.target.value)}
+                placeholder={t("store.supplierSupplyOfPh")}
+              />
+            </div>
+            <div className="grid-2">
+              <div className="field">
+                <label>{t("store.supplierBrand")}</label>
+                <input value={brand} onChange={(e) => setBrand(e.target.value)} placeholder={t("store.supplierBrandPh")} />
+              </div>
+              <div className="field">
+                <label>{t("store.phone")}</label>
+                <input value={phone} onChange={(e) => setPhone(e.target.value)} />
+              </div>
+            </div>
+            <div className="field">
+              <label>{t("store.supplierAddress")}</label>
+              <input
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                placeholder={t("store.supplierAddressPh")}
+              />
+            </div>
+          </div>
+          <div className="form-actions">
+            <button className="btn" type="submit" disabled={busy || !name.trim()}>
+              {busy ? t("common.saving") : t("common.save")}
+            </button>
+            <button type="button" className="btn ghost" disabled={busy} onClick={closeEdit}>
+              {t("common.cancel")}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
       {!rows.length && (
         <div className="panel panel-pad">
           <div className="empty">{t("store.noSuppliers")}</div>
@@ -1203,6 +1436,11 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                   <button type="button" className="btn ghost sm" onClick={() => void openLedger(s.id)}>
                     {t("store.ledger")}
                   </button>
+                  {canManage && (
+                    <button type="button" className="btn ghost sm" disabled={busy} onClick={() => openEdit(s)}>
+                      {t("common.edit")}
+                    </button>
+                  )}
                   {canManage && s.outstanding > 0 && (
                     <button
                       type="button"
@@ -1215,6 +1453,21 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                       }}
                     >
                       {t("store.recordPayment")}
+                    </button>
+                  )}
+                  {canManage && (
+                    <button
+                      type="button"
+                      className="btn danger sm"
+                      disabled={busy || s.outstanding > 0.009}
+                      title={
+                        s.outstanding > 0.009
+                          ? t("store.supplierDeleteBlocked", { amount: money(s.outstanding) })
+                          : t("store.supplierDeleteTitle")
+                      }
+                      onClick={() => void removeSupplier(s)}
+                    >
+                      {t("common.delete")}
                     </button>
                   )}
                 </div>
@@ -1264,6 +1517,11 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
               <button type="button" className="btn sm" disabled={pdfBusy} onClick={() => void downloadLedgerPdf()}>
                 {pdfBusy ? t("common.loading") : t("store.downloadLedgerPdf")}
               </button>
+              <OtherPrintButton
+                path={`/store/suppliers/${ledger.id}/ledger/print`}
+                className="btn ghost sm"
+                disabled={pdfBusy}
+              />
               <button
                 type="button"
                 className="btn ghost sm"

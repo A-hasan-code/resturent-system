@@ -5,6 +5,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   Min,
   MinLength,
   ValidateNested,
@@ -12,7 +13,6 @@ import {
 import { Type } from "class-transformer";
 
 const SELL_MODES = ["BOTH", "SERVING_ONLY", "RS_ONLY"] as const;
-const STATIONS = ["BEVERAGES", "COOKING", "BBQ"] as const;
 
 export class CreateSpecialProductDto {
   @IsString()
@@ -38,6 +38,13 @@ export class CreateSpecialProductDto {
   @Type(() => Number)
   platePrice!: number;
 
+  /** Separate half-plate Rs. Omit / null = full only. */
+  @IsNumber()
+  @Min(0.01)
+  @IsOptional()
+  @Type(() => Number)
+  halfPlatePrice?: number | null;
+
   @IsNumber()
   @Min(0.001)
   @Type(() => Number)
@@ -47,9 +54,10 @@ export class CreateSpecialProductDto {
   @MinLength(1)
   cookRecipeId!: string;
 
-  @IsIn(STATIONS)
+  @IsString()
+  @MinLength(1)
   @IsOptional()
-  kitchenStation?: (typeof STATIONS)[number];
+  kitchenStation?: string;
 }
 
 export class UpdateSpecialProductDto {
@@ -77,6 +85,12 @@ export class UpdateSpecialProductDto {
   platePrice?: number;
 
   @IsNumber()
+  @Min(0.01)
+  @IsOptional()
+  @Type(() => Number)
+  halfPlatePrice?: number | null;
+
+  @IsNumber()
   @Min(0.001)
   @IsOptional()
   plateGrams?: number;
@@ -85,23 +99,57 @@ export class UpdateSpecialProductDto {
   @IsString()
   cookRecipeId?: string | null;
 
-  @IsIn(STATIONS)
+  @IsString()
+  @MinLength(1)
   @IsOptional()
-  kitchenStation?: (typeof STATIONS)[number];
+  kitchenStation?: string;
 
   @IsOptional()
   active?: boolean;
+}
+
+export class CookIngredientLineDto {
+  @IsString()
+  @MinLength(1)
+  storeItemId!: string;
+
+  /** Amount put into the pot today (in `unit`). */
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  quantity!: number;
+
+  @IsIn(["KG", "G", "L", "ML", "PCS"])
+  unit!: "KG" | "G" | "L" | "ML" | "PCS";
 }
 
 export class CookBatchDto {
   @IsString()
   specialProductId!: string;
 
-  /** Newly cooked today, in grams. */
+  /** Finished pot weight after cook, in grams. */
   @Type(() => Number)
   @IsNumber()
   @Min(0.001)
   cookedGrams!: number;
+
+  /** Actual ingredients put in today — kitchen stock deducts these (not recipe×cooked kg). */
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => CookIngredientLineDto)
+  ingredients!: CookIngredientLineDto[];
+
+  /** Business day YYYY-MM-DD this cook belongs to (after day-start / post-close → new date). */
+  @IsString()
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  businessDate?: string;
+
+  /** Optional local cook timestamp ISO string (audit only). */
+  @IsString()
+  @IsOptional()
+  cookedAt?: string;
 
   @IsString()
   @IsOptional()
@@ -136,6 +184,12 @@ export class SaveBatchCloseDto {
   @ValidateNested({ each: true })
   @Type(() => BatchCloseLineDto)
   lines!: BatchCloseLineDto[];
+
+  /** Edit leftover for this business day (default = current). Must not be cash-locked. */
+  @IsString()
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  businessDate?: string;
 
   @IsString()
   @IsOptional()

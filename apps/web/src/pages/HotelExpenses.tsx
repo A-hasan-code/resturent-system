@@ -7,6 +7,7 @@ import { DateField } from "../components/DateField";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 import { downloadExcelCsv } from "../csv";
+import { useBusinessDay, useShiftOpen } from "../hotel-gate";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
 
@@ -115,6 +116,9 @@ export function HotelExpensesPage() {
   const { can } = useAuth();
   const confirm = useConfirm();
   const canManage = can("expense.manage");
+  const shiftOpen = useShiftOpen();
+  const { businessDate } = useBusinessDay();
+  const canEditShift = canManage && shiftOpen;
   const month = monthRange();
   const [rangeMode, setRangeMode] = useState<RangeMode>("monthly");
   const [from, setFrom] = useState(month.from);
@@ -129,7 +133,7 @@ export function HotelExpensesPage() {
   const [edit, setEdit] = useState<ExpenseRow | null>(null);
   const [newCatName, setNewCatName] = useState("");
 
-  const [spentOn, setSpentOn] = useState(isoDay(new Date()));
+  const [spentOn, setSpentOn] = useState(businessDate);
   const [category, setCategory] = useState("");
   const [title, setTitle] = useState("");
   const [amount, setAmount] = useState("");
@@ -165,9 +169,8 @@ export function HotelExpensesPage() {
   function applyRange(mode: RangeMode) {
     setRangeMode(mode);
     if (mode === "daily") {
-      const d = isoDay(new Date());
-      setFrom(d);
-      setTo(d);
+      setFrom(businessDate);
+      setTo(businessDate);
     } else if (mode === "monthly") {
       const r = monthRange();
       setFrom(r.from);
@@ -180,7 +183,7 @@ export function HotelExpensesPage() {
   }
 
   function resetForm() {
-    setSpentOn(isoDay(new Date()));
+    setSpentOn(businessDate);
     setCategory("");
     setTitle("");
     setAmount("");
@@ -345,13 +348,14 @@ export function HotelExpensesPage() {
               {t("expense.manageCategories")}
             </button>
           )}
-          {canManage && (
+          {canEditShift && (
             <button type="button" className="btn" onClick={openAdd}>
               + {t("expense.add")}
             </button>
           )}
         </div>
       </div>
+      {!shiftOpen && <p className="muted tiny" style={{ marginTop: "-0.5rem" }}>{t("hotel.shiftEnded")}</p>}
 
       <div className="panel panel-pad filter-panel">
         <div className="filter-bar">
@@ -497,7 +501,7 @@ export function HotelExpensesPage() {
                   <th>{t("store.amount")}</th>
                   <th>{t("expense.note")}</th>
                   <th>{t("expense.addedBy")}</th>
-                  {canManage && <th />}
+                  {canEditShift && <th />}
                 </tr>
               </thead>
               <tbody>
@@ -519,7 +523,7 @@ export function HotelExpensesPage() {
                     </td>
                     <td className="tiny muted">{r.note || "—"}</td>
                     <td className="tiny muted">{r.createdBy?.name || "—"}</td>
-                    {canManage && (
+                    {canEditShift && (
                       <td>
                         {r.editable ? (
                           <div className="row">

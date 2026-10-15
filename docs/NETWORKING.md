@@ -104,6 +104,8 @@ flowchart TD
 
 The new address is saved to `%APPDATA%\Hotel System\config.json`. The menu has **Reconnect to server** (run discovery now) and **Change server…** (forget the saved server and pin a new one).
 
+After connecting, the packaged desktop app compares its local `VERSION` to the server. If the server is newer and `/downloads/desktop-update.zip` is present, it downloads the package over the LAN and replaces the install (Windows UAC once). The UI itself is always loaded from the server URL, so screens update even before the shell update finishes.
+
 ### Browser / tablet (PWA)
 
 Browsers cannot send UDP or mDNS queries, so the web client uses HTTP probes only (`apps/web/src/server.ts`):

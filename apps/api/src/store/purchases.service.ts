@@ -3,7 +3,7 @@ import { ExtraExpensePaidBy, Prisma } from "@prisma/client";
 import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "fs";
 import { extname, join } from "path";
 import { PrismaService } from "../prisma/prisma.service";
-import { toNumber } from "../common/units";
+import { toNumber, unpackPurchase } from "../common/units";
 import { dataDir } from "../config/env";
 import { SettingsService } from "../system/settings.service";
 import { CreatePurchaseDto, CreateSupplierDto, SupplierPaymentDto, UpdateSupplierDto } from "./dto";
@@ -181,6 +181,14 @@ export class PurchasesService {
   }
 
   async updateSupplier(id: string, dto: UpdateSupplierDto) {
+    const existing = await this.prisma.supplier.findUnique({ where: { id } });
+    if (!existing || !existing.active) throw new NotFoundException("Supplier not found");
+
+    // Deactivate only through deleteSupplier (balance must be zero).
+    if (dto.active === false) {
+      return this.deleteSupplier(id);
+    }
+
     try {
       const row = await this.prisma.supplier.update({
         where: { id },
@@ -191,7 +199,6 @@ export class PurchasesService {
           ...(dto.brand !== undefined ? { brand: dto.brand.trim() || null } : {}),
           ...(dto.address !== undefined ? { address: dto.address.trim() || null } : {}),
           ...(dto.notes !== undefined ? { notes: dto.notes.trim() || null } : {}),
-          ...(dto.active !== undefined ? { active: dto.active } : {}),
         },
       });
       return {
@@ -201,11 +208,46 @@ export class PurchasesService {
         supplyOf: row.supplyOf,
         brand: row.brand,
         address: row.address,
+        notes: row.notes,
         active: row.active,
       };
     } catch {
       throw new NotFoundException("Supplier not found");
     }
+  }
+
+  /** Soft-delete: only when supplier account balance is cleared (nothing due). */
+  async deleteSupplier(id: string) {
+    await this.prisma.$transaction((tx) => allocateUnappliedPayments(tx, id));
+
+    const supplier = await this.prisma.supplier.findUnique({
+      where: { id },
+      include: {
+        purchases: {
+          select: {
+            total: true,
+            paidAmount: true,
+            extraExpense: true,
+            extraExpensePaidBy: true,
+            voidedAt: true,
+          },
+        },
+      },
+    });
+    if (!supplier || !supplier.active) throw new NotFoundException("Supplier not found");
+
+    const bal = supplierBalance(supplier.purchases);
+    if (bal.outstanding > 0.009) {
+      throw new BadRequestException(
+        `Cannot delete supplier while Rs ${bal.outstanding.toFixed(0)} is still due — clear the account first`
+      );
+    }
+
+    await this.prisma.supplier.update({
+      where: { id },
+      data: { active: false },
+    });
+    return { id, deleted: true, name: supplier.name };
   }
 
   async ledger(id: string) {
@@ -276,20 +318,30 @@ export class PurchasesService {
     const supplier = await this.prisma.supplier.findUnique({ where: { id: dto.supplierId } });
     if (!supplier || !supplier.active) throw new NotFoundException("Supplier not found");
 
-    const merged = new Map<string, { quantity: number; ratePerUnit: number }>();
-    for (const line of dto.lines) {
-      const prev = merged.get(line.storeItemId);
-      merged.set(line.storeItemId, {
-        quantity: (prev?.quantity ?? 0) + line.quantity,
-        ratePerUnit: line.ratePerUnit,
-      });
-    }
-
+    const itemIds = [...new Set(dto.lines.map((l) => l.storeItemId))];
     const items = await this.prisma.storeItem.findMany({
-      where: { id: { in: [...merged.keys()] }, active: true },
+      where: { id: { in: itemIds }, active: true },
       include: { category: true },
     });
-    if (items.length !== merged.size) throw new BadRequestException("One or more items are not in inventory");
+    if (items.length !== itemIds.length) throw new BadRequestException("One or more items are not in inventory");
+    const byId = new Map(items.map((i) => [i.id, i]));
+
+    const merged = new Map<string, { quantity: number; ratePerUnit: number }>();
+    for (const line of dto.lines) {
+      const item = byId.get(line.storeItemId)!;
+      const unpacked = unpackPurchase(
+        line.quantity,
+        line.ratePerUnit,
+        item.packUnit,
+        toNumber(item.unitsPerPack),
+        Boolean(line.inPacks)
+      );
+      const prev = merged.get(line.storeItemId);
+      merged.set(line.storeItemId, {
+        quantity: (prev?.quantity ?? 0) + unpacked.quantity,
+        ratePerUnit: unpacked.ratePerUnit,
+      });
+    }
 
     const lineRows = items.map((item) => {
       const draft = merged.get(item.id)!;

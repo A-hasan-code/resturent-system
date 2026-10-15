@@ -2,7 +2,9 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException 
 import { PaymentMethod, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { RealtimeService } from "../realtime/realtime.service";
+import { SettingsService } from "../system/settings.service";
 import { AuthUser } from "../common/decorators";
+import { businessQueryRange } from "../common/business-day";
 import { toNumber } from "../common/units";
 
 export type PaymentFilter = {
@@ -38,11 +40,6 @@ type FullPayment = Prisma.PaymentGetPayload<{ include: typeof paymentInclude }>;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const METHODS = new Set<string>(["CASH", "CARD", "WALLET", "BANK"]);
 
-function dayStart(d: string) {
-  if (!DATE.test(d)) throw new BadRequestException("Dates must be YYYY-MM-DD");
-  return new Date(`${d}T00:00:00`);
-}
-
 function money2(n: number) {
   return Math.round(n * 100) / 100;
 }
@@ -51,8 +48,21 @@ function money2(n: number) {
 export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly realtime: RealtimeService
+    private readonly realtime: RealtimeService,
+    private readonly settings: SettingsService
   ) {}
+
+  /** Inclusive business-day range → [from, to) using restaurant day-start (same as Close / Bills pad). */
+  private async businessRange(fromStr?: string, toStr?: string) {
+    if (!fromStr && !toStr) return null;
+    if (fromStr && !DATE.test(fromStr)) throw new BadRequestException("Dates must be YYYY-MM-DD");
+    if (toStr && !DATE.test(toStr)) throw new BadRequestException("Dates must be YYYY-MM-DD");
+    const start = await this.settings.dayStart();
+    const fromDay = fromStr || toStr!;
+    const toDay = toStr || fromStr!;
+    const range = businessQueryRange(fromDay, toDay, start.h, start.m);
+    return { gte: range.gte, lt: range.lt, dayStart: start.label };
+  }
 
   /** People a manager can hand collected cash to. */
   async cashiers() {
@@ -124,13 +134,10 @@ export class PaymentsService {
   }
 
   async list(f: PaymentFilter) {
-    const createdAt: Prisma.DateTimeFilter = {};
-    if (f.from) createdAt.gte = dayStart(f.from);
-    if (f.to) {
-      const end = dayStart(f.to);
-      end.setDate(end.getDate() + 1);
-      createdAt.lt = end;
-    }
+    const range = await this.businessRange(f.from, f.to);
+    const createdAt: Prisma.DateTimeFilter | undefined = range
+      ? { gte: range.gte, lt: range.lt }
+      : undefined;
 
     const method =
       f.method && f.method !== "ALL" && METHODS.has(f.method) ? (f.method as PaymentMethod) : undefined;
@@ -138,7 +145,7 @@ export class PaymentsService {
     const statusImpliesCash = !!f.status;
 
     const where: Prisma.PaymentWhereInput = {
-      ...(f.from || f.to ? { createdAt } : {}),
+      ...(createdAt ? { createdAt } : {}),
       ...(method ? { method } : statusImpliesCash ? { method: PaymentMethod.CASH } : {}),
       ...(f.status === "direct" ? { handedToId: null } : {}),
       ...(f.status === "pending" ? { handedToId: { not: null }, confirmedAt: null } : {}),
@@ -166,6 +173,7 @@ export class PaymentsService {
       BANK: sumAmt(list.filter((p) => p.method === "BANK")),
     };
 
+    const day = await this.settings.dayStart();
     return {
       rows: list,
       summary: {
@@ -182,6 +190,10 @@ export class PaymentsService {
         pendingCount: handed.filter((p) => !p.confirmedAt).length,
         creditSettlements: sumAmt(list.filter((p) => p.isCredit)),
       },
+      /** Same clock as Close report — UI should label pickers as business day. */
+      dayStart: day.label,
+      from: f.from ?? null,
+      to: f.to ?? null,
     };
   }
 

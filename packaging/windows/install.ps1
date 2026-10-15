@@ -21,11 +21,16 @@ $StartMenu = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\H
 
 New-Item -ItemType Directory -Force -Path $DataDir, $LogDir | Out-Null
 $LogFile = Join-Path $LogDir "install.log"
+$LastErrorFile = Join-Path $LogDir "last-error.txt"
 
 function Log([string]$msg) {
   $line = "[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $msg
   Add-Content -Path $LogFile -Value $line
   Write-Host $line
+}
+
+function Write-LastError([string]$msg) {
+  Set-Content -Path $LastErrorFile -Value $msg -Encoding ascii
 }
 
 # Runs a native exe, logs its output, throws on non-zero exit (unless -AllowFail).
@@ -167,6 +172,23 @@ function Wait-Until([scriptblock]$test, [int]$seconds, [string]$what) {
   throw "Timed out waiting for $what"
 }
 
+function Stop-HotelService([string]$name) {
+  $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+  if (-not $svc) { return }
+  if ($svc.Status -eq "Stopped") { return }
+  try {
+    Stop-Service -Name $name -Force -ErrorAction Stop
+  } catch {
+    Run "sc.exe" @("stop", $name) -AllowFail | Out-Null
+  }
+  $deadline = (Get-Date).AddSeconds(20)
+  while ((Get-Date) -lt $deadline) {
+    $s = Get-Service -Name $name -ErrorAction SilentlyContinue
+    if (-not $s -or $s.Status -eq "Stopped") { return }
+    Start-Sleep -Seconds 1
+  }
+}
+
 function Install-DesktopFirewall {
   # Support current and older desktop exe names after product rename.
   $candidates = @(
@@ -205,6 +227,11 @@ foreach ($p in $Node, (Join-Path $PgBin "postgres.exe"), (Join-Path $ApiDir "dis
 $old = Read-EnvFile $EnvFile
 $pgData = Join-Path $DataDir "pgdata"
 $freshDb = -not (Test-Path (Join-Path $pgData "PG_VERSION"))
+if ($freshDb) {
+  Log "Mode: FRESH install (new database cluster)"
+} else {
+  Log "Mode: IN-PLACE UPGRADE (existing pgdata kept; seed will be skipped)"
+}
 
 $dbPassword = if ($old.DB_PASSWORD) { $old.DB_PASSWORD } else { New-Secret 28 }
 $jwtSecret = if ($old.JWT_SECRET) { $old.JWT_SECRET } else { New-Secret 48 }
@@ -216,6 +243,9 @@ if (-not $freshDb -and -not $old.DB_PASSWORD) {
   throw "Database exists at $pgData but $EnvFile is missing. Restore hotel.env (or move pgdata away for a clean install)."
 }
 
+# Windows services often run as UTC (LocalSystem). Without TZ, business-day filters
+# miss today's bills/dashboard on installed servers. Keep prior value on upgrade.
+$tz = if ($old.TZ) { $old.TZ } else { "Asia/Karachi" }
 @(
   "# Hotel System server config. Written by the installer; secrets and ports are kept on upgrade."
   "PORT=$httpPort"
@@ -226,6 +256,7 @@ if (-not $freshDb -and -not $old.DB_PASSWORD) {
   "HOTEL_DATA_DIR=$DataDir"
   "PG_BIN=$PgBin"
   "NODE_ENV=production"
+  "TZ=$tz"
 ) | Set-Content -Path $EnvFile -Encoding ascii
 Run "icacls.exe" @($EnvFile, "/inheritance:r", "/grant:r", "*S-1-5-32-544:F", "*S-1-5-18:F") | Out-Null
 Log "Config: $EnvFile (web port $httpPort, database port $pgPort)"
@@ -271,19 +302,51 @@ $autoConf = Join-Path $pgData "postgresql.auto.conf"
 Run "icacls.exe" @($pgData, "/grant", "${networkService}:(OI)(CI)F", "/T", "/Q") | Out-Null
 
 $pgCtl = Join-Path $PgBin "pg_ctl.exe"
-if (Get-Service -Name $DbService -ErrorAction SilentlyContinue) {
-  Run $pgCtl @("unregister", "-N", $DbService) -AllowFail | Out-Null
-  Wait-Until { -not (Get-Service -Name $DbService -ErrorAction SilentlyContinue) } 30 "old database service removal"
+# Upgrades: keep existing DB service (stop/start only). Unregister+register causes
+# Windows 1072 "marked for deletion" timeouts when Services.msc holds a handle.
+$dbSvc = Get-Service -Name $DbService -ErrorAction SilentlyContinue
+if ($dbSvc) {
+  Log "Database service already installed - updating config (no unregister)"
+  Stop-HotelService $DbService
+} else {
+  Run $pgCtl @("register", "-N", $DbService, "-U", "NT AUTHORITY\NetworkService", "-D", $pgData, "-S", "auto", "-w") | Out-Null
 }
-Run $pgCtl @("register", "-N", $DbService, "-U", "NT AUTHORITY\NetworkService", "-D", $pgData, "-S", "auto", "-w") | Out-Null
-Run "sc.exe" @("config", $DbService, "DisplayName=", "Hotel System Database") | Out-Null
-Run "sc.exe" @("description", $DbService, "PostgreSQL database for Hotel System (localhost only)") | Out-Null
-Run "sc.exe" @("failure", $DbService, "reset=", "3600", "actions=", "restart/5000/restart/15000/restart/60000") | Out-Null
+Run "sc.exe" @("config", $DbService, "DisplayName=", "Hotel System Database") -AllowFail | Out-Null
+Run "sc.exe" @("description", $DbService, "PostgreSQL database for Hotel System (localhost only)") -AllowFail | Out-Null
+Run "sc.exe" @("failure", $DbService, "reset=", "3600", "actions=", "restart/5000/restart/15000/restart/60000") -AllowFail | Out-Null
 
 Log "Starting database"
-Start-Service -Name $DbService
+try {
+  Start-Service -Name $DbService -ErrorAction Stop
+} catch {
+  $msg = $_.Exception.Message
+  $pgLogDir = Join-Path $pgData "log"
+  $tail = "(no postgres log yet)"
+  if (Test-Path $pgLogDir) {
+    $latest = Get-ChildItem $pgLogDir -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($latest) { $tail = (Get-Content $latest.FullName -Tail 25) -join "`n" }
+  }
+  if ($msg -match "1072|marked for deletion|cannot be started") {
+    throw @"
+Could not start Hotel System Database ($DbService): $msg
+
+Windows still has this service marked for deletion from a previous Setup.
+1. Close services.msc if open
+2. Restart the PC
+3. Run HotelSystem-Setup again as Administrator
+
+Data in C:\ProgramData\HotelSystem is kept.
+$tail
+"@
+  }
+  throw "Could not start Hotel System Database service: $msg`n$tail"
+}
 $pgIsReady = Join-Path $PgBin "pg_isready.exe"
-Wait-Until { & $pgIsReady -h 127.0.0.1 -p $pgPort -q; $LASTEXITCODE -eq 0 } 60 "database to accept connections"
+try {
+  Wait-Until { & $pgIsReady -h 127.0.0.1 -p $pgPort -q; $LASTEXITCODE -eq 0 } 60 "database to accept connections"
+} catch {
+  throw "Database did not accept connections on port $pgPort within 60s. See $LogFile and $pgData\log"
+}
 
 $env:PGPASSWORD = $dbPassword
 $exists = & (Join-Path $PgBin "psql.exe") -h 127.0.0.1 -p $pgPort -U $DbUser -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$DbName'"
@@ -307,7 +370,7 @@ if (-not $freshDb) {
       "-h", "127.0.0.1", "-p", "$pgPort", "-U", $DbUser, $DbName
     ) -AllowFail
     if ($dump.Code -ne 0 -or -not (Test-Path $preUpgrade) -or ((Get-Item $preUpgrade).Length -lt 8192)) {
-      throw "Pre-upgrade backup failed or too small — aborting upgrade so restaurant data stays safe. See $LogFile"
+      throw "Pre-upgrade backup failed or too small - aborting upgrade so restaurant data stays safe. See $LogFile"
     }
     Log "Pre-upgrade backup OK ($([math]::Round((Get-Item $preUpgrade).Length / 1KB)) KB)"
   } finally {
@@ -315,13 +378,32 @@ if (-not $freshDb) {
   }
 }
 
-# --- Schema (+ seed only on first install; never wipe a live hotel on upgrade) -
+# --- Schema (+ seed only when empty; never re-seed a live hotel on upgrade) -
 $env:DATABASE_URL = $databaseUrl
 $env:CHECKPOINT_DISABLE = "1"
 $env:PRISMA_HIDE_UPDATE_MESSAGE = "1"
 Invoke-PrismaMigrateDeploy $Node $ApiDir
-if ($freshDb) {
-  Log "Fresh install: seeding demo catalog and users"
+
+# Fresh cluster OR incomplete first install (pgdata exists but no users yet).
+# Live hotels always have users - never auto-seed on upgrade.
+$shouldSeed = $freshDb
+if (-not $shouldSeed) {
+  $env:PGPASSWORD = $dbPassword
+  try {
+    $userCount = & (Join-Path $PgBin "psql.exe") -h 127.0.0.1 -p $pgPort -U $DbUser -d $DbName -tAc 'SELECT COUNT(*)::int FROM "User"'
+    if ($LASTEXITCODE -eq 0 -and "$userCount".Trim() -eq "0") {
+      Log "Existing database has 0 users (incomplete first install) - will seed once"
+      $shouldSeed = $true
+    }
+  } catch {
+    Log "WARN: could not count users (continuing without seed): $($_.Exception.Message)"
+  } finally {
+    Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+  }
+}
+
+if ($shouldSeed) {
+  Log "First-time seed: demo catalog and users"
   Run $Node @("node_modules\tsx\dist\cli.mjs", "prisma\seed.ts") $ApiDir | Out-Null
 } else {
   Log "Upgrade: skipping seed (existing restaurant data kept)"
@@ -338,6 +420,7 @@ $xml = @"
   <workingdirectory>$ApiDir</workingdirectory>
   <env name="HOTEL_ENV_FILE" value="$EnvFile"/>
   <env name="NODE_ENV" value="production"/>
+  <env name="TZ" value="$tz"/>
   <depend>$DbService</depend>
   <startmode>Automatic</startmode>
   <onfailure action="restart" delay="5 sec"/>
@@ -353,19 +436,54 @@ $xml = @"
 </service>
 "@
 $xmlPath = [IO.Path]::ChangeExtension($WinSw, ".xml")
-Set-Content -Path $xmlPath -Value $xml -Encoding utf8
+# WinSW rejects UTF-8 BOM from Windows PowerShell Set-Content -Encoding utf8
+[IO.File]::WriteAllText($xmlPath, $xml, [Text.UTF8Encoding]::new($false))
 
-if (Get-Service -Name $ApiService -ErrorAction SilentlyContinue) {
-  Run $WinSw @("uninstall") -AllowFail | Out-Null
-  Wait-Until { -not (Get-Service -Name $ApiService -ErrorAction SilentlyContinue) } 30 "old server service removal"
+# Same as DB: avoid uninstall/reinstall on upgrade (1072 marked-for-delete).
+$apiSvc = Get-Service -Name $ApiService -ErrorAction SilentlyContinue
+if ($apiSvc) {
+  Log "API service already installed - refreshing config (no uninstall)"
+  Stop-HotelService $ApiService
+  Run $WinSw @("refresh") -AllowFail | Out-Null
+} else {
+  Run $WinSw @("install") | Out-Null
 }
-Run $WinSw @("install") | Out-Null
 Log "Starting server"
-Start-Service -Name $ApiService
+try {
+  Start-Service -Name $ApiService -ErrorAction Stop
+} catch {
+  $msg = $_.Exception.Message
+  $errLog = Join-Path $LogDir "$ApiService.err.log"
+  $tail = if (Test-Path $errLog) { (Get-Content $errLog -Tail 20) -join "`n" } else { "(no $ApiService.err.log yet)" }
+  if ($msg -match "1072|marked for deletion|cannot be started") {
+    throw @"
+Could not start Hotel System Server ($ApiService): $msg
 
-Wait-Until {
-  try { (Invoke-RestMethod -Uri "http://127.0.0.1:$httpPort/api/health" -TimeoutSec 3).ok -eq $true } catch { $false }
-} 120 "server health check (see $LogDir\$ApiService.err.log)"
+Windows still has this service marked for deletion from a previous Setup.
+1. Close services.msc if open
+2. Restart the PC
+3. Run HotelSystem-Setup again as Administrator
+
+Data in C:\ProgramData\HotelSystem is kept.
+$tail
+"@
+  }
+  throw "Could not start Hotel System Server service: $msg`n$tail"
+}
+
+try {
+  Wait-Until {
+    try { (Invoke-RestMethod -Uri "http://127.0.0.1:$httpPort/api/health" -TimeoutSec 3).ok -eq $true } catch { $false }
+  } 120 "server health check"
+} catch {
+  $errLog = Join-Path $LogDir "$ApiService.err.log"
+  $outLog = Join-Path $LogDir "$ApiService.out.log"
+  $bits = @()
+  if (Test-Path $errLog) { $bits += "--- $ApiService.err.log ---"; $bits += (Get-Content $errLog -Tail 30) }
+  if (Test-Path $outLog) { $bits += "--- $ApiService.out.log ---"; $bits += (Get-Content $outLog -Tail 20) }
+  $detail = if ($bits.Count) { $bits -join "`n" } else { "No service logs yet. See $LogFile" }
+  throw "Server did not become healthy on port $httpPort within 120s.`n$detail"
+}
 Log "Server is up on port $httpPort"
 
 # --- Firewall ----------------------------------------------------------------
@@ -385,8 +503,18 @@ Set-Content -Path (Join-Path $StartMenu "Hotel System (Browser).url") -Encoding 
 )
 
 $urls = @(Get-LanAddresses | ForEach-Object { "http://${_}:$httpPort" })
+$upgradeNote = if ($freshDb) {
+  @("First-time install complete. Change the demo admin password after login.")
+} else {
+  @(
+    "UPDATE complete. Restaurant data was kept (menu, orders, stock, users)."
+    "Pre-upgrade backup (if taken): $DataDir\backups\hotel-*-pre-upgrade.dump"
+  )
+}
 $summary = @(
   "Hotel System server is running."
+  ""
+) + $upgradeNote + @(
   ""
   "On tablets / phones (same Wi-Fi), open one of these addresses:"
 ) + ($urls | ForEach-Object { "  $_" }) + @(
@@ -398,8 +526,18 @@ $summary | Set-Content -Path (Join-Path $DataDir "server-info.txt") -Encoding as
 Log "Setup complete. URLs: $($urls -join ', ')"
 
 } catch {
-  Log "FATAL: $($_.Exception.Message)"
+  $fatal = $_.Exception.Message
+  Log "FATAL: $fatal"
   if ($_.ScriptStackTrace) { Log $_.ScriptStackTrace }
+  Write-LastError @"
+Hotel System server setup failed:
+
+$fatal
+
+Full log:
+$LogFile
+"@
   throw
 }
+Remove-Item $LastErrorFile -Force -ErrorAction SilentlyContinue
 exit 0

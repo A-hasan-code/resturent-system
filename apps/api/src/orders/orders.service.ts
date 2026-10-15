@@ -15,6 +15,7 @@ import {
   EditOrderDto,
   OrderLineDto,
   PayOrderDto,
+  PutOnCreditDto,
   UpdateOrderDto,
   UpdateStatusDto,
 } from "./dto";
@@ -23,13 +24,29 @@ import { SettingsService } from "../system/settings.service";
 import { SpecialsService } from "../specials/specials.service";
 import { FinanceService } from "../finance/finance.service";
 import { PaymentMethod } from "@prisma/client";
+import { businessQueryRange } from "../common/business-day";
+import { itemPrepMinutes, targetPrepMinutes } from "./kitchen-timing";
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 const staffSelect = { id: true, name: true, role: { select: { code: true, name: true } } } as const;
+
+/** Reset kitchen clock when a ticket goes back to PENDING. */
+const kitchenPendingReset = () => ({
+  status: "PENDING" as const,
+  pendingAt: new Date(),
+  preparingAt: null,
+  readyAt: null,
+  pendingAlertedAt: null,
+  lateAlertedAt: null,
+});
 
 const canChargePerHead = (u: AuthUser) =>
   u.roleCode === "SUPERVISOR" ||
   u.roleCode === "ADMIN" ||
   u.roleCode === "MANAGER" || // legacy cached sessions
+  u.roleCode === "MAIN_CASHIER" ||
+  u.roleCode === "CASHIER" ||
   u.permissions.includes("users.manage");
 
 const orderInclude = {
@@ -37,7 +54,13 @@ const orderInclude = {
     orderBy: { createdAt: "asc" },
     include: {
       addedBy: { select: { name: true } },
-      menuItem: { select: { category: true, kitchenStation: true } },
+      menuItem: {
+        select: {
+          category: true,
+          kitchenStation: true,
+          recipe: { select: { prepMinutes: true } },
+        },
+      },
     },
   },
   cashier: { select: { name: true } },
@@ -57,6 +80,11 @@ const orderInclude = {
 
 type FullOrder = Prisma.OrderGetPayload<{ include: typeof orderInclude }>;
 
+type DealTakes = {
+  recipes: { recipeId: string; quantity: number }[];
+  specials: { specialProductId: string; grams: number }[];
+};
+
 type Line = {
   lineKind: "MENU" | "PER_HEAD";
   menuItemId: string | null;
@@ -73,11 +101,19 @@ type Line = {
   specialProductId: string | null;
   saleMode: "PLATE" | "RS" | "MIX" | "MIX_SOLO_STORE" | null;
   modifiersJson?: { id?: string; name: string; priceDelta: number }[] | null;
+  /** MIX multi-part stock snapshot (also persisted on OrderItem.dealTakesJson). */
+  dealTakes?: DealTakes | null;
+  /** Kitchen station that holds recipe stock for this line. */
+  kitchenStation?: string | null;
 };
 
 const canSeeCost = (u: AuthUser) => u.permissions.includes("reports.view");
+/** Full paid history: payments.view, bill editors (Main Cashier), or Admin. */
 const paidBillsScope = (u: AuthUser): Prisma.OrderWhereInput =>
-  u.permissions.includes("payments.view")
+  u.permissions.includes("payments.view") ||
+  u.permissions.includes("order.edit") ||
+  u.roleCode === "ADMIN" ||
+  u.roleCode === "SYSTEM_MANAGER"
     ? {}
     : {
         OR: [
@@ -127,17 +163,40 @@ export class OrdersService {
     throw new BadRequestException({
       code: "HOTEL_CLOSED",
       message: gate.manuallyClosed
-        ? "Hotel is closed. No new orders."
+        ? "Hotel is closed — shift ended. No new orders."
         : "Outside hotel hours. No new orders.",
     });
   }
 
-  async list(user: AuthUser, paymentStatus?: string, status?: string, billing = false) {
+  async list(
+    user: AuthUser,
+    paymentStatus?: string,
+    status?: string,
+    billing = false,
+    opts?: { from?: string; to?: string; includeCredit?: boolean }
+  ) {
     const cashierScope = this.cashierBillingScope(user, billing);
     const ownOnly = floorOwnOrdersOnly(user, billing);
+    const from = opts?.from?.trim();
+    const to = opts?.to?.trim();
+    if (from && !ISO_DAY.test(from)) throw new BadRequestException("Invalid from date");
+    if (to && !ISO_DAY.test(to)) throw new BadRequestException("Invalid to date");
+
+    const hasDate = !!(from || to);
+    let range: { gte: Date; lt: Date } | undefined;
+    if (hasDate) {
+      const day = await this.settings.dayStart();
+      const fromDay = from || to!;
+      const toDay = to || from!;
+      // TZ-padded (same helper as Dashboard / Close / Payments)
+      const q = businessQueryRange(fromDay, toDay, day.h, day.m);
+      range = { gte: q.gte, lt: q.lt };
+    }
+
+    const includeCredit = !!opts?.includeCredit;
     const where: Prisma.OrderWhereInput = {
       ...(paymentStatus ? { paymentStatus: paymentStatus as PaymentStatus } : {}),
-      ...(billing ? { creditCustomerId: null } : {}),
+      ...(billing && !includeCredit ? { creditCustomerId: null } : {}),
       ...(ownOnly
         ? { waiterId: user.id }
         : seesAllOrders(user)
@@ -153,22 +212,89 @@ export class OrdersService {
     else if (paymentStatus === "UNPAID" || paymentStatus === "PARTIAL" || paymentStatus === "PAID") {
       where.status = { not: "CANCELLED" };
     }
+
+    /**
+     * Business-day history (aligned with Close, TZ-padded for installed servers):
+     * - PAID → orders that have a payment in the (padded) window — lookup like Close
+     * - CANCELLED → cancelledAt in window (fallback updatedAt)
+     * - UNPAID/PARTIAL → order opened that day
+     * - ALL → opened, paid, or cancelled that day
+     */
+    if (range) {
+      const wide = range;
+      if (paymentStatus === "PAID") {
+        // Same source as Close cash: Payment rows, then resolve orders (avoids nested-filter TZ misses).
+        const payRows = await this.prisma.payment.findMany({
+          where: { createdAt: { gte: wide.gte, lt: wide.lt } },
+          select: { orderId: true },
+          take: 3000,
+        });
+        const ids = [...new Set(payRows.map((p) => p.orderId))];
+        where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+          ids.length
+            ? { id: { in: ids } }
+            : {
+                // Fallback: PAID bills touched in window (legacy rows / clock skew)
+                OR: [
+                  { payments: { some: { createdAt: { gte: wide.gte, lt: wide.lt } } } },
+                  { updatedAt: { gte: wide.gte, lt: wide.lt } },
+                ],
+              },
+        ];
+      } else if (status === "CANCELLED") {
+        where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+          {
+            OR: [
+              { cancelledAt: { gte: wide.gte, lt: wide.lt } },
+              { updatedAt: { gte: wide.gte, lt: wide.lt } },
+            ],
+          },
+        ];
+      } else if (paymentStatus === "UNPAID" || paymentStatus === "PARTIAL") {
+        where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+          { createdAt: { gte: wide.gte, lt: wide.lt } },
+        ];
+      } else {
+        const payRows = await this.prisma.payment.findMany({
+          where: { createdAt: { gte: wide.gte, lt: wide.lt } },
+          select: { orderId: true },
+          take: 3000,
+        });
+        const paidIds = [...new Set(payRows.map((p) => p.orderId))];
+        where.AND = [
+          ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+          {
+            OR: [
+              { createdAt: { gte: wide.gte, lt: wide.lt } },
+              { cancelledAt: { gte: wide.gte, lt: wide.lt } },
+              ...(paidIds.length ? [{ id: { in: paidIds } }] : []),
+              { payments: { some: { createdAt: { gte: wide.gte, lt: wide.lt } } } },
+            ],
+          },
+        ];
+      }
+    }
+
     const orders = await this.prisma.order.findMany({
       where,
       include: orderInclude,
       orderBy: { createdAt: "desc" },
-      take: 100,
+      // Dated history needs more than the live queue; unpaid live work stays capped.
+      take: hasDate ? 500 : 100,
     });
     return orders.map((o) => this.toDto(o, canSeeCost(user)));
   }
 
-  /** Full kitchen board — all active tickets, no floor own-filter, high ceiling. */
+  /** Full kitchen board — table tickets only (takeaway stays with Main Cashier). */
   async listKitchen(user: AuthUser) {
     if (!user.permissions.includes("kitchen.view")) {
       throw new ForbiddenException("Kitchen view required");
     }
     const orders = await this.prisma.order.findMany({
-      where: { status: { in: KITCHEN_ACTIVE } },
+      where: { status: { in: KITCHEN_ACTIVE }, tableId: { not: null } },
       include: orderInclude,
       orderBy: { createdAt: "asc" },
       take: 500,
@@ -219,18 +345,23 @@ export class OrdersService {
 
     const { lines, subtotal, costTotal } = await this.buildLines(user, dto.items);
     await this.ensureStock(lines);
-    const assignedCashierId = await this.resolveAssignedCashier(user, dto.assignedCashierId);
+    const isTakeaway = !table;
+    const assignedCashierId = await this.resolveAssignedCashier(user, dto.assignedCashierId, {
+      preferMainCashier: isTakeaway,
+    });
     const creditCustomerId = dto.creditCustomerId
-      ? await this.resolveCreditCustomer(user, dto.creditCustomerId, !table)
+      ? await this.resolveCreditCustomer(user, dto.creditCustomerId)
       : null;
     const servedByName = cleanName(dto.servedByName);
-    const hasKitchen = lines.some((l) => l.lineKind === "MENU");
+    // Takeaway is counter work for Main Cashier — no kitchen board / KOT.
+    const hasKitchen = !isTakeaway && lines.some((l) => l.lineKind === "MENU");
+    const now = new Date();
     const order = await this.prisma.order.create({
       data: {
         tableNo: table?.label ?? walkInLabel ?? undefined,
         tableId: table?.id ?? null,
         notes: dto.notes,
-        status: "PENDING",
+        status: isTakeaway ? "READY" : "PENDING",
         paymentStatus: "UNPAID",
         subtotal,
         total: subtotal,
@@ -240,8 +371,9 @@ export class OrdersService {
         servedByName,
         creditCustomerId,
         kotRounds: hasKitchen ? 1 : 0,
+        ...(isTakeaway ? { readyAt: now, preparingAt: now } : {}),
         items: {
-          create: lines.map(({ recipeId: _r, ...rest }) => ({
+          create: lines.map(({ recipeId: _r, dealTakes, ...rest }) => ({
             lineKind: rest.lineKind,
             ...(rest.menuItemId ? { menuItemId: rest.menuItemId } : {}),
             name: rest.name,
@@ -256,7 +388,8 @@ export class OrdersService {
             saleMode: rest.saleMode,
             notes: rest.notes,
             modifiersJson: rest.modifiersJson ?? undefined,
-            kotRound: rest.lineKind === "MENU" ? 1 : 0,
+            dealTakesJson: dealTakes ?? undefined,
+            kotRound: hasKitchen && rest.lineKind === "MENU" ? 1 : 0,
             addedById: user.id,
           })),
         },
@@ -300,7 +433,7 @@ export class OrdersService {
       if (toNumber(order.paidAmount) > 0 || order.paymentStatus === "PARTIAL") {
         throw new BadRequestException("Cannot put a partially paid bill on credit — reverse payment first");
       }
-      const customerId = await this.resolveCreditCustomer(user, dto.creditCustomerId, !order.tableId);
+      const customerId = await this.resolveCreditCustomer(user, dto.creditCustomerId);
       await this.prisma.order.update({ where: { id }, data: { creditCustomerId: customerId } });
     }
 
@@ -309,8 +442,11 @@ export class OrdersService {
     const perHeadLines = lines.filter((l) => l.lineKind === "PER_HEAD");
     await this.ensureStock(menuLines);
     const servedByName = dto.servedByName !== undefined ? cleanName(dto.servedByName) : undefined;
+    const isTakeaway = !order.tableId;
     // First kitchen send on an order that only had per-head: kotRounds was 0 → become 1
-    const nextRound = menuLines.length ? (order.kotRounds < 1 ? 1 : order.kotRounds + 1) : order.kotRounds;
+    // Takeaway never goes to kitchen — no KOT rounds.
+    const nextRound =
+      !isTakeaway && menuLines.length ? (order.kotRounds < 1 ? 1 : order.kotRounds + 1) : order.kotRounds;
 
     if (perHeadLines.length) {
       const addQty = perHeadLines.reduce((s, l) => s + l.quantity, 0);
@@ -361,7 +497,8 @@ export class OrdersService {
           saleMode: rest.saleMode,
           notes: rest.notes ?? null,
           modifiersJson: rest.modifiersJson ?? undefined,
-          kotRound: nextRound,
+          dealTakesJson: rest.dealTakes ?? undefined,
+          kotRound: isTakeaway ? 0 : nextRound,
           addedById: user.id,
         })),
       });
@@ -374,13 +511,24 @@ export class OrdersService {
     await this.prisma.order.update({
       where: { id },
       data: {
-        ...(menuLines.length ? { kotRounds: nextRound } : {}),
+        ...(!isTakeaway && menuLines.length ? { kotRounds: nextRound } : {}),
         subtotal: sum,
         total: sum,
         costTotal: costSum,
         discountAmount: Math.min(toNumber(order.discountAmount), Math.max(0, sum - toNumber(order.paidAmount))),
         billRequestedAt: null,
-        status: order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED" ? "PENDING" : order.status,
+        // Takeaway stays READY with cashier — never bounce back to kitchen PENDING.
+        ...(isTakeaway
+          ? order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED"
+            ? {}
+            : { status: "READY" as const, readyAt: new Date(), preparingAt: new Date() }
+          : order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED"
+            ? kitchenPendingReset()
+            : menuLines.length && order.status === "PENDING"
+              ? { pendingAt: new Date(), pendingAlertedAt: null }
+              : menuLines.length && order.status === "PREPARING"
+                ? { lateAlertedAt: null }
+                : {}),
         paymentStatus: toNumber(order.paidAmount) > 0 ? "PARTIAL" : order.paymentStatus,
         ...(order.waiterId ? {} : { waiterId: user.id }),
         ...(servedByName !== undefined ? { servedByName } : {}),
@@ -413,7 +561,7 @@ export class OrdersService {
       }
       throw e;
     }
-    if (dto.printKot !== false && menuLines.length) await this.queueKot(id, nextRound, user.id);
+    if (!isTakeaway && dto.printKot !== false && menuLines.length) await this.queueKot(id, nextRound, user.id);
     const full = await this.prisma.order.findUniqueOrThrow({ where: { id }, include: orderInclude });
     this.realtime.orderChanged(this.event(full), "items-added");
     return this.toDto(full, canSeeCost(user));
@@ -465,7 +613,8 @@ export class OrdersService {
 
     let printQueued = 0;
     let printError: string | null = null;
-    const hasKitchen = order.items.some((i) => i.lineKind !== "PER_HEAD");
+    // Takeaway never hits kitchen — skip cancel KOT.
+    const hasKitchen = !!order.tableId && order.items.some((i) => i.lineKind !== "PER_HEAD");
     if (hasKitchen) {
       try {
         const jobs = await this.print.enqueueKot(id, {
@@ -556,6 +705,9 @@ export class OrdersService {
     if (order.status !== "CANCELLED") {
       throw new BadRequestException("Only cancelled orders can print a cancel kitchen slip");
     }
+    if (!order.tableId) {
+      throw new BadRequestException("Takeaway orders have no kitchen slip");
+    }
     const hasKitchen = order.items.some((i) => i.lineKind !== "PER_HEAD");
     if (!hasKitchen) throw new BadRequestException("No kitchen items on this order");
     const jobs = await this.print.enqueueKot(id, {
@@ -628,19 +780,40 @@ export class OrdersService {
     if (increases.length) {
       const menus = await this.prisma.menuItem.findMany({
         where: { id: { in: [...new Set(increases.map((i) => i.menuItemId))] } },
-        select: { id: true, recipeId: true, name: true },
+        select: {
+          id: true,
+          recipeId: true,
+          name: true,
+          kind: true,
+          specialProductId: true,
+          mixSpecialPlates: true,
+          dealParts: { select: { kind: true, recipeId: true, quantity: true } },
+        },
       });
-      const recipeOf = new Map(menus.map((m) => [m.id, m.recipeId]));
-      const nameOf = new Map(menus.map((m) => [m.id, m.name]));
+      const byId = new Map(menus.map((m) => [m.id, m]));
       await this.ensureStock(
         increases.flatMap((i) => {
-          const recipeId = recipeOf.get(i.menuItemId);
-          const name = nameOf.get(i.menuItemId) ?? i.name;
-          return recipeId ? [{ recipeId, quantity: i.quantity, name }] : [];
+          const menu = byId.get(i.menuItemId);
+          const name = menu?.name ?? i.name;
+          if (!menu) return [];
+          if (menu.kind === "MIX") {
+            const storeParts = menu.dealParts.filter((p) => p.kind === "STORE" && p.recipeId);
+            if (storeParts.length) {
+              return storeParts.map((p) => ({
+                recipeId: p.recipeId!,
+                quantity: i.quantity * (toNumber(p.quantity) || 1),
+                name,
+              }));
+            }
+          }
+          return menu.recipeId
+            ? [{ recipeId: menu.recipeId, quantity: i.quantity, name }]
+            : [];
         })
       );
     }
 
+    const trackStock = await this.settings.enforceRecipeStock();
     for (const change of dto.items) {
       const line = order.items.find((i) => i.id === change.id);
       if (!line) throw new BadRequestException(`Item not found: ${change.id}`);
@@ -657,32 +830,35 @@ export class OrdersService {
       subDelta += rate * qtyDiff;
       costDelta += unitCost * qtyDiff;
 
-      if (line.menuItemId && qtyDiff > 0) {
+      if (trackStock && line.menuItemId && qtyDiff > 0) {
         const menu = await this.prisma.menuItem.findUnique({ where: { id: line.menuItemId } });
         if (menu?.recipeId) {
           await this.costing.deductRecipeStock(
             menu.recipeId,
             qtyDiff,
             `Order #${order.orderNo} · edit add`,
-            order.id
+            order.id,
+            "SALE",
+            menu.kitchenStation || "COOKING"
           );
         }
       }
-      if (line.menuItemId && qtyDiff < 0) {
+      if (trackStock && line.menuItemId && qtyDiff < 0) {
         const menu = await this.prisma.menuItem.findUnique({ where: { id: line.menuItemId } });
         if (menu?.recipeId) {
           await this.costing.restoreRecipeStock(
             menu.recipeId,
             -qtyDiff,
             `Order #${order.orderNo} · edit remove`,
-            order.id
+            order.id,
+            menu.kitchenStation || "COOKING"
           );
         }
       }
 
       const oldGrams = toNumber(line.batchGrams);
       let nextBatchGrams = oldGrams;
-      if (line.specialProductId && oldQty > 0 && oldGrams > 0 && qtyDiff !== 0) {
+      if (trackStock && line.specialProductId && oldQty > 0 && oldGrams > 0 && qtyDiff !== 0) {
         if (qtyDiff > 0) {
           const addGrams = (oldGrams / oldQty) * qtyDiff;
           await this.specials.assertAndTake(line.specialProductId, addGrams);
@@ -740,20 +916,26 @@ export class OrdersService {
             saleMode: line.saleMode,
             notes: line.notes,
             modifiersJson: line.modifiersJson ?? undefined,
+            dealTakesJson: line.dealTakes ?? undefined,
             kotRound: order.kotRounds,
             addedById: user.id,
           },
         });
-        if (line.recipeId) {
-          await this.costing.deductRecipeStock(
-            line.recipeId,
-            line.quantity,
-            `Order #${order.orderNo} · edit new item`,
-            order.id
-          );
-        }
-        if (line.specialProductId && line.batchGrams > 0) {
-          await this.specials.assertAndTake(line.specialProductId, line.batchGrams);
+        if (trackStock) {
+          const editTakes = this.lineStoreTakes(line);
+          for (const t of editTakes) {
+            await this.costing.deductRecipeStock(
+              t.recipeId,
+              t.quantity,
+              `Order #${order.orderNo} · edit new item`,
+              order.id,
+              "SALE",
+              t.station
+            );
+          }
+          for (const s of this.lineSpecialTakes(line)) {
+            await this.specials.assertAndTake(s.specialProductId, s.grams);
+          }
         }
         subDelta += line.amount;
         costDelta += line.costAmount;
@@ -797,6 +979,7 @@ export class OrdersService {
       nextDiscount = Math.min(beforeDiscount, Math.max(0, nextTotal - beforePaidAmount));
     }
 
+    const isTakeaway = !order.tableId;
     const updated = await this.prisma.order.update({
       where: { id },
       data: {
@@ -806,28 +989,33 @@ export class OrdersService {
         discountAmount: nextDiscount,
         paidAmount: nextPaid,
         paymentStatus: nextPaymentStatus,
-        ...(growing &&
-        (order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED")
-          ? { status: "PENDING" as const }
-          : {}),
+        // Takeaway stays with cashier (READY) — never bounce back to kitchen PENDING.
+        ...(isTakeaway
+          ? growing && order.status !== "READY" && order.status !== "SERVED" && order.status !== "COMPLETED"
+            ? { status: "READY" as const, readyAt: order.readyAt ?? new Date() }
+            : {}
+          : growing &&
+              (order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED")
+            ? kitchenPendingReset()
+            : {}),
         ...billMeta,
       },
       include: orderInclude,
     });
 
     this.realtime.orderChanged(this.event(updated), "edited");
-    // Qty-down / remove: reprint cancel-style KOT so kitchen stops wrong lines.
+    // Qty-down / remove: reprint cancel-style KOT so kitchen stops wrong lines (tables only).
     const shrunkKitchen = (dto.items ?? []).some((change) => {
       const line = order.items.find((i) => i.id === change.id);
       return !!line?.menuItemId && change.quantity + 0.0001 < toNumber(line.quantity);
     });
-    if (shrunkKitchen) {
+    if (!isTakeaway && shrunkKitchen) {
       void this.print.enqueueKot(id, {
         cancelled: true,
         cancelReason: "Bill edited — check quantities",
         requestedById: user.id,
       });
-    } else if (growing) {
+    } else if (!isTakeaway && growing) {
       void this.print.enqueueKot(id, { reprint: true, requestedById: user.id });
     }
     return this.toDto(updated, canSeeCost(user));
@@ -865,6 +1053,11 @@ export class OrdersService {
   }
 
   async printKot(user: AuthUser, id: string, round?: number, reprint = true) {
+    const order = await this.prisma.order.findUnique({ where: { id }, select: { tableId: true } });
+    if (!order) throw new NotFoundException("Order not found");
+    if (!order.tableId) {
+      throw new BadRequestException("Takeaway orders have no kitchen slip");
+    }
     const jobs = await this.print.enqueueKot(id, { round, reprint, requestedById: user.id });
     return { queued: jobs.length, jobs: jobs.map((j) => ({ id: j.id, status: j.status, error: j.lastError })) };
   }
@@ -969,7 +1162,11 @@ export class OrdersService {
           paymentStatus,
           servedByName,
           cashierId: order.cashierId ?? handedTo?.id ?? user.id,
-          status: fullyPaid && (order.status === "READY" || order.status === "SERVED") ? "COMPLETED" : order.status,
+          status:
+            fullyPaid &&
+            (!order.tableId || order.status === "READY" || order.status === "SERVED")
+              ? "COMPLETED"
+              : order.status,
         },
         include: orderInclude,
       });
@@ -997,6 +1194,92 @@ export class OrdersService {
     return this.toDto(updated, canSeeCost(user));
   }
 
+  /**
+   * Move an open credit invoice to another credit person (wrong account selected).
+   * Allowed while unpaid/partial and the business day is unlocked.
+   */
+  async reassignCredit(user: AuthUser, id: string, creditCustomerId: string) {
+    const order = await this.prisma.order.findUnique({ where: { id } });
+    if (!order) throw new NotFoundException("Order not found");
+    await this.finance.assertNotLocked(order.createdAt);
+    if (order.status === "CANCELLED" || order.paymentStatus === "VOID") {
+      throw new BadRequestException("Cancelled orders cannot change credit person");
+    }
+    if (!order.creditCustomerId) {
+      throw new BadRequestException("This bill is not on credit — use put on credit first");
+    }
+    if (order.paymentStatus === "PAID") {
+      throw new BadRequestException("Fully paid credit bills cannot change person");
+    }
+    if (order.creditCustomerId === creditCustomerId) {
+      return this.get(user, id);
+    }
+    const customerId = await this.resolveCreditCustomer(user, creditCustomerId);
+    const updated = await this.prisma.order.update({
+      where: { id },
+      data: { creditCustomerId: customerId },
+      include: orderInclude,
+    });
+    this.realtime.orderChanged(this.event(updated), "credit");
+    return this.toDto(updated, canSeeCost(user));
+  }
+
+  /** Attach an unpaid table or takeaway bill to a credit customer — no cash now; settle later from Credit Customers. */
+  async putOnCredit(user: AuthUser, id: string, dto: PutOnCreditDto) {
+    const order = await this.prisma.order.findUnique({ where: { id } });
+    if (!order) throw new NotFoundException("Order not found");
+    await this.finance.assertNotLocked(order.createdAt);
+    if (order.status === "CANCELLED" || order.paymentStatus === "VOID") {
+      throw new BadRequestException("Cancelled orders cannot go on credit");
+    }
+    if (order.paymentStatus === "PAID") throw new BadRequestException("Bill is already paid");
+    if (order.creditCustomerId) {
+      throw new BadRequestException("This bill is already on a credit account");
+    }
+    if (toNumber(order.paidAmount) > 0 || order.paymentStatus === "PARTIAL") {
+      throw new BadRequestException("Cannot put a partially paid bill on credit — reverse payment first");
+    }
+
+    const customerId = await this.resolveCreditCustomer(user, dto.creditCustomerId);
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const taxCfg = await this.finance.taxSettings();
+    const gross = toNumber(order.total);
+    const maxDiscount = Math.max(0, round2(gross));
+    const discount =
+      dto.discount !== undefined
+        ? Math.min(maxDiscount, Math.max(0, round2(dto.discount)))
+        : Math.min(maxDiscount, Math.max(0, round2(toNumber(order.discountAmount))));
+    const { taxAmount, taxPercent } = this.finance.computeTax(gross, discount, taxCfg.percent);
+
+    let servedByName = order.servedByName;
+    if (dto.servedByName !== undefined) {
+      servedByName = cleanName(dto.servedByName);
+    }
+
+    const releaseTable = !!dto.releaseTable;
+    // Takeaway has no kitchen step — cashier may close anytime. Tables still need READY/SERVED.
+    if (releaseTable && order.tableId && order.status !== "READY" && order.status !== "SERVED") {
+      throw new BadRequestException(
+        "Wait until kitchen marks Ready (or Served) before freeing the table for the next guest"
+      );
+    }
+
+    const updated = await this.prisma.order.update({
+      where: { id },
+      data: {
+        creditCustomerId: customerId,
+        discountAmount: discount,
+        taxAmount,
+        taxPercent,
+        servedByName,
+        ...(releaseTable ? { status: "COMPLETED" as const } : {}),
+      },
+      include: orderInclude,
+    });
+    this.realtime.orderChanged(this.event(updated), releaseTable ? "status" : "credit");
+    return this.toDto(updated, canSeeCost(user));
+  }
+
   /** Guest has left. The table frees; the invoice stays on the credit account until they pay. */
   async releaseCredit(user: AuthUser, id: string) {
     const order = await this.prisma.order.findUnique({ where: { id }, include: orderInclude });
@@ -1007,8 +1290,8 @@ export class OrdersService {
       return this.toDto(order, canSeeCost(user));
     }
     await this.finance.assertNotLocked(order.createdAt);
-    // Keep kitchen ticket until food is out — freeing early drops KOT and opens the table for a new sitting.
-    if (order.status !== "READY" && order.status !== "SERVED") {
+    // Tables: wait for kitchen. Takeaway is cashier counter — close anytime.
+    if (order.tableId && order.status !== "READY" && order.status !== "SERVED") {
       throw new BadRequestException(
         "Wait until kitchen marks Ready (or Served) before freeing the table for the next guest"
       );
@@ -1066,9 +1349,22 @@ export class OrdersService {
     const nextStatus: OrderStatus =
       dto.status === "SERVED" && existing.paymentStatus === "PAID" ? "COMPLETED" : dto.status;
 
+    const now = new Date();
+    const timing: Prisma.OrderUpdateInput = { status: nextStatus };
+    if (nextStatus === "PREPARING") {
+      timing.preparingAt = existing.preparingAt ?? now;
+      timing.lateAlertedAt = null;
+    } else if (nextStatus === "READY") {
+      // PENDING → READY skip: still stamp prep start so late math stays valid.
+      timing.preparingAt = existing.preparingAt ?? now;
+      timing.readyAt = now;
+    } else if (nextStatus === "SERVED" || nextStatus === "COMPLETED") {
+      if (!existing.readyAt) timing.readyAt = now;
+    }
+
     const updated = await this.prisma.order.update({
       where: { id },
-      data: { status: nextStatus },
+      data: timing,
       include: orderInclude,
     });
     this.realtime.orderChanged(this.event(updated), "status");
@@ -1185,7 +1481,11 @@ export class OrdersService {
     return data;
   }
 
-  private async resolveAssignedCashier(user: AuthUser, assignedCashierId?: string) {
+  private async resolveAssignedCashier(
+    user: AuthUser,
+    assignedCashierId?: string,
+    opts?: { preferMainCashier?: boolean }
+  ) {
     if (assignedCashierId) {
       const c = await this.prisma.user.findFirst({
         where: {
@@ -1202,6 +1502,15 @@ export class OrdersService {
     // Cashier placing their own order → assign to self
     if (user.permissions.includes("cash.keep") && user.permissions.includes("order.pay")) {
       return user.id;
+    }
+    // Takeaway → Main Cashier counter (not kitchen)
+    if (opts?.preferMainCashier) {
+      const main = await this.prisma.user.findFirst({
+        where: { active: true, deletedAt: null, role: { code: "MAIN_CASHIER" } },
+        select: { id: true },
+        orderBy: { name: "asc" },
+      });
+      if (main) return main.id;
     }
     // Supervisor / floor: require explicit pick
     if (user.permissions.includes("order.create") && !user.permissions.includes("order.pay")) {
@@ -1228,11 +1537,28 @@ export class OrdersService {
     }
   }
 
+  /**
+   * Soft recipe cost for billing lines. Never throws — missing/inactive recipe or
+   * inactive store ingredients become cost 0 so the order can still be taken.
+   */
+  private async safeRecipeUnitCost(recipeId: string | null | undefined) {
+    if (!recipeId) return null;
+    try {
+      return await this.costing.recipeUnitCost(recipeId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.log.warn(`Recipe cost skipped (${recipeId}): ${msg}`);
+      return null;
+    }
+  }
+
   private async buildLines(user: AuthUser, items: OrderLineDto[]) {
     const lines: Line[] = [];
     let subtotal = 0;
     let costTotal = 0;
     let perHeadCfg: Awaited<ReturnType<SettingsService["perHead"]>> | null = null;
+    /** When off: pure billing — no recipe cost, inactive checks, kitchen/pot stock, or auto deduct. */
+    const trackStock = await this.settings.enforceRecipeStock();
     /** Accumulate planned batch takes so multiple cart lines don't oversell. */
     const plannedTake = new Map<string, number>();
 
@@ -1240,7 +1566,7 @@ export class OrdersService {
       const kind = line.kind === "PER_HEAD" ? "PER_HEAD" : "MENU";
       if (kind === "PER_HEAD") {
         if (!canChargePerHead(user)) {
-          throw new ForbiddenException("Only Supervisor can add per-head charges");
+          throw new ForbiddenException("Only Supervisor or Cashier can add per-head charges");
         }
         perHeadCfg ??= await this.settings.perHead();
         if (!perHeadCfg.enabled) throw new BadRequestException("Per-head charge is disabled in Settings");
@@ -1286,20 +1612,25 @@ export class OrdersService {
               const plateGrams = toNumber(sp.plateGrams) || 1;
               const plates = pkg.quantity;
               const grams = plates * plateGrams;
-              const planned = plannedTake.get(sp.id) ?? 0;
-              await this.specials.assertAvailable(sp.id, grams + planned);
-              plannedTake.set(sp.id, planned + grams);
+              if (trackStock) {
+                const planned = plannedTake.get(sp.id) ?? 0;
+                await this.specials.assertAvailable(sp.id, grams + planned);
+                plannedTake.set(sp.id, planned + grams);
+              }
               let unitCost = 0;
               let costAmount = 0;
-              if (sp.cookRecipeId) {
-                const { costPerBase, recipe } = await this.costing.recipeUnitCost(sp.cookRecipeId);
-                const cookQty = this.costing.cookedGramsToRecipeQty({
-                  baseUnit: recipe.baseUnit,
-                  cookedGrams: grams,
-                  plateGrams,
-                });
-                unitCost = plateGrams > 0 ? (costPerBase * cookQty) / plates : costPerBase;
-                costAmount = costPerBase * cookQty;
+              // Recipes Off = skip; On = soft cost via safeRecipeUnitCost (logs + cost 0 on error).
+              if (trackStock && sp.cookRecipeId) {
+                const priced = await this.safeRecipeUnitCost(sp.cookRecipeId);
+                if (priced) {
+                  const cookQty = this.costing.cookedGramsToRecipeQty({
+                    baseUnit: priced.recipe.baseUnit,
+                    cookedGrams: grams,
+                    plateGrams,
+                  });
+                  unitCost = plateGrams > 0 ? (priced.costPerBase * cookQty) / plates : priced.costPerBase;
+                  costAmount = priced.costPerBase * cookQty;
+                }
               }
               costTotal += costAmount;
               lines.push({
@@ -1314,61 +1645,35 @@ export class OrdersService {
                 costAmount,
                 notes: "Per head",
                 recipeId: null,
-                batchGrams: grams,
+                batchGrams: trackStock ? grams : 0,
                 specialProductId: sp.id,
                 saleMode: "PLATE",
+                kitchenStation: menu.kitchenStation || "COOKING",
               });
               continue;
             }
 
             if (menu.kind === "MIX") {
-              const sp = menu.specialProduct;
-              if (!sp) throw new BadRequestException(`${menu.name} is not linked to a special pot`);
-              const plateGrams = toNumber(sp.plateGrams) || 1;
-              const mixPlates = toNumber(menu.mixSpecialPlates) || 1;
-              const plates = pkg.quantity * mixPlates;
-              const grams = plates * plateGrams;
-              const planned = plannedTake.get(sp.id) ?? 0;
-              await this.specials.assertAvailable(sp.id, grams + planned);
-              plannedTake.set(sp.id, planned + grams);
-              let unitCost = 0;
-              if (menu.recipeId) {
-                unitCost = (await this.costing.recipeUnitCost(menu.recipeId)).costPerBase;
-              }
-              if (sp.cookRecipeId) {
-                const { costPerBase, recipe } = await this.costing.recipeUnitCost(sp.cookRecipeId);
-                const specialCost =
-                  costPerBase *
-                  this.costing.cookedGramsToRecipeQty({
-                    baseUnit: recipe.baseUnit,
-                    cookedGrams: grams,
-                    plateGrams,
-                  });
-                unitCost += specialCost / Math.max(pkg.quantity, 1e-9);
-              }
-              const costAmount = unitCost * pkg.quantity;
-              costTotal += costAmount;
-              lines.push({
-                lineKind: "MENU",
-                menuItemId: menu.id,
-                name: menu.name,
-                sellUnit: menu.sellUnit,
+              const built = await this.buildMixLine({
+                menu,
                 quantity: pkg.quantity,
-                ratePerUnit: 0,
+                rate: 0,
                 amount: 0,
-                unitCost,
-                costAmount,
                 notes: "Per head",
-                recipeId: menu.recipeId,
-                batchGrams: grams,
-                specialProductId: sp.id,
-                saleMode: "MIX",
+                soloStoreFallback: false,
+                plannedTake,
+                trackStock,
+                modifiersJson: null,
               });
+              costTotal += built.costAmount;
+              lines.push(built);
               continue;
             }
 
-            // NORMAL (store recipe)
-            const unitCost = menu.recipeId ? (await this.costing.recipeUnitCost(menu.recipeId)).costPerBase : 0;
+            // NORMAL (store recipe) — Off = skip; On = soft cost (error → 0 + log)
+            const pricedPkg =
+              trackStock && menu.recipeId ? await this.safeRecipeUnitCost(menu.recipeId) : null;
+            const unitCost = pricedPkg?.costPerBase ?? 0;
             const costAmount = unitCost * pkg.quantity;
             costTotal += costAmount;
             lines.push({
@@ -1382,10 +1687,11 @@ export class OrdersService {
               unitCost,
               costAmount,
               notes: "Per head",
-              recipeId: menu.recipeId,
+              recipeId: trackStock ? menu.recipeId : null,
               batchGrams: 0,
               specialProductId: null,
               saleMode: null,
+              kitchenStation: menu.kitchenStation || "COOKING",
             });
           }
         }
@@ -1418,6 +1724,9 @@ export class OrdersService {
         let amount: number;
         let rate: number;
         let qty: number;
+        /** Half/Full menu rows: mixSpecialPlates = share of one full pot serving (e.g. 0.5). */
+        const portion =
+          toNumber(menu.mixSpecialPlates) > 0 ? toNumber(menu.mixSpecialPlates) : 1;
         if (mode === "RS") {
           const rs = line.amountRs ?? line.quantity * platePrice;
           if (rs < 0.01) throw new BadRequestException("Enter rupees for special sale");
@@ -1427,27 +1736,32 @@ export class OrdersService {
           qty = Math.round(plates * 1000) / 1000;
         } else {
           assertMenuQty(menu, line.quantity);
-          plates = line.quantity;
-          rate = platePrice > 0 ? platePrice : toNumber(menu.sellingPrice);
-          amount = Math.round(rate * plates * 100) / 100;
-          qty = plates;
+          const menuRate = toNumber(menu.sellingPrice);
+          rate = menuRate > 0 ? menuRate : platePrice > 0 ? platePrice : 0;
+          plates = line.quantity * portion;
+          amount = Math.round(rate * line.quantity * 100) / 100;
+          qty = line.quantity;
         }
         const grams = plates * plateGrams;
-        const planned = plannedTake.get(sp.id) ?? 0;
-        await this.specials.assertAvailable(sp.id, grams + planned);
-        plannedTake.set(sp.id, planned + grams);
+        if (trackStock) {
+          const planned = plannedTake.get(sp.id) ?? 0;
+          await this.specials.assertAvailable(sp.id, grams + planned);
+          plannedTake.set(sp.id, planned + grams);
+        }
 
         let unitCost = 0;
         let costAmount = 0;
-        if (sp.cookRecipeId) {
-          const { costPerBase, recipe } = await this.costing.recipeUnitCost(sp.cookRecipeId);
-          const cookQty = this.costing.cookedGramsToRecipeQty({
-            baseUnit: recipe.baseUnit,
-            cookedGrams: grams,
-            plateGrams,
-          });
-          unitCost = plateGrams > 0 ? (costPerBase * cookQty) / plates : costPerBase;
-          costAmount = costPerBase * cookQty;
+        if (trackStock && sp.cookRecipeId) {
+          const priced = await this.safeRecipeUnitCost(sp.cookRecipeId);
+          if (priced) {
+            const cookQty = this.costing.cookedGramsToRecipeQty({
+              baseUnit: priced.recipe.baseUnit,
+              cookedGrams: grams,
+              plateGrams,
+            });
+            unitCost = plateGrams > 0 ? (priced.costPerBase * cookQty) / plates : priced.costPerBase;
+            costAmount = priced.costPerBase * cookQty;
+          }
         }
         subtotal += amount;
         costTotal += costAmount;
@@ -1463,81 +1777,34 @@ export class OrdersService {
           costAmount,
           notes: line.notes?.trim() || undefined,
           recipeId: null,
-          batchGrams: grams,
+          batchGrams: trackStock ? grams : 0,
           specialProductId: sp.id,
           saleMode: mode,
+          kitchenStation: menu.kitchenStation || "COOKING",
         });
         continue;
       }
 
       if (menu.kind === "MIX") {
-        const sp = menu.specialProduct;
-        if (!sp) throw new BadRequestException(`${menu.name} is not linked to a special pot`);
         assertMenuQty(menu, line.quantity);
-        const plateGrams = toNumber(sp.plateGrams) || 1;
-        const mixPlates = toNumber(menu.mixSpecialPlates) || 1;
-        const plates = line.quantity * mixPlates;
-        const grams = plates * plateGrams;
-        const planned = plannedTake.get(sp.id) ?? 0;
-        let saleMode: "MIX" | "MIX_SOLO_STORE" = "MIX";
-        let batchGrams = grams;
-        let useBatch = true;
-        try {
-          await this.specials.assertAvailable(sp.id, grams + planned);
-        } catch (e) {
-          if (line.soloStoreFallback) {
-            saleMode = "MIX_SOLO_STORE";
-            batchGrams = 0;
-            useBatch = false;
-          } else {
-            throw e;
-          }
-        }
-        if (useBatch) plannedTake.set(sp.id, planned + grams);
-
         const mods = await this.resolveModifiers(menu.id, line.modifiers);
         const modExtra = mods.reduce((s, m) => s + m.priceDelta, 0);
         const rate = Math.round((toNumber(menu.sellingPrice) + modExtra) * 100) / 100;
         const amount = rate * line.quantity;
-        let unitCost = 0;
-        if (menu.recipeId) {
-          unitCost = (await this.costing.recipeUnitCost(menu.recipeId)).costPerBase;
-        }
-        let specialCost = 0;
-        if (useBatch && sp.cookRecipeId) {
-          const { costPerBase, recipe } = await this.costing.recipeUnitCost(sp.cookRecipeId);
-          specialCost =
-            costPerBase *
-            this.costing.cookedGramsToRecipeQty({
-              baseUnit: recipe.baseUnit,
-              cookedGrams: grams,
-              plateGrams,
-            });
-          unitCost += specialCost / Math.max(line.quantity, 1e-9);
-        }
-        const costAmount = unitCost * line.quantity;
-        subtotal += amount;
-        costTotal += costAmount;
-        const baseName = saleMode === "MIX_SOLO_STORE" ? `${menu.name} (store only)` : menu.name;
-        const displayName =
-          mods.length > 0 ? `${baseName} (+${mods.map((m) => m.name).join(", ")})` : baseName;
-        lines.push({
-          lineKind: "MENU",
-          menuItemId: menu.id,
-          name: displayName,
-          sellUnit: menu.sellUnit,
+        const built = await this.buildMixLine({
+          menu,
           quantity: line.quantity,
-          ratePerUnit: rate,
+          rate,
           amount,
-          unitCost,
-          costAmount,
           notes: line.notes?.trim() || undefined,
-          recipeId: menu.recipeId,
-          batchGrams,
-          specialProductId: sp.id,
-          saleMode,
+          soloStoreFallback: !!line.soloStoreFallback,
+          plannedTake,
+          trackStock,
           modifiersJson: mods.length ? mods : null,
         });
+        subtotal += amount;
+        costTotal += built.costAmount;
+        lines.push(built);
         continue;
       }
 
@@ -1547,7 +1814,10 @@ export class OrdersService {
       const baseRate = toNumber(menu.sellingPrice);
       const rate = Math.round((baseRate + modExtra) * 100) / 100;
       const amount = rate * line.quantity;
-      const unitCost = menu.recipeId ? (await this.costing.recipeUnitCost(menu.recipeId)).costPerBase : 0;
+      // Recipes Off: skip cost. On: soft cost (error → 0 + log) — never block order.
+      const pricedLine =
+        trackStock && menu.recipeId ? await this.safeRecipeUnitCost(menu.recipeId) : null;
+      const unitCost = pricedLine?.costPerBase ?? 0;
       const costAmount = unitCost * line.quantity;
       subtotal += amount;
       costTotal += costAmount;
@@ -1564,11 +1834,12 @@ export class OrdersService {
         unitCost,
         costAmount,
         notes: line.notes?.trim() || undefined,
-        recipeId: menu.recipeId,
+        recipeId: trackStock ? menu.recipeId : null,
         batchGrams: 0,
         specialProductId: null,
         saleMode: null,
         modifiersJson: mods.length ? mods : null,
+        kitchenStation: menu.kitchenStation || "COOKING",
       });
     }
     return { lines, subtotal, costTotal };
@@ -1603,26 +1874,312 @@ export class OrdersService {
     return out;
   }
 
-  private ensureStock(lines: { recipeId: string | null; quantity: number; name: string }[]) {
+  private lineStation(line: { kitchenStation?: string | null }) {
+    return line.kitchenStation || "COOKING";
+  }
+
+  private lineStoreTakes(line: {
+    recipeId: string | null;
+    quantity: number;
+    dealTakes?: DealTakes | null;
+    kitchenStation?: string | null;
+  }) {
+    const station = this.lineStation(line);
+    if (line.dealTakes?.recipes?.length) {
+      return line.dealTakes.recipes.map((r) => ({ ...r, station }));
+    }
+    return line.recipeId
+      ? [{ recipeId: line.recipeId, quantity: line.quantity, station }]
+      : [];
+  }
+
+  private lineSpecialTakes(line: {
+    specialProductId: string | null;
+    batchGrams: number;
+    dealTakes?: DealTakes | null;
+  }) {
+    if (line.dealTakes?.specials?.length) return line.dealTakes.specials;
+    return line.specialProductId && line.batchGrams > 0
+      ? [{ specialProductId: line.specialProductId, grams: line.batchGrams }]
+      : [];
+  }
+
+  private parseDealTakesJson(raw: unknown): DealTakes | null {
+    if (!raw || typeof raw !== "object") return null;
+    const o = raw as { recipes?: unknown; specials?: unknown };
+    const recipes = Array.isArray(o.recipes)
+      ? o.recipes
+          .map((r) => {
+            const x = r as { recipeId?: string; quantity?: number };
+            return x.recipeId && Number(x.quantity) > 0
+              ? { recipeId: x.recipeId, quantity: Number(x.quantity) }
+              : null;
+          })
+          .filter((x): x is { recipeId: string; quantity: number } => !!x)
+      : [];
+    const specials = Array.isArray(o.specials)
+      ? o.specials
+          .map((s) => {
+            const x = s as { specialProductId?: string; grams?: number };
+            return x.specialProductId && Number(x.grams) > 0
+              ? { specialProductId: x.specialProductId, grams: Number(x.grams) }
+              : null;
+          })
+          .filter((x): x is { specialProductId: string; grams: number } => !!x)
+      : [];
+    if (!recipes.length && !specials.length) return null;
+    return { recipes, specials };
+  }
+
+  /** Resolve MIX deal parts (DB) with legacy MenuItem fields as fallback. */
+  private async resolveMixParts(menu: {
+    id: string;
+    name: string;
+    recipeId: string | null;
+    specialProductId: string | null;
+    mixSpecialPlates: Parameters<typeof toNumber>[0];
+  }) {
+    const rows = await this.prisma.menuDealPart.findMany({
+      where: { menuItemId: menu.id },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+      include: {
+        recipe: { select: { id: true, name: true } },
+        specialProduct: {
+          select: { id: true, name: true, plateGrams: true, cookRecipeId: true },
+        },
+      },
+    });
+    if (rows.length) return rows;
+
+    const legacy: {
+      kind: "STORE" | "SPECIAL";
+      recipeId: string | null;
+      specialProductId: string | null;
+      quantity: number;
+      recipe: { id: string; name: string } | null;
+      specialProduct: {
+        id: string;
+        name: string;
+        plateGrams: Parameters<typeof toNumber>[0];
+        cookRecipeId: string | null;
+      } | null;
+    }[] = [];
+
+    if (menu.recipeId) {
+      const recipe = await this.prisma.recipe.findUnique({
+        where: { id: menu.recipeId },
+        select: { id: true, name: true },
+      });
+      if (recipe) {
+        legacy.push({
+          kind: "STORE",
+          recipeId: recipe.id,
+          specialProductId: null,
+          quantity: 1,
+          recipe,
+          specialProduct: null,
+        });
+      }
+    }
+    if (menu.specialProductId) {
+      const sp = await this.prisma.specialProduct.findUnique({
+        where: { id: menu.specialProductId },
+        select: { id: true, name: true, plateGrams: true, cookRecipeId: true },
+      });
+      if (sp) {
+        legacy.push({
+          kind: "SPECIAL",
+          recipeId: null,
+          specialProductId: sp.id,
+          quantity: toNumber(menu.mixSpecialPlates) || 1,
+          recipe: null,
+          specialProduct: sp,
+        });
+      }
+    }
+    if (!legacy.some((p) => p.kind === "STORE")) {
+      throw new BadRequestException(`${menu.name}: deal needs at least one store recipe`);
+    }
+    return legacy;
+  }
+
+  private async buildMixLine(opts: {
+    menu: {
+      id: string;
+      name: string;
+      sellUnit: Line["sellUnit"];
+      recipeId: string | null;
+      specialProductId: string | null;
+      mixSpecialPlates: Parameters<typeof toNumber>[0];
+      kitchenStation?: string | null;
+      specialProduct: {
+        id: string;
+        plateGrams: Parameters<typeof toNumber>[0];
+        cookRecipeId: string | null;
+      } | null;
+    };
+    quantity: number;
+    rate: number;
+    amount: number;
+    notes?: string;
+    soloStoreFallback: boolean;
+    plannedTake: Map<string, number>;
+    /** When false, skip pot availability — billing-only mode. */
+    trackStock: boolean;
+    modifiersJson: { id?: string; name: string; priceDelta: number }[] | null;
+  }): Promise<Line> {
+    const { menu, quantity, rate, amount, notes, soloStoreFallback, plannedTake, trackStock, modifiersJson } =
+      opts;
+    const parts = await this.resolveMixParts(menu);
+    const storeParts = parts.filter((p) => p.kind === "STORE" && p.recipeId);
+    const specialParts = parts.filter((p) => p.kind === "SPECIAL" && p.specialProduct);
+
+    const plannedSpecials: { specialProductId: string; grams: number; plateGrams: number; cookRecipeId: string | null }[] =
+      [];
+    for (const p of specialParts) {
+      const sp = p.specialProduct!;
+      const plateGrams = toNumber(sp.plateGrams) || 1;
+      const plates = quantity * (toNumber(p.quantity) || 1);
+      const grams = plates * plateGrams;
+      plannedSpecials.push({
+        specialProductId: sp.id,
+        grams,
+        plateGrams,
+        cookRecipeId: sp.cookRecipeId,
+      });
+    }
+
+    let saleMode: "MIX" | "MIX_SOLO_STORE" = "MIX";
+    let useBatch = trackStock && plannedSpecials.length > 0;
+    if (useBatch) {
+      try {
+        for (const s of plannedSpecials) {
+          const planned = plannedTake.get(s.specialProductId) ?? 0;
+          await this.specials.assertAvailable(s.specialProductId, s.grams + planned);
+        }
+      } catch (e) {
+        if (soloStoreFallback) {
+          saleMode = "MIX_SOLO_STORE";
+          useBatch = false;
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    if (useBatch) {
+      for (const s of plannedSpecials) {
+        const planned = plannedTake.get(s.specialProductId) ?? 0;
+        plannedTake.set(s.specialProductId, planned + s.grams);
+      }
+    }
+
+    let unitCost = 0;
+    const recipes: { recipeId: string; quantity: number }[] = [];
+    // Recipes Off = billing only — do not resolve or cost any recipe / store ingredient.
+    if (trackStock) {
+      for (const p of storeParts) {
+        const perDeal = toNumber(p.quantity) || 1;
+        const takeQty = quantity * perDeal;
+        recipes.push({ recipeId: p.recipeId!, quantity: takeQty });
+        const c = await this.safeRecipeUnitCost(p.recipeId!);
+        if (c) unitCost += c.costPerBase * perDeal;
+      }
+
+      if (useBatch) {
+        for (const s of plannedSpecials) {
+          if (!s.cookRecipeId) continue;
+          const priced = await this.safeRecipeUnitCost(s.cookRecipeId);
+          if (!priced) continue;
+          const specialCost =
+            priced.costPerBase *
+            this.costing.cookedGramsToRecipeQty({
+              baseUnit: priced.recipe.baseUnit,
+              cookedGrams: s.grams,
+              plateGrams: s.plateGrams,
+            });
+          unitCost += specialCost / Math.max(quantity, 1e-9);
+        }
+      }
+    }
+
+    const costAmount = unitCost * quantity;
+    const specials = useBatch
+      ? plannedSpecials.map((s) => ({ specialProductId: s.specialProductId, grams: s.grams }))
+      : [];
+    const primarySpecial = specials[0];
+    const baseName = saleMode === "MIX_SOLO_STORE" ? `${menu.name} (store only)` : menu.name;
+    const displayName =
+      modifiersJson && modifiersJson.length
+        ? `${baseName} (+${modifiersJson.map((m) => m.name).join(", ")})`
+        : baseName;
+
+    return {
+      lineKind: "MENU",
+      menuItemId: menu.id,
+      name: displayName,
+      sellUnit: menu.sellUnit,
+      quantity,
+      ratePerUnit: rate,
+      amount,
+      unitCost,
+      costAmount,
+      notes,
+      recipeId: trackStock ? recipes[0]?.recipeId ?? menu.recipeId : null,
+      batchGrams: primarySpecial?.grams ?? 0,
+      specialProductId: primarySpecial?.specialProductId ?? null,
+      saleMode: specials.length || saleMode === "MIX_SOLO_STORE" ? saleMode : "MIX",
+      modifiersJson,
+      dealTakes: trackStock ? { recipes, specials } : { recipes: [], specials: [] },
+      kitchenStation: menu.kitchenStation || "COOKING",
+    };
+  }
+
+  private async ensureStock(
+    lines: {
+      recipeId: string | null;
+      quantity: number;
+      name: string;
+      dealTakes?: DealTakes | null;
+      kitchenStation?: string | null;
+    }[]
+  ) {
+    if (!(await this.settings.enforceRecipeStock())) return;
     return this.costing.assertCanSell(
-      lines.flatMap((l) => (l.recipeId ? [{ recipeId: l.recipeId, quantity: l.quantity, name: l.name }] : []))
+      lines.flatMap((l) => {
+        const takes = this.lineStoreTakes(l);
+        return takes.map((t) => ({
+          recipeId: t.recipeId,
+          quantity: t.quantity,
+          name: l.name,
+          station: t.station,
+        }));
+      })
     );
   }
 
   private async deductStock(lines: Line[], orderNo: number, tableNo: string | null, orderId: string) {
+    if (!(await this.settings.enforceRecipeStock())) return;
     const note = `Order #${orderNo}${tableNo ? ` · Table ${tableNo}` : ""} · auto sale`;
     const startedAt = new Date();
     const doneSpecials: { id: string; grams: number }[] = [];
     try {
       for (const line of lines) {
-        if (line.recipeId) {
-          await this.costing.deductRecipeStock(line.recipeId, line.quantity, note, orderId);
+        for (const t of this.lineStoreTakes(line)) {
+          await this.costing.deductRecipeStock(
+            t.recipeId,
+            t.quantity,
+            note,
+            orderId,
+            "SALE",
+            t.station
+          );
         }
       }
       for (const line of lines) {
-        if (line.specialProductId && line.batchGrams > 0) {
-          await this.specials.assertAndTake(line.specialProductId, line.batchGrams);
-          doneSpecials.push({ id: line.specialProductId, grams: line.batchGrams });
+        for (const s of this.lineSpecialTakes(line)) {
+          await this.specials.assertAndTake(s.specialProductId, s.grams);
+          doneSpecials.push({ id: s.specialProductId, grams: s.grams });
         }
       }
     } catch (e) {
@@ -1636,9 +2193,17 @@ export class OrdersService {
       for (const m of moves) {
         const qty = toNumber(m.quantity);
         if (qty >= 0) continue;
-        await this.prisma.storeItem.update({
-          where: { id: m.storeItemId },
-          data: { quantityOnHand: { increment: -qty } },
+        const station = m.kitchenStation || "COOKING";
+        await this.prisma.kitchenStock.upsert({
+          where: {
+            storeItemId_station: { storeItemId: m.storeItemId, station },
+          },
+          create: {
+            storeItemId: m.storeItemId,
+            station,
+            quantityOnHand: -qty,
+          },
+          update: { quantityOnHand: { increment: -qty } },
         });
         await this.prisma.stockMovement.delete({ where: { id: m.id } });
       }
@@ -1661,9 +2226,17 @@ export class OrdersService {
       const qty = toNumber(m.quantity);
       if (qty >= 0) continue; // SALE rows are negative
       const restore = -qty;
-      await this.prisma.storeItem.update({
-        where: { id: m.storeItemId },
-        data: { quantityOnHand: { increment: restore } },
+      const station = m.kitchenStation || "COOKING";
+      await this.prisma.kitchenStock.upsert({
+        where: {
+          storeItemId_station: { storeItemId: m.storeItemId, station },
+        },
+        create: {
+          storeItemId: m.storeItemId,
+          station,
+          quantityOnHand: restore,
+        },
+        update: { quantityOnHand: { increment: restore } },
       });
       await this.prisma.stockMovement.create({
         data: {
@@ -1673,22 +2246,31 @@ export class OrdersService {
           ratePerUnit: m.ratePerUnit,
           note: `Order #${orderNo} · cancelled`,
           orderId,
+          kitchenStation: station,
         },
       });
     }
     const items = await this.prisma.orderItem.findMany({ where: { orderId } });
     for (const it of items) {
-      if (it.specialProductId && toNumber(it.batchGrams) > 0) {
-        await this.specials.restoreGrams(it.specialProductId, toNumber(it.batchGrams));
+      const takes =
+        this.parseDealTakesJson(it.dealTakesJson) ||
+        (it.specialProductId && toNumber(it.batchGrams) > 0
+          ? {
+              recipes: [] as { recipeId: string; quantity: number }[],
+              specials: [{ specialProductId: it.specialProductId, grams: toNumber(it.batchGrams) }],
+            }
+          : null);
+      if (!takes) continue;
+      for (const s of takes.specials) {
+        await this.specials.restoreGrams(s.specialProductId, s.grams);
       }
     }
   }
 
-  private async resolveCreditCustomer(user: AuthUser, id: string, takeaway = false) {
+  private async resolveCreditCustomer(user: AuthUser, id: string) {
     if (!user.permissions.includes("order.pay")) {
-      throw new ForbiddenException("Only a cashier can put a table on credit");
+      throw new ForbiddenException("Only a cashier can put a bill on credit");
     }
-    if (takeaway) throw new BadRequestException("Credit is only for a seated table");
     const customer = await this.prisma.creditCustomer.findFirst({ where: { id, active: true } });
     if (!customer) throw new BadRequestException("Credit customer not found");
     return customer.id;
@@ -1699,6 +2281,7 @@ export class OrdersService {
       id: o.id,
       orderNo: o.orderNo,
       tableNo: o.tableNo,
+      tableId: o.tableId,
       status: o.status,
       paymentStatus: o.paymentStatus,
       waiterId: o.waiterId,
@@ -1708,6 +2291,13 @@ export class OrdersService {
 
   private toDto(o: FullOrder, showCost: boolean) {
     const tipAmount = toNumber(o.tipAmount);
+    const kitchenLines = o.items.filter((i) => i.lineKind !== "PER_HEAD");
+    const prepTargetMinutes = targetPrepMinutes(
+      kitchenLines.map((i) => ({
+        kitchenStation: i.menuItem?.kitchenStation ?? null,
+        prepMinutes: i.menuItem?.recipe?.prepMinutes ?? null,
+      }))
+    );
     return {
       id: o.id,
       orderNo: o.orderNo,
@@ -1719,6 +2309,10 @@ export class OrdersService {
       notes: o.notes,
       status: o.status,
       paymentStatus: o.paymentStatus,
+      pendingAt: o.pendingAt,
+      preparingAt: o.preparingAt,
+      readyAt: o.readyAt,
+      prepTargetMinutes,
       subtotal: toNumber(o.subtotal),
       total: toNumber(o.total),
       discountAmount: toNumber(o.discountAmount),
@@ -1787,6 +2381,13 @@ export class OrdersService {
         addedBy: i.addedBy?.name ?? null,
         category: i.menuItem?.category ?? (i.lineKind === "PER_HEAD" ? "Per head" : null),
         kitchenStation: i.menuItem?.kitchenStation ?? null,
+        prepMinutes:
+          i.lineKind === "PER_HEAD"
+            ? null
+            : itemPrepMinutes({
+                kitchenStation: i.menuItem?.kitchenStation ?? null,
+                prepMinutes: i.menuItem?.recipe?.prepMinutes ?? null,
+              }),
       })),
       payments: o.payments.map((p) => ({
         id: p.id,

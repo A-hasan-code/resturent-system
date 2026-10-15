@@ -86,6 +86,9 @@ export function CreditCustomersPage() {
   const [slip, setSlip] = useState<Slip | null>(null);
   const [preview, setPreview] = useState<Slip | null>(null);
   const [openBill, setOpenBill] = useState<string | null>(null);
+  const [moveBill, setMoveBill] = useState<Invoice | null>(null);
+  const [moveQ, setMoveQ] = useState("");
+  const [movePick, setMovePick] = useState<CustomerRow | null>(null);
 
   async function loadList(term = q) {
     const list = await api<CustomerRow[]>(`/credit-customers${term.trim() ? `?q=${encodeURIComponent(term.trim())}` : ""}`);
@@ -106,6 +109,26 @@ export function CreditCustomersPage() {
       address: detail.address ?? "",
       cnic: detail.cnic ?? "",
     });
+  }
+
+  async function reassignCredit() {
+    if (!moveBill || !movePick || !account) return;
+    setBusy(true);
+    try {
+      await api(`/orders/${moveBill.id}/credit-customer`, {
+        method: "PATCH",
+        body: JSON.stringify({ creditCustomerId: movePick.id }),
+      });
+      toast.push(t("credit.changePersonOk", { name: movePick.name }), "ok");
+      setMoveBill(null);
+      setMovePick(null);
+      await loadList();
+      await openAccount(account.id);
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("credit.changePersonFailed"), "err");
+    } finally {
+      setBusy(false);
+    }
   }
 
   useEffect(() => {
@@ -339,14 +362,30 @@ export function CreditCustomersPage() {
                           </span>
                         </button>
                         {openBill === inv.id && (
-                          <ul className="tiny" style={{ margin: "0.25rem 0 0.4rem", paddingLeft: "1.1rem" }}>
-                            {inv.items.map((item, i) => (
-                              <li key={`${inv.id}-${i}`}>
-                                {item.quantity} {unitLabel(item.unit)} {item.name}
-                                <span className="muted"> — {money(item.amount)}</span>
-                              </li>
-                            ))}
-                          </ul>
+                          <>
+                            <ul className="tiny" style={{ margin: "0.25rem 0 0.4rem", paddingLeft: "1.1rem" }}>
+                              {inv.items.map((item, i) => (
+                                <li key={`${inv.id}-${i}`}>
+                                  {item.quantity} {unitLabel(item.unit)} {item.name}
+                                  <span className="muted"> — {money(item.amount)}</span>
+                                </li>
+                              ))}
+                            </ul>
+                            {inv.paymentStatus !== "PAID" && inv.due > 0 ? (
+                              <button
+                                type="button"
+                                className="btn ghost sm"
+                                disabled={busy}
+                                onClick={() => {
+                                  setMoveBill(inv);
+                                  setMoveQ("");
+                                  setMovePick(null);
+                                }}
+                              >
+                                {t("credit.changePerson")}
+                              </button>
+                            ) : null}
+                          </>
                         )}
                       </div>
                     );
@@ -360,6 +399,77 @@ export function CreditCustomersPage() {
         </section>
       </div>
       <CreditPaidModal slip={preview} onClose={() => setPreview(null)} />
+      <Modal
+        open={!!moveBill}
+        title={t("credit.changePerson")}
+        onClose={() => {
+          setMoveBill(null);
+          setMovePick(null);
+        }}
+      >
+        {moveBill ? (
+          <div className="modal-scroll">
+            <p className="muted tiny" style={{ marginTop: 0 }}>
+              {t("credit.changePersonHint", { n: String(moveBill.orderNo) })}
+            </p>
+            <SearchField
+              value={moveQ}
+              onChange={setMoveQ}
+              placeholder={t("credit.searchPh")}
+            />
+            <div style={{ maxHeight: "14rem", overflow: "auto", marginTop: "0.5rem" }}>
+              {rows
+                .filter(
+                  (r) =>
+                    r.id !== account?.id &&
+                    (!moveQ.trim() ||
+                      r.name.toLowerCase().includes(moveQ.trim().toLowerCase()) ||
+                      r.phone.includes(moveQ.trim()) ||
+                      (r.cnic || "").includes(moveQ.trim()))
+                )
+                .slice(0, 40)
+                .map((r) => (
+                  <button
+                    key={r.id}
+                    type="button"
+                    className={`btn ghost sm`}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      textAlign: "left",
+                      marginBottom: "0.25rem",
+                      borderColor: movePick?.id === r.id ? "var(--accent)" : undefined,
+                    }}
+                    onClick={() => setMovePick(r)}
+                  >
+                    <strong>{r.name}</strong>
+                    <span className="tiny muted"> · {r.phone}</span>
+                  </button>
+                ))}
+            </div>
+            <div className="row" style={{ marginTop: "0.75rem", justifyContent: "flex-end", gap: "0.5rem" }}>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => {
+                  setMoveBill(null);
+                  setMovePick(null);
+                }}
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy || !movePick}
+                onClick={() => void reassignCredit()}
+              >
+                {t("credit.changePersonSave")}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
     </div>
   );
 }

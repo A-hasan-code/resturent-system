@@ -39,6 +39,7 @@ type Recipe = {
   category: string;
   baseUnit: string;
   baseQty: number;
+  prepMinutes?: number;
   costPerBase: number;
   totalForBase?: number;
   ingredients: {
@@ -71,23 +72,28 @@ export function RecipesPage() {
   const [catOpen, setCatOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [newCatName, setNewCatName] = useState("");
+  const [enforceStock, setEnforceStock] = useState(true);
+  const [enforceBusy, setEnforceBusy] = useState(false);
 
   const [name, setName] = useState("");
   const [category, setCategory] = useState("Karahi");
   const [baseUnit, setBaseUnit] = useState("KG");
   const [baseQty, setBaseQty] = useState("1");
+  const [prepMinutes, setPrepMinutes] = useState("15");
   const [ings, setIngs] = useState<IngForm[]>([
     { storeItemId: "", itemQ: "", quantity: "", unit: "KG" },
   ]);
 
   async function load() {
     try {
-      const [recipes, cats] = await Promise.all([
+      const [recipes, cats, stock] = await Promise.all([
         api<Recipe[]>("/recipes"),
         api<RecipeCat[]>("/recipes/categories"),
+        api<{ enforceRecipeStock: boolean }>("/recipes/stock-enforce"),
       ]);
       setRows(recipes);
       setRecipeCats(cats);
+      setEnforceStock(stock.enforceRecipeStock !== false);
       if (cats[0] && !cats.find((c) => c.name === category)) {
         setCategory(cats[0].name);
       }
@@ -111,6 +117,31 @@ export function RecipesPage() {
       }
     } catch (e) {
       toast.push(e instanceof Error ? e.message : t("recipes.loadFailed"), "err");
+    }
+  }
+
+  async function toggleStockEnforce(next: boolean) {
+    if (!can("recipe.manage") || enforceBusy) return;
+    setEnforceBusy(true);
+    const prev = enforceStock;
+    setEnforceStock(next);
+    try {
+      const res = await api<{ enforceRecipeStock: boolean }>("/recipes/stock-enforce", {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: next }),
+      });
+      setEnforceStock(res.enforceRecipeStock !== false);
+      toast.push(
+        res.enforceRecipeStock !== false
+          ? t("recipes.stockEnforceOn")
+          : t("recipes.stockEnforceOff"),
+        "ok"
+      );
+    } catch (err) {
+      setEnforceStock(prev);
+      toast.push(err instanceof Error ? err.message : t("recipes.stockEnforceFailed"), "err");
+    } finally {
+      setEnforceBusy(false);
     }
   }
 
@@ -151,6 +182,7 @@ export function RecipesPage() {
     setCategory(recipeCats[0]?.name || "General");
     setBaseUnit("KG");
     setBaseQty("1");
+    setPrepMinutes("15");
     setIngs([{ storeItemId: "", itemQ: "", quantity: "", unit: "KG" }]);
     setEditId(null);
   }
@@ -166,6 +198,7 @@ export function RecipesPage() {
     setCategory(r.category);
     setBaseUnit(r.baseUnit);
     setBaseQty(String(r.baseQty));
+    setPrepMinutes(String(r.prepMinutes ?? 15));
     setIngs(
       r.ingredients.length
         ? r.ingredients.map((i) => ({
@@ -232,6 +265,7 @@ export function RecipesPage() {
         category,
         baseUnit,
         baseQty: Number(baseQty) || 1,
+        prepMinutes: Math.max(1, Math.round(Number(prepMinutes) || 15)),
         ingredients,
       };
       if (editId) {
@@ -309,6 +343,21 @@ export function RecipesPage() {
         )}
       </div>
 
+      <div className="panel panel-pad" style={{ marginBottom: "0.85rem" }}>
+        <label className="switch-row" style={{ margin: 0 }}>
+          <input
+            type="checkbox"
+            checked={enforceStock}
+            disabled={!can("recipe.manage") || enforceBusy}
+            onChange={(e) => toggleStockEnforce(e.target.checked)}
+          />
+          <span>
+            {t("recipes.stockEnforce")}
+            <small>{t("recipes.stockEnforceHint")}</small>
+          </span>
+        </label>
+      </div>
+
       <div className="chips">
         {filterChips.map((c) => (
           <button
@@ -340,6 +389,9 @@ export function RecipesPage() {
               <div>
                 <h2 style={{ margin: 0, fontSize: "1.15rem" }}>{r.name}</h2>
                 <span className="badge">{r.category}</span>
+                <span className="badge pending" style={{ marginLeft: "0.35rem" }}>
+                  {r.prepMinutes ?? 15}m
+                </span>
               </div>
               <div className="row" style={{ alignItems: "flex-start", gap: "0.5rem" }}>
                 <div style={{ textAlign: "right" }}>
@@ -486,6 +538,20 @@ export function RecipesPage() {
                 required
               />
             </div>
+          </div>
+          <div className="field">
+            <label>{t("recipes.prepMinutes")}</label>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={prepMinutes}
+              onChange={(e) => setPrepMinutes(e.target.value)}
+              required
+            />
+            <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
+              {t("recipes.prepMinutesHint")}
+            </p>
           </div>
 
           <h3 style={{ margin: "0.5rem 0" }}>{t("recipes.ingredients")}</h3>

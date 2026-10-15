@@ -5,9 +5,11 @@ export type OrderEvent = {
   id: string;
   orderNo: number;
   tableNo: string | null;
+  tableId?: string | null;
   status: string;
   paymentStatus?: string;
   waiterId?: string | null;
+  assignedCashierId?: string | null;
 };
 
 @Injectable()
@@ -16,7 +18,15 @@ export class RealtimeService {
 
   orderChanged(o: OrderEvent, reason: string) {
     this.gw.emit(ROOM.all, "orders.changed", { ...o, reason });
-    if (reason === "created" || reason === "items-added" || reason === "cancelled" || reason === "reversed" || reason === "edited") {
+    // Takeaway (no table) belongs to Main Cashier — do not ping kitchen board.
+    const toKitchen =
+      !!o.tableId &&
+      (reason === "created" ||
+        reason === "items-added" ||
+        reason === "cancelled" ||
+        reason === "reversed" ||
+        reason === "edited");
+    if (toKitchen) {
       this.gw.emit(ROOM.kitchen, "kitchen.new", { ...o, reason });
     }
     if ((o.status === "READY" || o.status === "SERVED") && reason === "status") {
@@ -25,6 +35,18 @@ export class RealtimeService {
       if (o.waiterId) rooms.push(ROOM.user(o.waiterId));
       this.gw.emit(rooms, o.status === "READY" ? "order.ready" : "order.served", o);
     }
+  }
+
+  /** PENDING longer than 1 minute without Start — kitchen + cashiers + system manager (bill.view). */
+  orderPendingSlow(o: OrderEvent & { waitSeconds: number }) {
+    this.gw.emit([ROOM.kitchen, ROOM.cashier], "kitchen.pending.slow", o);
+  }
+
+  /** PREPARING past recipe target prep time. */
+  orderPrepLate(
+    o: OrderEvent & { targetMinutes: number; lateByMinutes: number; elapsedMinutes: number }
+  ) {
+    this.gw.emit([ROOM.kitchen, ROOM.cashier], "kitchen.prep.late", o);
   }
 
   billRequested(o: OrderEvent & { waiter?: string | null }) {

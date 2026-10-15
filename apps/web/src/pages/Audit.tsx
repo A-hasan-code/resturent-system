@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, downloadApi, money } from "../api";
+import { useBusinessDay } from "../hotel-gate";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 import { DateField } from "../components/DateField";
 import { MonthField } from "../components/MonthField";
+import { OtherPrintButton } from "../components/OtherPrintButton";
 
 type Day = {
   date: string;
@@ -125,13 +127,12 @@ function isoDay(d: Date) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-function monthBounds(ym: string) {
+function monthBounds(ym: string, businessToday = isoDay(new Date())) {
   const [y, m] = ym.split("-").map(Number);
   const last = new Date(y, m, 0);
-  const today = isoDay(new Date());
   const from = `${ym}-01`;
   let to = isoDay(last);
-  if (to > today) to = today;
+  if (to > businessToday) to = businessToday;
   return { from, to };
 }
 
@@ -221,9 +222,9 @@ function Bars({ days }: { days: Day[] }) {
 export function AuditPage() {
   const toast = useToast();
   const t = useT();
-  const today = isoDay(new Date());
+  const { businessDate: today } = useBusinessDay();
   const thisMonth = today.slice(0, 7);
-  const initial = monthBounds(thisMonth);
+  const initial = monthBounds(thisMonth, today);
 
   const [from, setFrom] = useState(initial.from);
   const [to, setTo] = useState(initial.to);
@@ -313,7 +314,7 @@ export function AuditPage() {
   }
 
   function pickMonth(ym: string) {
-    const b = monthBounds(ym);
+    const b = monthBounds(ym, today);
     commit({ from: b.from, to: b.to, staff });
   }
 
@@ -321,7 +322,7 @@ export function AuditPage() {
     const now = new Date();
     if (kind === "today") return commit({ from: today, to: today, staff });
     if (kind === "month") {
-      const b = monthBounds(thisMonth);
+      const b = monthBounds(thisMonth, today);
       return commit({ from: b.from, to: b.to, staff });
     }
     if (kind === "year") return commit({ from: `${now.getFullYear()}-01-01`, to: today, staff });
@@ -333,10 +334,11 @@ export function AuditPage() {
     commit({ from, to, staff });
   }
 
+  const monthPreset = monthBounds(thisMonth, today);
   const activePreset =
     applied.from === today && applied.to === today
       ? "today"
-      : applied.from === monthBounds(thisMonth).from && applied.to === monthBounds(thisMonth).to
+      : applied.from === monthPreset.from && applied.to === monthPreset.to
         ? "month"
         : applied.from === `${new Date().getFullYear()}-01-01` && applied.to === today
           ? "year"
@@ -396,9 +398,20 @@ export function AuditPage() {
             {firstSale ? ` · ${t("audit.since", { date: firstSale })}` : ""}
           </p>
         </div>
-        <button type="button" className="btn" disabled={busy || loading} onClick={() => void downloadPdf()}>
-          {busy ? t("common.loading") : t("audit.pdf")}
-        </button>
+        <div className="row page-head-actions" style={{ gap: "0.5rem", flexWrap: "wrap" }}>
+          <button type="button" className="btn" disabled={busy || loading} onClick={() => void downloadPdf()}>
+            {busy ? t("common.loading") : t("audit.pdf")}
+          </button>
+          <OtherPrintButton
+            path={`/audit/export/print?${new URLSearchParams({
+              from: applied.from,
+              to: applied.to,
+              ...(applied.staff.trim() ? { staff: applied.staff.trim() } : {}),
+            }).toString()}`}
+            className="btn ghost"
+            disabled={busy || loading}
+          />
+        </div>
       </div>
 
       <form className="panel panel-pad audit-filters" style={{ marginBottom: "1rem" }} onSubmit={applyFilters}>

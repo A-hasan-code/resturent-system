@@ -11,7 +11,35 @@ import {
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
-import { KitchenStation, MenuItemKind, UnitType } from "@prisma/client";
+import { MenuDealPartKind, MenuItemKind, UnitType } from "@prisma/client";
+
+export class MenuDealPartInputDto {
+  @IsEnum(MenuDealPartKind)
+  kind!: MenuDealPartKind;
+
+  @ValidateIf((o) => o.kind === "STORE")
+  @IsString()
+  @MinLength(1)
+  recipeId?: string;
+
+  @ValidateIf((o) => o.kind === "SPECIAL")
+  @IsString()
+  @MinLength(1)
+  specialProductId?: string;
+
+  /** Per 1 deal: recipe multiplier or pot plates. */
+  @IsNumber()
+  @Min(0.001)
+  quantity!: number;
+
+  @IsOptional()
+  @IsString()
+  label?: string | null;
+
+  @IsOptional()
+  @IsNumber()
+  sortOrder?: number;
+}
 
 export class CreateMenuItemDto {
   @IsString()
@@ -22,9 +50,10 @@ export class CreateMenuItemDto {
   @IsOptional()
   category?: string;
 
-  @IsEnum(KitchenStation)
+  @IsString()
+  @MinLength(1)
   @IsOptional()
-  kitchenStation?: KitchenStation;
+  kitchenStation?: string;
 
   @IsEnum(MenuItemKind)
   @IsOptional()
@@ -76,6 +105,13 @@ export class CreateMenuItemDto {
   @Min(0.001)
   @IsOptional()
   mixSpecialPlates?: number;
+
+  /** MIX deal parts (preferred). At least one STORE; SPECIAL optional. */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => MenuDealPartInputDto)
+  parts?: MenuDealPartInputDto[];
 }
 
 export class UpdateMenuItemDto {
@@ -88,9 +124,10 @@ export class UpdateMenuItemDto {
   @IsOptional()
   category?: string | null;
 
-  @IsEnum(KitchenStation)
+  @IsString()
+  @MinLength(1)
   @IsOptional()
-  kitchenStation?: KitchenStation;
+  kitchenStation?: string;
 
   @IsEnum(MenuItemKind)
   @IsOptional()
@@ -144,6 +181,12 @@ export class UpdateMenuItemDto {
   @Min(0.001)
   @IsOptional()
   mixSpecialPlates?: number | null;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => MenuDealPartInputDto)
+  parts?: MenuDealPartInputDto[];
 
   @IsOptional()
   active?: boolean;

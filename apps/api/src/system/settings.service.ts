@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync,
 import { extname, join } from "path";
 import { PrismaService } from "../prisma/prisma.service";
 import { dataDir } from "../config/env";
-import { parseDayStart } from "../common/business-day";
+import { businessDateOf, parseDayStart } from "../common/business-day";
 import { AuthUser } from "../common/decorators";
 import { buildThermalLogoPng } from "../print/thermal-logo";
 
@@ -68,6 +68,19 @@ export class SettingsService {
     });
   }
 
+  /**
+   * When true (default): orders check/deduct kitchen recipe + pot stock.
+   * When false: billing-only — place orders & track sales without recipes/stock.
+   */
+  async enforceRecipeStock(): Promise<boolean> {
+    return (await this.get("orders.enforceRecipeStock", "1")) !== "0";
+  }
+
+  async setEnforceRecipeStock(on: boolean) {
+    await this.set("orders.enforceRecipeStock", on ? "1" : "0");
+    return { enforceRecipeStock: on };
+  }
+
   async getMany(prefix: string): Promise<Record<string, string>> {
     const rows = await this.prisma.setting.findMany({
       where: { key: { startsWith: prefix } },
@@ -91,6 +104,23 @@ export class SettingsService {
     return pick ? join(dir, pick) : null;
   }
 
+  /**
+   * Public /branding URL with file-mtime cache bust so previews refresh after upload
+   * (printers read the file from disk; browsers cache by URL).
+   */
+  logoPublicUrl(): string | null {
+    const path = this.logoFilePath();
+    if (!path) return null;
+    const name = path.split(/[/\\]/).pop()!;
+    let v = Date.now();
+    try {
+      v = Math.floor(statSync(path).mtimeMs);
+    } catch {
+      /* keep Date.now */
+    }
+    return `/branding/${name}?v=${v}`;
+  }
+
   /** Keep restaurant.logo URL matching the file on disk (fixes stale .png after JPG upload). */
   async syncLogoUrl(): Promise<string | null> {
     const path = this.logoFilePath();
@@ -98,15 +128,10 @@ export class SettingsService {
       await this.set("restaurant.logo", "");
       return null;
     }
-    const name = path.split(/[/\\]/).pop()!;
+    const url = this.logoPublicUrl()!;
     const current = await this.get("restaurant.logo", "");
-    // Prefer the on-disk file name (e.g. thermal logo.png after converting a dark JPEG seal).
-    if (!current.includes(name) || /logo\.jpe?g/i.test(current)) {
-      const url = `/branding/${name}?v=${Date.now()}`;
-      await this.set("restaurant.logo", url);
-      return url;
-    }
-    return current || `/branding/${name}`;
+    if (current !== url) await this.set("restaurant.logo", url);
+    return url;
   }
 
   /** Bundled PAID stamp, refreshed when the shipped graphic changes. */
@@ -144,23 +169,40 @@ export class SettingsService {
   }
 
   /**
-   * Close time is the server time saved in Settings (business day start).
-   * Only a manual close stops new orders. Open works at any time, so a mistaken close can be undone.
+   * Close hotel = shift ended: no new orders, no day close, no expenses, no inventory close
+   * until the hotel is opened again. Open works at any time if close was a mistake.
    * closedAt / closedBy is the record admin keeps of when the hotel was closed.
    */
   async hotelStatus() {
     const s = await this.getMany("hotel.");
     const close = await this.dayStart();
     const manuallyClosed = (s["hotel.manuallyClosed"] ?? "0") === "1";
+    const businessDate = businessDateOf(new Date(), close.h, close.m);
     return {
       closeTime: close.label,
+      /** Current restaurant business day (dayStart → next dayStart). */
+      businessDate,
+      dayStart: close.label,
       manuallyClosed,
       closedAt: s["hotel.closedAt"] || null,
       closedBy: s["hotel.closedBy"] || null,
       openedAt: s["hotel.openedAt"] || null,
       openedBy: s["hotel.openedBy"] || null,
       acceptingOrders: !manuallyClosed,
+      /** Same as acceptingOrders — shift is live only while hotel is open. */
+      shiftOpen: !manuallyClosed,
     };
+  }
+
+  /** Block shift work while hotel is closed (close report, expenses, inventory close). */
+  async assertHotelOpen() {
+    const gate = await this.hotelStatus();
+    if (gate.shiftOpen) return;
+    throw new BadRequestException({
+      code: "HOTEL_CLOSED",
+      message:
+        "Hotel is closed — shift ended. Open the hotel before day close, expenses, or inventory close.",
+    });
   }
 
   async closeHotel(user: AuthUser) {
@@ -264,8 +306,7 @@ export class SettingsService {
     const thermal = ext === ".svg" ? null : buildThermalLogoPng(file.buffer, ext);
     if (thermal) writeFileSync(join(dir, "logo.png"), thermal);
     else writeFileSync(join(dir, ext === ".svg" ? "logo.svg" : `logo${ext}`), file.buffer);
-    const url = `/branding/logo.png?v=${Date.now()}`;
-    await this.set("restaurant.logo", existsSync(join(dir, "logo.png")) ? url : `/branding/logo${ext}?v=${Date.now()}`);
+    await this.syncLogoUrl();
     return this.restaurant();
   }
 

@@ -128,7 +128,7 @@ export class CreateOrderDto {
   @IsBoolean()
   printKot?: boolean;
 
-  /** Seated credit account. The order is the invoice; cash is collected later. */
+  /** Credit account (table or takeaway). The order is the invoice; cash is collected later. */
   @IsOptional()
   @IsString()
   creditCustomerId?: string;
@@ -273,6 +273,32 @@ export class PayOrderDto {
   @IsString()
   @IsOptional()
   handedToId?: string;
+}
+
+/** Move an existing credit invoice onto another credit customer. */
+export class ReassignCreditDto {
+  @IsString()
+  creditCustomerId!: string;
+}
+
+/** Put an unpaid table or takeaway bill on a credit customer's account (no cash now). */
+export class PutOnCreditDto {
+  @IsString()
+  creditCustomerId!: string;
+
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  discount?: number;
+
+  @IsString()
+  @IsOptional()
+  servedByName?: string;
+
+  /** If true, mark COMPLETED so the table frees (guest left). Kitchen must be Ready/Served. */
+  @IsOptional()
+  @IsBoolean()
+  releaseTable?: boolean;
 }
 
 export class UpdateOrderDto {

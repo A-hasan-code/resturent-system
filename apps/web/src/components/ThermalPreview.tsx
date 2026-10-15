@@ -28,12 +28,13 @@ function brandingUrl(path: string | null | undefined) {
     serverOrigin() ||
     (typeof location !== "undefined" ? location.origin : "");
   const withSlash = path.startsWith("/") ? path : `/${path}`;
-  const sep = withSlash.includes("?") ? "&" : "?";
-  return `${origin}${withSlash}${sep}v=5`;
+  return `${origin}${withSlash}`;
 }
 
 type Segment =
   | { kind: "text"; value: string }
+  | { kind: "tableBadge"; value: string }
+  | { kind: "staffBlock"; value: string }
   | { kind: "logo" }
   | { kind: "paid"; size?: "large" | "small" }
   | { kind: "unpaid"; size?: "large" | "small" }
@@ -41,7 +42,7 @@ type Segment =
 
 type ViewBlock =
   | Segment
-  | { kind: "itemsOverlay"; stamp: "paid" | "unpaid"; text: string };
+  | { kind: "stampOverlay"; stamp: "paid" | "unpaid"; text: string; where: "items" | "totals" };
 
 /** Same characters the thermal printer gets — images stand in for raster markers. */
 export function ThermalPreview({
@@ -55,7 +56,9 @@ export function ThermalPreview({
   const mm = normalizePreviewMm(paperWidth);
   const blocks = useMemo(() => {
     const parts = splitThermalText(text);
-    const withOverlay = mergeItemOverlays(parts);
+    const withTable = extractTableBadges(parts);
+    const withStaff = extractStaffBlocks(withTable);
+    const withOverlay = mergeStampOverlays(withStaff);
     const logoPath = brandingUrl(logoUrl);
     if (logoPath && !withOverlay.some((p) => p.kind === "logo") && !text.includes("[LOGO]")) {
       return [{ kind: "logo" as const }, ...withOverlay];
@@ -80,16 +83,19 @@ export function ThermalPreview({
         {blocks.map((seg, i) => {
           if (seg.kind === "logo") {
             return logo ? (
-              <div key={i} className="thermal-slip-img thermal-slip-logo">
+              <div key={`logo-${logo}`} className="thermal-slip-img thermal-slip-logo">
                 <img src={logo} alt="" />
               </div>
             ) : null;
           }
-          if (seg.kind === "itemsOverlay") {
+          if (seg.kind === "stampOverlay") {
             const src = seg.stamp === "paid" ? paid : unpaid;
             const label = seg.stamp === "paid" ? "PAID" : "UNPAID";
             return (
-              <div key={i} className="thermal-slip-items-overlay">
+              <div
+                key={i}
+                className={`thermal-slip-items-overlay thermal-slip-stamp-on-${seg.where}`}
+              >
                 <pre className="thermal-slip-text">{seg.text}</pre>
                 {src ? (
                   <div className="thermal-slip-stamp-overlay" aria-hidden>
@@ -119,7 +125,11 @@ export function ThermalPreview({
               <div key={i} className="thermal-slip-img thermal-slip-stamp thermal-slip-stamp--small">
                 <img src={unpaid} alt="UNPAID" />
               </div>
-            ) : null;
+            ) : (
+              <pre key={i} className="thermal-slip-text">
+                *** UNPAID ***
+              </pre>
+            );
           }
           if (seg.kind === "cancelled") {
             return cancelled ? (
@@ -132,8 +142,22 @@ export function ThermalPreview({
               </pre>
             );
           }
+          if (seg.kind === "tableBadge") {
+            return (
+              <pre key={i} className="thermal-slip-text thermal-slip-table-badge">
+                {seg.value.trim()}
+              </pre>
+            );
+          }
+          if (seg.kind === "staffBlock") {
+            return (
+              <div key={i} className="thermal-slip-staff-block">
+                <pre className="thermal-slip-text thermal-slip-staff-block__body">{seg.value}</pre>
+              </div>
+            );
+          }
           return (
-            <pre key={i} className={`thermal-slip-text${thermalTableBadgeClass(seg.value)}`}>
+            <pre key={i} className="thermal-slip-text">
               {seg.value}
             </pre>
           );
@@ -143,36 +167,152 @@ export function ThermalPreview({
   );
 }
 
-/** Only style a one-line table badge — never a whole slip body that mentions "Table No.". */
-function thermalTableBadgeClass(block: string) {
-  const lines = block.replace(/\r\n/g, "\n").split("\n").filter((l) => l.trim());
-  if (lines.length === 1 && /^\s*Table No\./i.test(lines[0])) return " thermal-slip-table-badge";
-  return "";
+/** Split "Table No. …" onto its own segment so black badge CSS always applies. */
+function extractTableBadges(segments: Segment[]): Segment[] {
+  const out: Segment[] = [];
+  for (const seg of segments) {
+    if (seg.kind !== "text") {
+      out.push(seg);
+      continue;
+    }
+    const lines = seg.value.replace(/\r\n/g, "\n").split("\n");
+    let buf: string[] = [];
+    const flush = () => {
+      if (!buf.length) return;
+      out.push({ kind: "text", value: buf.join("\n") });
+      buf = [];
+    };
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      // SoftInfinity: "Table No." label then next line is the black pill (table name).
+      if (/^\s*Table No\.?\s*$/i.test(line) && i + 1 < lines.length) {
+        flush();
+        out.push({ kind: "tableBadge", value: lines[i + 1]!.trim() || line });
+        i += 1;
+      } else if (/^\s*Table No\./i.test(line) || /^\s*TABLE NO\./i.test(line)) {
+        flush();
+        out.push({ kind: "tableBadge", value: line });
+      } else {
+        buf.push(line);
+      }
+    }
+    flush();
+  }
+  return out;
 }
 
-/** Place the main PAID/UNPAID stamp as an overlay on the item lines only (not totals). */
-function mergeItemOverlays(segments: Segment[]): ViewBlock[] {
+function extractStaffBlocks(segments: Segment[]): Segment[] {
+  const out: Segment[] = [];
+  for (const seg of segments) {
+    if (seg.kind !== "text") {
+      out.push(seg);
+      continue;
+    }
+    const lines = seg.value.replace(/\r\n/g, "\n").split("\n");
+    let buf: string[] = [];
+    const flushBuf = () => {
+      if (!buf.length) return;
+      out.push({ kind: "text", value: buf.join("\n") });
+      buf = [];
+    };
+    let i = 0;
+    while (i < lines.length) {
+      const isRule = /^[-=]{3,}\s*$/.test(lines[i]!.trim());
+      const nextIsStaff = i + 1 < lines.length && /^\s*STAFF\s*$/i.test(lines[i + 1]!.trim());
+      if (isRule && nextIsStaff) {
+        flushBuf();
+        const staffLines: string[] = [lines[i]!];
+        i += 1;
+        while (i < lines.length) {
+          staffLines.push(lines[i]!);
+          if (i > 0 && /^[-=]{3,}\s*$/.test(lines[i]!.trim()) && staffLines.length > 2) {
+            i += 1;
+            break;
+          }
+          i += 1;
+        }
+        out.push({ kind: "staffBlock", value: staffLines.join("\n").trim() });
+        continue;
+      }
+      buf.push(lines[i]!);
+      i += 1;
+    }
+    flushBuf();
+  }
+  return out;
+}
+
+/**
+ * Sit PAID/UNPAID on the charges (totals) block when stamp follows totals text.
+ * Fallback: stamp before item lines → overlay on items.
+ */
+function mergeStampOverlays(segments: Segment[]): ViewBlock[] {
   const out: ViewBlock[] = [];
   for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    const isMainStamp =
-      (seg.kind === "paid" || seg.kind === "unpaid") && seg.size !== "small";
-    if (isMainStamp) {
-      const next = segments[i + 1];
-      if (next?.kind === "text") {
-        const { items, rest } = peelItemLines(next.value);
-        out.push({ kind: "itemsOverlay", stamp: seg.kind, text: items || next.value });
-        if (rest) out.push({ kind: "text", value: rest });
-        i++;
+    const seg = segments[i]!;
+    const next = segments[i + 1];
+
+    // text then stamp → peel totals/charges only (not the whole slip)
+    if (seg.kind === "text" && next && (next.kind === "paid" || next.kind === "unpaid")) {
+      const { before, totals } = peelTotalsBlock(seg.value);
+      if (totals.trim()) {
+        if (before) out.push({ kind: "text", value: before });
+        out.push({
+          kind: "stampOverlay",
+          stamp: next.kind,
+          text: totals,
+          where: "totals",
+        });
+        i += 1;
         continue;
       }
     }
+
+    // stamp then items text (legacy)
+    const isStamp = seg.kind === "paid" || seg.kind === "unpaid";
+    if (isStamp && next?.kind === "text") {
+      const { items, rest } = peelItemLines(next.value);
+      if (items.trim()) {
+        out.push({
+          kind: "stampOverlay",
+          stamp: seg.kind,
+          text: items,
+          where: "items",
+        });
+        if (rest) out.push({ kind: "text", value: rest });
+        i += 1;
+        continue;
+      }
+    }
+
     out.push(seg);
   }
   return out;
 }
 
-/** Keep totals / cash / footer out of the stamp overlay. */
+/** Split trailing Gross/Grand/Discount… lines so stamp sits only on charges. */
+function peelTotalsBlock(text: string): { before: string; totals: string } {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const isTotals = (l: string) =>
+    /^(Gross Total|Net Total|Discount|DISC|Tax\b|Tip\b|Grand Total|Cash Received|Amount paid|Paid\b|Change|Balance|Payment:|SUBTOTAL|TOTAL:?)/i.test(
+      l.trim(),
+    );
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (isTotals(lines[i]!)) {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return { before: text, totals: "" };
+  // Include a blank line just above totals if present
+  if (start > 0 && lines[start - 1]!.trim() === "") start -= 1;
+  return {
+    before: lines.slice(0, start).join("\n"),
+    totals: lines.slice(start).join("\n"),
+  };
+}
+
 function peelItemLines(text: string): { items: string; rest: string } {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   let cut = lines.findIndex((l) =>
@@ -182,7 +322,7 @@ function peelItemLines(text: string): { items: string; rest: string } {
   );
   if (cut < 0) cut = lines.length;
   let itemEnd = cut;
-  if (itemEnd > 0 && /^[-=]{3,}$/.test(lines[itemEnd - 1].trim())) itemEnd -= 1;
+  if (itemEnd > 0 && /^[-=]{3,}$/.test(lines[itemEnd - 1]!.trim())) itemEnd -= 1;
   return {
     items: lines.slice(0, itemEnd).join("\n"),
     rest: lines.slice(itemEnd).join("\n"),

@@ -1,19 +1,20 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { api, formatKg, gramsToKg, kgToGrams, money } from "../api";
+import { api, formatKg, gramsToKg, kgToGrams, money, unitLabel } from "../api";
 import { useAuth } from "../auth";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
 import { useConfirm } from "../components/ConfirmModal";
 import { SearchField, matchesSearch } from "../components/SearchField";
+import { DateField } from "../components/DateField";
+import { TimeField } from "../components/TimeField";
 import { useHotelGate } from "../hotel-gate";
+import { loadKitchenStations, type KitchenStationRow } from "../kitchenStations";
 
 type Recipe = { id: string; name: string; category: string };
 type SellMode = "BOTH" | "SERVING_ONLY" | "RS_ONLY";
-type KitchenStation = "BEVERAGES" | "COOKING" | "BBQ";
 
 const SERVING_PRESETS = ["Plate", "Glass", "Box", "Bowl", "Cup"] as const;
-const STATIONS: KitchenStation[] = ["BEVERAGES", "COOKING", "BBQ"];
 
 type SpecialProduct = {
   id: string;
@@ -22,9 +23,11 @@ type SpecialProduct = {
   servingLabel: string;
   sellMode: SellMode;
   platePrice: number;
+  /** Separate half-plate Rs; null/0 = no half option */
+  halfPlatePrice?: number | null;
   plateGrams: number;
   cookRecipeId: string | null;
-  kitchenStation?: KitchenStation;
+  kitchenStation?: string;
   cookRecipe?: { id: string; name: string; category?: string } | null;
   menuItems?: { id: string; name: string; kind: string; sellingPrice: number }[];
 };
@@ -36,6 +39,7 @@ type TodayProduct = {
   servingLabel: string;
   sellMode: SellMode;
   platePrice: number;
+  halfPlatePrice?: number | null;
   plateGrams: number;
   cookRecipeId: string | null;
   batchId: string | null;
@@ -86,6 +90,24 @@ type LossRow = {
   wasteNote: string | null;
 };
 
+type CookIngRow = {
+  storeItemId: string;
+  name: string;
+  unit: string;
+  storeUnit: string;
+  suggestedQty: number;
+  onHand: number;
+  qty: string;
+};
+
+type CookPreview = {
+  specialProductId: string;
+  name: string;
+  kitchenStation: string;
+  recipe: { id: string; name: string; baseUnit: string; baseQty: number };
+  ingredients: Omit<CookIngRow, "qty">[];
+};
+
 export function SpecialsPage() {
   const { can, user } = useAuth();
   const { gate } = useHotelGate();
@@ -100,6 +122,7 @@ export function SpecialsPage() {
   const [products, setProducts] = useState<SpecialProduct[]>([]);
   const [today, setToday] = useState<TodayPayload | null>(null);
   const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [stations, setStations] = useState<KitchenStationRow[]>([]);
   const [loss, setLoss] = useState<{ rows: LossRow[]; totalLoss: number; totalWasteGrams: number } | null>(
     null
   );
@@ -114,22 +137,38 @@ export function SpecialsPage() {
   const [category, setCategory] = useState("Pakistani Special");
   const [servingLabel, setServingLabel] = useState("Plate");
   const [sellMode, setSellMode] = useState<SellMode>("BOTH");
+  /** Full plate Rs */
   const [platePrice, setPlatePrice] = useState("");
-  /** One serving weight in kg (API still stores grams). */
+  /** Half plate Rs (optional) */
+  const [halfPlatePrice, setHalfPlatePrice] = useState("");
+  /** One full plate weight in kg (API stores grams). */
   const [plateKg, setPlateKg] = useState("0.25");
   const [cookRecipeId, setCookRecipeId] = useState("");
   const [recipeQ, setRecipeQ] = useState("");
-  const [kitchenStation, setKitchenStation] = useState<KitchenStation>("COOKING");
-  const [cookKg, setCookKg] = useState<Record<string, string>>({});
+  const [kitchenStation, setKitchenStation] = useState("COOKING");
+  const [cookOpen, setCookOpen] = useState(false);
+  const [cookProductId, setCookProductId] = useState<string | null>(null);
+  const [cookProductName, setCookProductName] = useState("");
+  const [cookRecipeName, setCookRecipeName] = useState("");
+  const [cookStation, setCookStation] = useState("");
+  const [cookFinishedKg, setCookFinishedKg] = useState("");
+  const [cookDate, setCookDate] = useState("");
+  const [cookTime, setCookTime] = useState("");
+  const [cookDayStart, setCookDayStart] = useState("11:00");
+  const [cookRolled, setCookRolled] = useState(false);
+  const [cookIngs, setCookIngs] = useState<CookIngRow[]>([]);
+  const [cookLoading, setCookLoading] = useState(false);
 
   async function load() {
     try {
-      const [prods, day] = await Promise.all([
+      const [prods, day, stationList] = await Promise.all([
         api<SpecialProduct[]>("/specials/products"),
         api<TodayPayload>("/specials/today"),
+        loadKitchenStations(),
       ]);
       setProducts(prods);
       setToday(day);
+      setStations(stationList);
       if (can("recipe.view", "recipe.manage", "menu.manage")) {
         setRecipes(await api<Recipe[]>("/recipes"));
       }
@@ -167,10 +206,13 @@ export function SpecialsPage() {
     setServingLabel("Plate");
     setSellMode("BOTH");
     setPlatePrice("");
+    setHalfPlatePrice("");
     setPlateKg("0.25");
     setCookRecipeId("");
     setRecipeQ("");
-    setKitchenStation("COOKING");
+    setKitchenStation(
+      stations.find((s) => s.code === "COOKING")?.code || stations[0]?.code || "COOKING"
+    );
     setEditId(null);
   }
 
@@ -186,6 +228,9 @@ export function SpecialsPage() {
     setServingLabel(p.servingLabel || "Plate");
     setSellMode(p.sellMode || "BOTH");
     setPlatePrice(String(p.platePrice));
+    setHalfPlatePrice(
+      p.halfPlatePrice != null && p.halfPlatePrice > 0 ? String(p.halfPlatePrice) : ""
+    );
     setPlateKg(String(gramsToKg(p.plateGrams)));
     setCookRecipeId(p.cookRecipeId || "");
     setRecipeQ(p.cookRecipe ? `${p.cookRecipe.category ? p.cookRecipe.category + " · " : ""}${p.cookRecipe.name}` : "");
@@ -210,9 +255,15 @@ export function SpecialsPage() {
       return;
     }
     const price = Number(platePrice);
+    const halfRaw = halfPlatePrice.trim();
+    const half = halfRaw === "" ? null : Number(halfRaw);
     const kg = Number(plateKg);
     if (!(price > 0)) {
-      toast.push(t("specials.needPrice"), "err");
+      toast.push(t("specials.needFullPrice"), "err");
+      return;
+    }
+    if (half != null && (!(half > 0) || Number.isNaN(half))) {
+      toast.push(t("specials.needHalfPrice"), "err");
       return;
     }
     if (!(kg > 0)) {
@@ -231,6 +282,7 @@ export function SpecialsPage() {
         servingLabel: servingLabel.trim() || "Plate",
         sellMode,
         platePrice: price,
+        halfPlatePrice: half,
         plateGrams: kgToGrams(kg),
         cookRecipeId,
         kitchenStation,
@@ -279,11 +331,78 @@ export function SpecialsPage() {
     }
   }
 
-  async function cook(productId: string) {
-    const kgRaw = cookKg[productId]?.trim();
+  async function openCook(productId: string) {
+    setCookLoading(true);
+    setCookOpen(true);
+    setCookProductId(productId);
+    setCookFinishedKg("");
+    setCookIngs([]);
+    setCookDate("");
+    setCookTime("");
+    setCookRolled(false);
+    try {
+      const [prev, defaults] = await Promise.all([
+        api<CookPreview>(`/specials/products/${productId}/cook-ingredients`),
+        api<{
+          suggestedDate: string;
+          suggestedTime: string;
+          dayStart: string;
+          rolledToNewDay?: boolean;
+        }>("/specials/cook-defaults"),
+      ]);
+      setCookProductName(prev.name);
+      setCookRecipeName(prev.recipe.name);
+      setCookStation(prev.kitchenStation);
+      setCookDate(defaults.suggestedDate);
+      setCookTime(defaults.suggestedTime || "06:00");
+      setCookDayStart(defaults.dayStart || "11:00");
+      setCookRolled(!!defaults.rolledToNewDay);
+      setCookIngs(
+        prev.ingredients.map((ing) => ({
+          ...ing,
+          qty: ing.suggestedQty > 0 ? String(ing.suggestedQty) : "",
+        }))
+      );
+    } catch (err) {
+      setCookOpen(false);
+      setCookProductId(null);
+      toast.push(err instanceof Error ? err.message : t("specials.cookFailed"), "err");
+    } finally {
+      setCookLoading(false);
+    }
+  }
+
+  function closeCook() {
+    setCookOpen(false);
+    setCookProductId(null);
+    setCookIngs([]);
+    setCookFinishedKg("");
+    setCookDate("");
+    setCookTime("");
+    setCookRolled(false);
+  }
+
+  async function submitCook() {
+    if (!cookProductId) return;
+    const kgRaw = cookFinishedKg.trim();
     const kg = Number(kgRaw);
     if (!kgRaw || !Number.isFinite(kg) || kg <= 0) {
       toast.push(t("specials.cookQtyInvalid"), "err");
+      return;
+    }
+    if (!cookDate || !/^\d{4}-\d{2}-\d{2}$/.test(cookDate)) {
+      toast.push(t("specials.cookNeedDate"), "err");
+      return;
+    }
+    const ingredients = cookIngs
+      .map((ing) => ({
+        storeItemId: ing.storeItemId,
+        quantity: Number(ing.qty),
+        unit: ing.unit,
+      }))
+      .filter((l) => Number.isFinite(l.quantity) && l.quantity > 0);
+    if (!ingredients.length) {
+      toast.push(t("specials.cookNeedIngredients"), "err");
       return;
     }
     if (kg > 100) {
@@ -295,17 +414,22 @@ export function SpecialsPage() {
       });
       if (!okHuge) return;
     }
+    const timePart = cookTime && /^\d{2}:\d{2}$/.test(cookTime) ? cookTime : "12:00";
+    const cookedAt = new Date(`${cookDate}T${timePart}:00`);
     setBusy(true);
     try {
       await api("/specials/cook", {
         method: "POST",
         body: JSON.stringify({
-          specialProductId: productId,
+          specialProductId: cookProductId,
           cookedGrams: kgToGrams(kg),
+          ingredients,
+          businessDate: cookDate,
+          cookedAt: Number.isFinite(cookedAt.getTime()) ? cookedAt.toISOString() : undefined,
         }),
       });
       toast.push(t("specials.cookLogged"), "ok");
-      setCookKg((s) => ({ ...s, [productId]: "" }));
+      closeCook();
       await load();
     } catch (err) {
       toast.push(err instanceof Error ? err.message : t("specials.cookFailed"), "err");
@@ -395,11 +519,7 @@ export function SpecialsPage() {
                   <th>{t("specials.sold")}</th>
                   <th>{t("specials.remaining")}</th>
                   <th>{t("specials.kpiCost")}</th>
-                  {canCook && (
-                    <th>
-                      {t("specials.cookAction")} ({t("common.kg")})
-                    </th>
-                  )}
+                  {canCook && <th>{t("specials.cookAction")}</th>}
                 </tr>
               </thead>
               <tbody>
@@ -449,29 +569,14 @@ export function SpecialsPage() {
                     </td>
                     {canCook && (
                       <td>
-                        <div className="cook-log">
-                          <label className="cook-log-field">
-                            <input
-                              className="field-ctrl sm"
-                              inputMode="decimal"
-                              placeholder="5"
-                              value={cookKg[p.id] ?? ""}
-                              onChange={(e) => setCookKg((s) => ({ ...s, [p.id]: e.target.value }))}
-                              disabled={busy || today.batchCloseDone || !!today.locked}
-                              title={t("specials.cookKgPh")}
-                              aria-label={t("specials.cookKgPh")}
-                            />
-                            <span className="cook-log-unit">{t("common.kg")}</span>
-                          </label>
-                          <button
-                            type="button"
-                            className="btn sm"
-                            disabled={busy || today.batchCloseDone || !!today.locked}
-                            onClick={() => cook(p.id)}
-                          >
-                            {t("specials.logCook")}
-                          </button>
-                        </div>
+                        <button
+                          type="button"
+                          className="btn sm"
+                          disabled={busy || today.batchCloseDone || !!today.locked || !p.cookRecipeId}
+                          onClick={() => openCook(p.id)}
+                        >
+                          {t("specials.logCook")}
+                        </button>
                       </td>
                     )}
                   </tr>
@@ -496,7 +601,7 @@ export function SpecialsPage() {
           <thead>
             <tr>
               <th>{t("common.item")}</th>
-              <th>{t("specials.plateSell")}</th>
+              <th>{t("specials.ratesCol")}</th>
               <th>{t("specials.plateKg")}</th>
               <th>{t("specials.cookRecipe")}</th>
               <th>{t("specials.waiterMenu")}</th>
@@ -520,13 +625,22 @@ export function SpecialsPage() {
                   <div className="tiny muted">
                     {p.category} · {p.servingLabel || "Plate"}
                     {p.sellMode === "SERVING_ONLY"
-                      ? ` · ${t("specials.sellServingOnly")}`
-                      : p.sellMode === "RS_ONLY"
-                        ? ` · ${t("specials.sellRsOnly")}`
-                        : ` · ${t("specials.sellBoth")}`}
+                      ? ` · ${t("specials.sellByRsNo")}`
+                      : ` · ${t("specials.sellByRsYes")}`}
                   </div>
                 </td>
-                <td>{money(p.platePrice)}</td>
+                <td className="tiny">
+                  <div>
+                    {t("specials.fullShort")}: <strong>{money(p.platePrice)}</strong>
+                  </div>
+                  {p.halfPlatePrice != null && p.halfPlatePrice > 0 ? (
+                    <div>
+                      {t("specials.halfShort")}: <strong>{money(p.halfPlatePrice)}</strong>
+                    </div>
+                  ) : (
+                    <div className="muted">{t("specials.halfNone")}</div>
+                  )}
+                </td>
                 <td>{formatKg(p.plateGrams)}</td>
                 <td>
                   {p.cookRecipe
@@ -573,25 +687,13 @@ export function SpecialsPage() {
           <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap" }}>
             <h3 style={{ marginTop: 0 }}>{t("specials.lossTitle")}</h3>
             <div className="row" style={{ gap: "0.5rem" }}>
-              <div className="field" style={{ margin: 0 }}>
+              <div className="field" style={{ margin: 0, minWidth: "11rem" }}>
                 <label htmlFor="sp-loss-from">{t("payments.from")}</label>
-                <input
-                  id="sp-loss-from"
-                  className="field-ctrl"
-                  type="date"
-                  value={lossFrom}
-                  onChange={(e) => setLossFrom(e.target.value)}
-                />
+                <DateField id="sp-loss-from" value={lossFrom} onChange={setLossFrom} max={lossTo || undefined} />
               </div>
-              <div className="field" style={{ margin: 0 }}>
+              <div className="field" style={{ margin: 0, minWidth: "11rem" }}>
                 <label htmlFor="sp-loss-to">{t("payments.to")}</label>
-                <input
-                  id="sp-loss-to"
-                  className="field-ctrl"
-                  type="date"
-                  value={lossTo}
-                  onChange={(e) => setLossTo(e.target.value)}
-                />
+                <DateField id="sp-loss-to" value={lossTo} onChange={setLossTo} min={lossFrom || undefined} />
               </div>
             </div>
           </div>
@@ -680,49 +782,58 @@ export function SpecialsPage() {
               <p className="tiny muted">{t("specials.servingTypeHint")}</p>
             </div>
             <div className="field">
-              <label>{t("specials.sellMode")}</label>
+              <label>{t("specials.sellByRs")}</label>
               <div className="chips">
-                {(
-                  [
-                    ["BOTH", "specials.sellBoth"],
-                    ["SERVING_ONLY", "specials.sellServingOnly"],
-                    ["RS_ONLY", "specials.sellRsOnly"],
-                  ] as const
-                ).map(([mode, key]) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    className={`chip ${sellMode === mode ? "active" : ""}`}
-                    onClick={() => setSellMode(mode)}
-                  >
-                    {t(key)}
-                  </button>
-                ))}
+                <button
+                  type="button"
+                  className={`chip ${sellMode !== "SERVING_ONLY" ? "active" : ""}`}
+                  onClick={() => setSellMode("BOTH")}
+                >
+                  {t("specials.sellByRsYes")}
+                </button>
+                <button
+                  type="button"
+                  className={`chip ${sellMode === "SERVING_ONLY" ? "active" : ""}`}
+                  onClick={() => setSellMode("SERVING_ONLY")}
+                >
+                  {t("specials.sellByRsNo")}
+                </button>
               </div>
-              <p className="tiny muted">{t("specials.sellModeHint", { unit: servingLabel || "Plate" })}</p>
+              <p className="tiny muted">{t("specials.sellByRsHint")}</p>
             </div>
             <div className="grid-2">
               <div className="field">
-                <label>{t("specials.servingSell", { unit: servingLabel || "Plate" })}</label>
+                <label>{t("specials.fullPlatePrice")}</label>
                 <input
                   value={platePrice}
                   onChange={(e) => setPlatePrice(e.target.value)}
-                  placeholder="250"
+                  placeholder="200"
                   required
+                  inputMode="decimal"
                 />
-                <p className="tiny muted">{t("specials.servingSellHint", { unit: (servingLabel || "Plate").toLowerCase() })}</p>
+                <p className="tiny muted">{t("specials.fullPlatePriceHint")}</p>
               </div>
               <div className="field">
-                <label>{t("specials.servingKg", { unit: servingLabel || "Plate" })}</label>
+                <label>{t("specials.halfPlatePrice")}</label>
                 <input
-                  value={plateKg}
-                  onChange={(e) => setPlateKg(e.target.value)}
-                  placeholder="0.4"
+                  value={halfPlatePrice}
+                  onChange={(e) => setHalfPlatePrice(e.target.value)}
+                  placeholder="120"
                   inputMode="decimal"
-                  required
                 />
-                <p className="tiny muted">{t("specials.servingKgHint", { unit: (servingLabel || "Plate").toLowerCase() })}</p>
+                <p className="tiny muted">{t("specials.halfPlatePriceHint")}</p>
               </div>
+            </div>
+            <div className="field">
+              <label>{t("specials.fullPlateKg")}</label>
+              <input
+                value={plateKg}
+                onChange={(e) => setPlateKg(e.target.value)}
+                placeholder="0.4"
+                inputMode="decimal"
+                required
+              />
+              <p className="tiny muted">{t("specials.fullPlateKgHint")}</p>
             </div>
             <div className="field">
               <label>{t("specials.cookRecipe")}</label>
@@ -770,11 +881,11 @@ export function SpecialsPage() {
               <label>{t("specials.kitchenStation")}</label>
               <select
                 value={kitchenStation}
-                onChange={(e) => setKitchenStation(e.target.value as KitchenStation)}
+                onChange={(e) => setKitchenStation(e.target.value)}
               >
-                {STATIONS.map((s) => (
-                  <option key={s} value={s}>
-                    {t(`menu.station.${s}` as "menu.station.COOKING")}
+                {stations.map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.name}
                   </option>
                 ))}
               </select>
@@ -787,6 +898,130 @@ export function SpecialsPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      <Modal
+        open={cookOpen}
+        title={t("specials.cookModalTitle", { name: cookProductName || "…" })}
+        onClose={closeCook}
+        size="lg"
+      >
+        {cookLoading ? (
+          <p className="tiny muted">{t("common.loading")}</p>
+        ) : (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submitCook();
+            }}
+          >
+            <div className="modal-scroll">
+              <p className="tiny muted" style={{ marginTop: 0 }}>
+                {t("specials.cookModalHint")}
+                {cookRecipeName ? ` · ${cookRecipeName}` : ""}
+                {cookStation ? ` · ${cookStation}` : ""}
+              </p>
+              <div className="grid-2" style={{ marginBottom: "0.85rem" }}>
+                <div className="field">
+                  <label>{t("specials.cookForDate")}</label>
+                  <DateField
+                    id="cook-for-date"
+                    value={cookDate}
+                    onChange={setCookDate}
+                    disabled={busy}
+                  />
+                </div>
+                <div className="field">
+                  <label>{t("specials.cookForTime")}</label>
+                  <TimeField
+                    id="cook-for-time"
+                    value={cookTime}
+                    onChange={setCookTime}
+                    disabled={busy}
+                  />
+                </div>
+              </div>
+              <p className="tiny muted" style={{ marginTop: 0 }}>
+                {t("specials.cookDateHint", { start: cookDayStart })}
+                {cookRolled ? ` · ${t("specials.cookRolledHint")}` : ""}
+              </p>
+              <h3 style={{ margin: "0.75rem 0 0.5rem", fontSize: "1rem" }}>
+                {t("specials.cookIngredientsTitle")}
+              </h3>
+              {!cookIngs.length ? (
+                <div className="empty">{t("specials.cookNoIngredients")}</div>
+              ) : (
+                <div className="table-wrap" style={{ marginBottom: "1rem" }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("common.item")}</th>
+                        <th>{t("specials.cookGaveQty")}</th>
+                        <th>{t("specials.cookKitchenHave")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cookIngs.map((ing) => (
+                        <tr key={ing.storeItemId}>
+                          <td>
+                            <strong>{ing.name}</strong>
+                          </td>
+                          <td>
+                            <label className="cook-log-field" style={{ maxWidth: "10rem" }}>
+                              <input
+                                className="field-ctrl sm"
+                                inputMode="decimal"
+                                value={ing.qty}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  setCookIngs((rows) =>
+                                    rows.map((r) =>
+                                      r.storeItemId === ing.storeItemId ? { ...r, qty: v } : r
+                                    )
+                                  );
+                                }}
+                                disabled={busy}
+                                aria-label={ing.name}
+                              />
+                              <span className="cook-log-unit">{unitLabel(ing.unit)}</span>
+                            </label>
+                          </td>
+                          <td className="tiny muted">
+                            {Math.round(ing.onHand * 1000) / 1000} {unitLabel(ing.storeUnit)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div className="field">
+                <label>{t("specials.cookFinishedKg")}</label>
+                <label className="cook-log-field" style={{ maxWidth: "12rem" }}>
+                  <input
+                    className="field-ctrl sm"
+                    inputMode="decimal"
+                    placeholder="5"
+                    value={cookFinishedKg}
+                    onChange={(e) => setCookFinishedKg(e.target.value)}
+                    disabled={busy}
+                    required
+                  />
+                  <span className="cook-log-unit">{t("common.kg")}</span>
+                </label>
+                <p className="tiny muted">{t("specials.cookFinishedKgHint")}</p>
+              </div>
+            </div>
+            <div className="form-actions">
+              <button type="button" className="btn ghost" onClick={closeCook} disabled={busy}>
+                {t("common.cancel")}
+              </button>
+              <button className="btn" type="submit" disabled={busy || cookLoading}>
+                {busy ? t("common.saving") : t("specials.logCook")}
+              </button>
+            </div>
+          </form>
+        )}
       </Modal>
     </div>
   );

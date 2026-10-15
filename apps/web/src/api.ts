@@ -169,3 +169,59 @@ export function unitLabel(u: string) {
   };
   return map[u] || u.toLowerCase();
 }
+
+export const PACK_UNITS = [
+  "NONE",
+  "BOX",
+  "PACKET",
+  "TRAY",
+  "CRATE",
+  "CARTON",
+  "DOZEN",
+  "BUNDLE",
+  "SACK",
+  "TIN",
+  "BAG",
+] as const;
+
+export type PackUnitCode = (typeof PACK_UNITS)[number];
+
+export function packUnitLabel(u: string | null | undefined) {
+  const map: Record<string, string> = {
+    NONE: "—",
+    BOX: "box",
+    PACKET: "packet",
+    TRAY: "tray",
+    CRATE: "crate",
+    CARTON: "carton",
+    DOZEN: "dozen",
+    BUNDLE: "bundle",
+    SACK: "sack",
+    TIN: "tin",
+    BAG: "bag",
+  };
+  if (!u) return map.NONE;
+  return map[u] || u.toLowerCase();
+}
+
+export function hasPack(packUnit: string | null | undefined, unitsPerPack: number | null | undefined) {
+  return Boolean(packUnit && packUnit !== "NONE" && Number(unitsPerPack) > 1.0000001);
+}
+
+/** Show on-hand as packs + leftover stock units when pack size is set. */
+export function formatStockQty(
+  qty: number,
+  unit: string,
+  packUnit?: string | null,
+  unitsPerPack?: number | null
+) {
+  const stock = `${qty} ${unitLabel(unit)}`;
+  const per = Number(unitsPerPack) || 0;
+  if (!hasPack(packUnit, per)) return stock;
+  const packs = Math.floor(qty / per + 1e-9);
+  const rem = Number((qty - packs * per).toFixed(3));
+  const packLbl = packUnitLabel(packUnit);
+  if (packs <= 0) return stock;
+  if (rem > 0.0001) return `${packs} ${packLbl} + ${rem} ${unitLabel(unit)}`;
+  return `${packs} ${packLbl} (${stock})`;
+}

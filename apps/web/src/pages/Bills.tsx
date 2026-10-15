@@ -7,12 +7,14 @@ import { printBill, type BillOrder } from "../components/BillPreview";
 import { ThermalPreview } from "../components/ThermalPreview";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
+import { DateField } from "../components/DateField";
 import { downloadExcelCsv } from "../csv";
 import { serverPrint } from "../printing";
 import { useSocketEvent } from "../socket";
 import { PayModal } from "../components/PayModal";
 import { CashHandovers } from "../components/CashHandovers";
 import { CashRecord } from "../components/CashRecord";
+import { useBusinessDay } from "../hotel-gate";
 import { useI18n, useT } from "../i18n";
 import { usePrompt } from "../components/ConfirmModal";
 import { EditBillForm, serverNames, withCurrent, type EditBillMeta, type EditBillPerson, type EditBillTable } from "../components/EditBillForm";
@@ -151,26 +153,15 @@ function isCancelled(o: Order) {
   return o.status === "CANCELLED" || o.paymentStatus === "VOID";
 }
 
-function startOfToday() {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
-function buildTally(unpaid: Order[], paid: Order[], cancelled: Order[]): BillingTally {
+function buildTally(unpaid: Order[], paid: Order[], cancelled: Order[], cancelledTodayCount?: number): BillingTally {
   const unpaidOpen = unpaid.filter((o) => !isCancelled(o));
   const paidOpen = paid.filter((o) => !isCancelled(o));
-  const today = startOfToday();
-  const cancelledToday = cancelled.filter((o) => {
-    const when = o.cancelledAt || o.createdAt || o.updatedAt;
-    return when ? new Date(when).getTime() >= today : false;
-  }).length;
   return {
     unpaidCount: unpaidOpen.length,
     unpaidAmount: unpaidOpen.reduce((s, o) => s + dueOf(o), 0),
     paidCount: paidOpen.length,
     cancelledCount: cancelled.length,
-    cancelledToday,
+    cancelledToday: cancelledTodayCount ?? cancelled.length,
     cancelledAmount: cancelled.reduce((s, o) => s + Math.max(0, o.total - (o.discountAmount ?? 0)), 0),
   };
 }
@@ -183,7 +174,10 @@ export function BillsPage() {
   const t = useT();
   const { ts } = useI18n();
   const askPrompt = usePrompt();
+  const { businessDate, dayStart } = useBusinessDay();
   const [filter, setFilter] = useState<"UNPAID" | "PAID" | "CANCELLED" | "ALL">("UNPAID");
+  const [day, setDay] = useState(businessDate);
+  const [dayTouched, setDayTouched] = useState(false);
   const [orders, setOrders] = useState<Order[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [tally, setTally] = useState<BillingTally>(emptyTally);
@@ -192,6 +186,15 @@ export function BillsPage() {
   const [view, setView] = useState<"bills" | "cash">("bills");
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    if (!dayTouched) setDay(businessDate);
+  }, [businessDate, dayTouched]);
+
+  const dayReady = /^\d{4}-\d{2}-\d{2}$/.test(day);
+  const historyQs = dayReady ? `from=${encodeURIComponent(day)}&to=${encodeURIComponent(day)}` : "";
+  /** Today’s unpaid = all open tables; past unpaid = opened that business day still unpaid. */
+  const isCurrentDay = day === businessDate;
   const [editQty, setEditQty] = useState<Record<string, number>>({});
   const [editQtyDraft, setEditQtyDraft] = useState<Record<string, string>>({});
   const [editAdds, setEditAdds] = useState<EditAdd[]>([]);
@@ -214,38 +217,49 @@ export function BillsPage() {
   const [thermalError, setThermalError] = useState(false);
 
   async function load() {
+    if (!dayReady) return;
     try {
-      const openPath = "/orders?view=billing&paymentStatus=UNPAID";
-      const partialPath = "/orders?view=billing&paymentStatus=PARTIAL";
-      const listPath =
-        filter === "ALL"
-          ? "/orders?view=billing"
-          : filter === "CANCELLED"
-            ? "/orders?view=billing&status=CANCELLED"
-            : filter === "UNPAID"
-              ? openPath
-              : `/orders?view=billing&paymentStatus=${filter}`;
-      const [listRaw, dash, unpaidRows, partialRows, paidRows, cancelledRows] = await Promise.all([
+      const dayQ = historyQs;
+      // Current business day unpaid = all open tables; past day = opened that day still unpaid.
+      const openDaySuffix = isCurrentDay ? "" : `&${dayQ}`;
+      const openPath = `/orders?view=billing&paymentStatus=UNPAID${openDaySuffix}`;
+      const partialPath = `/orders?view=billing&paymentStatus=PARTIAL${openDaySuffix}`;
+      const paidPath = `/orders?view=billing&paymentStatus=PAID&${dayQ}`;
+      const cancelledPath = `/orders?view=billing&status=CANCELLED&${dayQ}`;
+      const allPath = `/orders?view=billing&${dayQ}`;
+
+      const listFetch =
         filter === "UNPAID"
           ? Promise.all([api<Order[]>(openPath), api<Order[]>(partialPath)]).then(([a, b]) => [...a, ...b])
-          : api<Order[]>(listPath),
-        api<Stats>("/dashboard"),
-        api<Order[]>(openPath),
-        api<Order[]>(partialPath),
-        api<Order[]>("/orders?view=billing&paymentStatus=PAID"),
-        api<Order[]>("/orders?view=billing&status=CANCELLED"),
-      ]);
+          : filter === "PAID"
+            ? api<Order[]>(paidPath)
+            : filter === "CANCELLED"
+              ? api<Order[]>(cancelledPath)
+              : api<Order[]>(allPath);
+
+      // List first — never blank the whole page if dashboard/tally fails (installed servers).
+      const listRaw = await listFetch;
       setOrders(listRaw);
-      setStats(dash);
-      setTally(buildTally([...unpaidRows, ...partialRows], paidRows, cancelledRows));
+
+      const tallyOpen = `/orders?view=billing&paymentStatus=UNPAID${openDaySuffix}`;
+      const tallyPartial = `/orders?view=billing&paymentStatus=PARTIAL${openDaySuffix}`;
+      const [dash, unpaidRows, partialRows, paidRows, cancelledRows] = await Promise.all([
+        api<Stats>("/dashboard").catch(() => null),
+        api<Order[]>(tallyOpen).catch(() => [] as Order[]),
+        api<Order[]>(tallyPartial).catch(() => [] as Order[]),
+        api<Order[]>(paidPath).catch(() => [] as Order[]),
+        api<Order[]>(cancelledPath).catch(() => [] as Order[]),
+      ]);
+      if (dash) setStats(dash);
+      setTally(buildTally([...unpaidRows, ...partialRows], paidRows, cancelledRows, cancelledRows.length));
     } catch (e) {
       toast.push(e instanceof Error ? e.message : t("bills.loadFailed"), "err");
     }
   }
 
   useEffect(() => {
-    load();
-  }, [filter]);
+    void load();
+  }, [filter, day, dayReady, isCurrentDay]);
 
   useSocketEvent("orders.changed", () => void load());
 
@@ -623,9 +637,9 @@ export function BillsPage() {
     }
   }
 
-  function paid(fullyPaid = true) {
+  function paid(fullyPaid = true, onCredit = false, _tableFreed = false) {
     setPaying(null);
-    if (fullyPaid) setSelected(null);
+    if (fullyPaid || onCredit) setSelected(null);
     void load();
   }
 
@@ -637,7 +651,14 @@ export function BillsPage() {
       <div className="page-head">
         <div>
           <h1>{t("bills.title")}</h1>
-          <p>{t("bills.subtitle")}</p>
+          <p>
+            {t("bills.subtitle")}
+            <span className="tiny muted" style={{ display: "block" }}>
+              {t("cash.businessDayHint", { start: dayStart })}
+              {" · "}
+              {t("bills.historyDayHint")}
+            </span>
+          </p>
         </div>
         {keepsCash && (
           <div className="page-head-actions">
@@ -657,7 +678,7 @@ export function BillsPage() {
             className="btn ghost sm"
             onClick={() => {
               downloadExcelCsv(
-                `billing-${filter.toLowerCase()}-${Date.now()}.csv`,
+                `billing-${filter.toLowerCase()}-${day}-${Date.now()}.csv`,
                 shown.map((o) => ({
                   OrderNo: o.orderNo,
                   Table: o.tableNo || "",
@@ -703,6 +724,18 @@ export function BillsPage() {
               </span>
             </button>
           ))}
+          <div className="field" style={{ margin: 0, minWidth: "9.5rem" }}>
+            <label htmlFor="bills-day">{t("bills.historyDay")}</label>
+            <DateField
+              id="bills-day"
+              value={day}
+              max={businessDate}
+              onChange={(v) => {
+                setDayTouched(true);
+                setDay(v);
+              }}
+            />
+          </div>
         </div>
       </div>
 

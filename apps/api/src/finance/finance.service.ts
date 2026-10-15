@@ -2,7 +2,7 @@ import { BadRequestException, Injectable } from "@nestjs/common";
 import { PaymentMethod, PaymentStatus } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
-import { businessDateOf, businessWindow } from "../common/business-day";
+import { businessDateOf, businessQueryRange, businessQueryWindow } from "../common/business-day";
 import { toNumber } from "../common/units";
 
 function money2(n: number) {
@@ -47,13 +47,16 @@ export class FinanceService {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) {
       throw new BadRequestException("Invalid business date");
     }
-    const window = businessWindow(businessDate, start.h, start.m);
+    // Exact from/to for API labels; gte/lt TZ-padded for Prisma filters (same as Bills).
+    const window = businessQueryWindow(businessDate, start.h, start.m);
     return {
       businessDate,
       today,
       isToday: businessDate === today,
       from: window.from,
       to: window.to,
+      gte: window.gte,
+      lt: window.lt,
     };
   }
 
@@ -82,13 +85,13 @@ export class FinanceService {
 
   async dayPnl(businessDate?: string) {
     const clock = await this.clock(businessDate);
-    const { from, to, businessDate: day } = clock;
+    const { from, to, gte, lt, businessDate: day } = clock;
 
     const [orders, payments, stockClose, batchClose, expenses, purchasesPaid, selfExtras, close] =
       await Promise.all([
         this.prisma.order.findMany({
           where: {
-            createdAt: { gte: from, lt: to },
+            createdAt: { gte, lt },
             status: { not: "CANCELLED" },
             paymentStatus: { in: [PaymentStatus.PAID, PaymentStatus.PARTIAL] },
           },
@@ -102,7 +105,7 @@ export class FinanceService {
           },
         }),
         this.prisma.payment.findMany({
-          where: { createdAt: { gte: from, lt: to } },
+          where: { createdAt: { gte, lt } },
           select: { amount: true, tipAmount: true, method: true },
         }),
         this.prisma.dayStockClose.findUnique({ where: { businessDate: day } }),
@@ -111,16 +114,16 @@ export class FinanceService {
           include: { lines: { select: { wasteGrams: true, lossCost: true } } },
         }),
         this.prisma.hotelExpense.findMany({
-          where: { spentAt: { gte: from, lt: to } },
+          where: { spentAt: { gte, lt } },
           select: { amount: true },
         }),
         this.prisma.supplierPayment.findMany({
-          where: { paidAt: { gte: from, lt: to } },
+          where: { paidAt: { gte, lt } },
           select: { amount: true },
         }),
         this.prisma.purchase.findMany({
           where: {
-            purchasedAt: { gte: from, lt: to },
+            purchasedAt: { gte, lt },
             voidedAt: null,
             extraExpense: { gt: 0 },
             extraExpensePaidBy: "SELF",
@@ -207,15 +210,16 @@ export class FinanceService {
   }
 
   async exceptions(fromStr: string, toStr: string) {
-    const from = new Date(`${fromStr}T00:00:00`);
-    const to = new Date(`${toStr}T23:59:59.999`);
-    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fromStr) || !/^\d{4}-\d{2}-\d{2}$/.test(toStr)) {
       throw new BadRequestException("Invalid from/to date");
     }
+    const start = await this.settings.dayStart();
+    const range = businessQueryRange(fromStr, toStr, start.h, start.m);
+    const { gte, lt } = range;
 
     const [cancels, edits, heavyDiscount, voids] = await Promise.all([
       this.prisma.order.findMany({
-        where: { cancelledAt: { gte: from, lte: to } },
+        where: { cancelledAt: { gte, lt } },
         select: {
           orderNo: true,
           tableNo: true,
@@ -228,7 +232,7 @@ export class FinanceService {
         take: 500,
       }),
       this.prisma.orderBillEdit.findMany({
-        where: { createdAt: { gte: from, lte: to } },
+        where: { createdAt: { gte, lt } },
         select: {
           order: { select: { orderNo: true, tableNo: true } },
           reason: true,
@@ -244,7 +248,7 @@ export class FinanceService {
       }),
       this.prisma.order.findMany({
         where: {
-          createdAt: { gte: from, lte: to },
+          createdAt: { gte, lt },
           discountAmount: { gt: 0 },
         },
         select: {
@@ -260,7 +264,7 @@ export class FinanceService {
         take: 300,
       }),
       this.prisma.order.findMany({
-        where: { paymentStatus: PaymentStatus.VOID, updatedAt: { gte: from, lte: to } },
+        where: { paymentStatus: PaymentStatus.VOID, updatedAt: { gte, lt } },
         select: {
           orderNo: true,
           tableNo: true,

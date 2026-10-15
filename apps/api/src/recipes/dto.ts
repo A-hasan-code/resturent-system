@@ -1,5 +1,6 @@
 import {
   IsArray,
+  IsBoolean,
   IsEnum,
   IsNumber,
   IsOptional,
@@ -11,6 +12,11 @@ import {
 } from "class-validator";
 import { Type } from "class-transformer";
 import { UnitType } from "@prisma/client";
+
+export class EnforceRecipeStockDto {
+  @IsBoolean()
+  enabled!: boolean;
+}
 
 class IngredientDto {
   @IsString()
@@ -42,6 +48,12 @@ export class CreateRecipeDto {
   @Min(0.001)
   baseQty?: number;
 
+  /** Target kitchen cook/prep time in minutes. */
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  prepMinutes?: number;
+
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
@@ -67,6 +79,11 @@ export class UpdateRecipeDto {
   @IsNumber()
   @Min(0.001)
   baseQty?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  prepMinutes?: number;
 
   @IsOptional()
   @IsArray()

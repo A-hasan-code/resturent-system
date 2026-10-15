@@ -21,6 +21,15 @@ One **main server** holds the database and print queue. Cashier / kitchen PCs ru
 2. **Cashier / kitchen PCs**: same installer → **Additional PC: desktop app only**. They find the server on the LAN automatically.
 3. **Tablets**: same Wi‑Fi → Android APK or `http://<server-ip>:<port>`.
 
+## Updating Additional (cashier) PCs
+
+1. Update the **Main PC** only with the new `HotelSystem-Setup-*.exe` (do not uninstall first).
+2. The installer places a desktop update package on the server at `/downloads/desktop-update.zip`.
+3. Open (or leave open) the desktop app on each cashier PC. It detects the newer server version, downloads the package over the LAN, and replaces itself. Windows may show a one-time permission (UAC) prompt — approve it.
+4. The web UI always loads from the server, so menu/orders screens update as soon as the Main PC is upgraded even before the desktop shell updates.
+
+Menu → **Check for desktop update** forces a check. Tablets using the **APK** still need a manual APK reinstall from Settings → Server (QR); browser tablets only need a refresh.
+
 ## Printers (per counter)
 
 ### Option A — LAN / network printers (recommended for shared kitchen)

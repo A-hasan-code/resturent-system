@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, money } from "../api";
+import { useBusinessDay } from "../hotel-gate";
 import { useT, type MessageKey } from "../i18n";
 import { useToast } from "../toast";
 import { useSocketEvent } from "../socket";
@@ -43,11 +44,6 @@ const METHOD_KEYS: Record<PayMethod, MessageKey> = {
   BANK: "pay.method.BANK",
 };
 
-function isoDay(d: Date) {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
 const stamp = (iso: string) =>
   new Date(iso).toLocaleString("en-PK", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 
@@ -60,9 +56,17 @@ function statusOf(p: PaymentRow): Exclude<Status, ""> {
 export function PaymentsPage() {
   const toast = useToast();
   const t = useT();
-  const today = isoDay(new Date());
-  const [from, setFrom] = useState(today);
-  const [to, setTo] = useState(today);
+  const { businessDate, dayStart } = useBusinessDay();
+  const [from, setFrom] = useState(businessDate);
+  const [to, setTo] = useState(businessDate);
+  const [rangeTouched, setRangeTouched] = useState(false);
+
+  useEffect(() => {
+    if (!rangeTouched) {
+      setFrom(businessDate);
+      setTo(businessDate);
+    }
+  }, [businessDate, rangeTouched]);
   const [status, setStatus] = useState<Status>("");
   const [method, setMethod] = useState<MethodFilter>("");
   const [q, setQ] = useState("");
@@ -183,16 +187,38 @@ export function PaymentsPage() {
       <div className="page-head">
         <div>
           <h1>{t("payments.title")}</h1>
-          <p>{t("payments.subtitle")}</p>
+          <p>
+            {t("payments.subtitle")}
+            <span className="tiny muted" style={{ display: "block" }}>
+              {t("cash.businessDayHint", { start: dayStart })}
+            </span>
+          </p>
         </div>
         <div className="row">
           <div className="field" style={{ margin: 0 }}>
             <label htmlFor="pay-from">{t("payments.from")}</label>
-            <DateField id="pay-from" value={from} max={to || undefined} onChange={setFrom} />
+            <DateField
+              id="pay-from"
+              value={from}
+              max={to || businessDate}
+              onChange={(v) => {
+                setRangeTouched(true);
+                setFrom(v);
+              }}
+            />
           </div>
           <div className="field" style={{ margin: 0 }}>
             <label htmlFor="pay-to">{t("payments.to")}</label>
-            <DateField id="pay-to" value={to} min={from || undefined} onChange={setTo} />
+            <DateField
+              id="pay-to"
+              value={to}
+              min={from || undefined}
+              max={businessDate}
+              onChange={(v) => {
+                setRangeTouched(true);
+                setTo(v);
+              }}
+            />
           </div>
           <button type="button" className="btn ghost" style={{ alignSelf: "flex-end", minHeight: "2.6rem" }} onClick={exportCsv}>
             {t("common.excel")}

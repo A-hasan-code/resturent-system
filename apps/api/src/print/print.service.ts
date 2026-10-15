@@ -7,7 +7,6 @@ import {
   OnModuleDestroy,
 } from "@nestjs/common";
 import { Prisma, Printer, PrintJob } from "@prisma/client";
-import { basename } from "path";
 import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
 import { ServerIdentityService } from "../system/server-identity.service";
@@ -16,7 +15,7 @@ import { toNumber } from "../common/units";
 import { TipService } from "../system/tip.service";
 import { FinanceService } from "../finance/finance.service";
 import { BillEditConfirmPayload, BillPayload, KotPayload, renderBill, renderBillEditConfirm, renderKot, renderTest, TestPayload } from "./receipts";
-import { sendToNetworkPrinter, sendToWindowsPrinter, writePreviewFile } from "./drivers";
+import { printPdfToWindowsPrinter, sendToNetworkPrinter, sendToWindowsPrinter, writePreviewFile } from "./drivers";
 import { splitTableLabel } from "./table-label";
 
 const MAX_ATTEMPTS = 3;
@@ -53,7 +52,14 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   ) {}
 
   async onApplicationBootstrap() {
-    await this.prisma.printJob.updateMany({ where: { status: "PRINTING" }, data: { status: "PENDING" } });
+    await this.prisma.printJob.updateMany({
+      where: { status: "PRINTING", type: { not: "REPORT" } },
+      data: { status: "PENDING" },
+    });
+    await this.prisma.printJob.updateMany({
+      where: { status: "PRINTING", type: "REPORT" },
+      data: { status: "FAILED", lastError: "Interrupted while printing PDF" },
+    });
     this.timer = setInterval(() => void this.tick(), TICK_MS);
   }
 
@@ -187,7 +193,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       })),
       text: renderKot(payload, paperWidth).plain(),
       paperWidth,
-      logoUrl: brandingPublicUrl(this.settings.logoFilePath()),
+      logoUrl: this.settings.logoPublicUrl(),
       paidStampUrl: null,
       unpaidStampUrl: null,
       cancelledStampUrl: "/branding/cancelled-stamp.png",
@@ -225,7 +231,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       text: renderBill(payload, paperWidth).plain(),
       paperWidth,
       paymentStatus: payload.paymentStatus,
-      logoUrl: brandingPublicUrl(this.settings.logoFilePath()),
+      logoUrl: this.settings.logoPublicUrl(),
       paidStampUrl: "/branding/paid-stamp.png",
       unpaidStampUrl: "/branding/unpaid-stamp.png",
     };
@@ -505,6 +511,8 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       paidStampPath: this.settings.paidStampFilePath(),
       unpaidStampPath: this.settings.unpaidStampFilePath(),
       footer: billOpts.footer,
+      blockOrder: billOpts.blockOrder,
+      template: billOpts.template,
     };
   }
 
@@ -548,6 +556,80 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     return this.createJob("TEST", printer.id, payload, null, requestedById);
   }
 
+  /** Active server Windows printers marked for Other print (A4 / PDF reports). */
+  async listOtherPrinters() {
+    const rows = await this.prisma.printer.findMany({
+      where: { active: true, printsOther: true, kind: "WINDOWS" },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, target: true, station: true },
+    });
+    return rows;
+  }
+
+  /**
+   * Print a PDF report on an Other-print Windows printer (immediate, not ESC/POS queue).
+   */
+  async printPdfReport(opts: {
+    title: string;
+    pdf: Buffer;
+    printerId?: string | null;
+    requestedById?: string | null;
+  }) {
+    const others = await this.prisma.printer.findMany({
+      where: { active: true, printsOther: true, kind: "WINDOWS" },
+      orderBy: { name: "asc" },
+    });
+    if (!others.length) {
+      throw new BadRequestException(
+        "No Other print printer set up. Settings → Printers → add a Windows printer and tick Other print."
+      );
+    }
+    const printer = opts.printerId
+      ? others.find((p) => p.id === opts.printerId)
+      : others[0];
+    if (!printer) {
+      throw new BadRequestException("Selected Other print printer not found or not enabled");
+    }
+
+    const job = await this.prisma.printJob.create({
+      data: {
+        type: "REPORT",
+        printerId: printer.id,
+        status: "PRINTING",
+        attempts: 1,
+        requestedById: opts.requestedById ?? null,
+        payload: {
+          title: opts.title,
+          bytes: opts.pdf.length,
+        } as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    try {
+      await printPdfToWindowsPrinter(printer.target, opts.pdf);
+      await this.prisma.printJob.update({
+        where: { id: job.id },
+        data: { status: "DONE", printedAt: new Date(), lastError: null },
+      });
+      this.realtime.printResult(
+        { id: job.id, type: "REPORT", status: "DONE", printer: printer.name, orderNo: null },
+        opts.requestedById
+      );
+      return { ok: true, jobId: job.id, printerId: printer.id, printerName: printer.name };
+    } catch (e) {
+      const error = (e as Error).message;
+      await this.prisma.printJob.update({
+        where: { id: job.id },
+        data: { status: "FAILED", lastError: error },
+      });
+      this.realtime.printResult(
+        { id: job.id, type: "REPORT", status: "FAILED", error, printer: printer.name, orderNo: null },
+        opts.requestedById
+      );
+      throw new BadRequestException(`Other print failed: ${error}`);
+    }
+  }
+
   async retry(jobId: string) {
     const job = await this.prisma.printJob.findUnique({ where: { id: jobId } });
     if (!job) throw new NotFoundException("Print job not found");
@@ -587,7 +669,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     return {
       text: this.render(job, paperWidth).plain(),
       paperWidth,
-      logoUrl: brandingPublicUrl(this.settings.logoFilePath()),
+      logoUrl: this.settings.logoPublicUrl(),
       paidStampUrl: "/branding/paid-stamp.png",
       unpaidStampUrl: "/branding/unpaid-stamp.png",
       cancelledStampUrl: "/branding/cancelled-stamp.png",
@@ -603,7 +685,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       await this.recoverStaleAgentJobs();
       const now = Date.now();
       const pending = await this.prisma.printJob.findMany({
-        where: { status: "PENDING" },
+        where: { status: "PENDING", type: { not: "REPORT" } },
         include: { printer: true, order: { select: { orderNo: true } } },
         orderBy: { createdAt: "asc" },
         take: 10,
@@ -751,6 +833,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     try {
       if (!job.printer || !job.printer.active) throw new Error("Printer removed or disabled");
       if (job.printer.kind === "AGENT") throw new Error("Agent printer must be claimed by Additional PC");
+      if (job.type === "REPORT") throw new Error("PDF reports print immediately — use Other print again");
       const doc = this.render(job, job.printer.paperWidth);
       await this.send(job.printer, doc.buffer(), doc.plain(), job);
       await this.prisma.printJob.update({
@@ -837,12 +920,6 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
 
 function staffLabel(u: { name: string; role: { name: string } } | null | undefined) {
   return u ? `${u.name} (${u.role.name})` : null;
-}
-
-/** Public /branding URL for a file under the branding data dir (PNG preferred for print). */
-function brandingPublicUrl(absPath: string | null | undefined) {
-  if (!absPath) return null;
-  return `/branding/${basename(absPath)}`;
 }
 
 function splitCats(s: string) {

@@ -5,7 +5,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
 import { dataDir } from "../config/env";
 import { toNumber } from "../common/units";
-import { businessDateOf, businessWindow } from "../common/business-day";
+import { businessDateOf, businessQueryRange, businessQueryWindow } from "../common/business-day";
 import { renderAuditPdf } from "./audit-pdf";
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -155,10 +155,11 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
   async report(from: string, to: string, staffName?: string): Promise<AuditReport> {
     if (!DATE.test(from) || !DATE.test(to)) throw new BadRequestException("Dates must be YYYY-MM-DD");
     const day = await this.settings.dayStart();
-    const start = businessWindow(from, day.h, day.m).from;
-    const end = businessWindow(to, day.h, day.m).to;
-    if (end <= start) throw new BadRequestException("End date is before the start date");
-    if (end.getTime() - start.getTime() > MAX_DAYS * 86400000) {
+    const range = businessQueryRange(from, to, day.h, day.m);
+    const start = range.gte;
+    const end = range.lt;
+    if (range.to <= range.from) throw new BadRequestException("End date is before the start date");
+    if (range.to.getTime() - range.from.getTime() > MAX_DAYS * 86400000) {
       throw new BadRequestException("Date range is too long");
     }
 
@@ -172,14 +173,14 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
     const [y, mo] = bizToday.split("-").map(Number);
     const monthFrom = `${String(y).padStart(4, "0")}-${String(mo).padStart(2, "0")}-01`;
     const yearFrom = `${y}-01-01`;
-    const todayWin = businessWindow(bizToday, day.h, day.m);
+    const todayWin = businessQueryWindow(bizToday, day.h, day.m);
     const monthWin = {
-      from: businessWindow(monthFrom, day.h, day.m).from,
-      to: todayWin.to,
+      from: businessQueryWindow(monthFrom, day.h, day.m).gte,
+      to: todayWin.lt,
     };
     const yearWin = {
-      from: businessWindow(yearFrom, day.h, day.m).from,
-      to: todayWin.to,
+      from: businessQueryWindow(yearFrom, day.h, day.m).gte,
+      to: todayWin.lt,
     };
 
     const staffOrderFilter = nameMatch
@@ -278,7 +279,7 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         take: 8000,
       }),
       this.firstSaleDate(),
-      sumPaidFood(todayWin.from, todayWin.to),
+      sumPaidFood(todayWin.gte, todayWin.lt),
       sumPaidFood(monthWin.from, monthWin.to),
       sumPaidFood(yearWin.from, yearWin.to),
     ]);

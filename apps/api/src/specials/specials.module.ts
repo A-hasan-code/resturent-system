@@ -66,8 +66,20 @@ export class SpecialsController {
 
   @Post("reopen-today")
   @RequirePerms("close.manage", "menu.manage")
-  reopenToday() {
-    return this.specials.forceReopenToday();
+  reopenToday(@Body() body: { businessDate?: string } | undefined, @CurrentUser() user: AuthUser) {
+    return this.specials.forceReopenToday(body?.businessDate, user);
+  }
+
+  @Get("cook-defaults")
+  @RequirePerms("close.manage", "menu.manage", "store.manage")
+  cookDefaults() {
+    return this.specials.cookDefaults();
+  }
+
+  @Get("products/:id/cook-ingredients")
+  @RequirePerms("close.manage", "menu.manage", "store.manage")
+  cookIngredients(@Param("id") id: string) {
+    return this.specials.cookIngredients(id);
   }
 
   @Post("cook")
@@ -78,8 +90,8 @@ export class SpecialsController {
 
   @Get("close-preview")
   @RequirePerms("close.view", "close.manage")
-  closePreview() {
-    return this.specials.closePreview();
+  closePreview(@Query("date") date?: string) {
+    return this.specials.closePreview(date);
   }
 
   @Post("close")

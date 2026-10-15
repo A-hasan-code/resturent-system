@@ -17,8 +17,11 @@ function ascii(s: string) {
 }
 
 /**
- * Thermal paper column counts (Font A):
+ * Thermal paper column counts (Font A — fixed cell width, reliable columns):
  * 58mm (≈50–58 roll) ≈ 32, 72mm ≈ 42, 80mm ≈ 48, 112mm ≈ 64.
+ *
+ * Prefer Font A for customer bills: Font B + Font-A column math leaves a right
+ * margin and many cheap printers also widen bold glyphs, so Qty/Rate/Amount drift.
  */
 export function normalizePaperWidth(paperWidth: number) {
   const w = Number(paperWidth) || 80;
@@ -79,7 +82,12 @@ export class EscPos {
     return this.raw(ESC, 0x45, on ? 1 : 0);
   }
 
-  /** White-on-black (GS B) — used for the table badge like the sample slip. */
+  /** Font A (default) or smaller Font B — better density on customer bills. */
+  font(which: "A" | "B" = "A") {
+    return this.raw(ESC, 0x4d, which === "B" ? 1 : 0);
+  }
+
+  /** White-on-black (GS B) — avoid on table labels; many printers fill solid black. */
   inverse(on = true) {
     return this.raw(GS, 0x42, on ? 1 : 0);
   }

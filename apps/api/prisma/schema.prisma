@@ -15,6 +15,21 @@ enum UnitType {
   PCS
 }
 
+/// Grocery purchase packaging (1 tray / box / carton … → stock units).
+enum PackUnit {
+  NONE
+  BOX
+  PACKET
+  TRAY
+  CRATE
+  CARTON
+  DOZEN
+  BUNDLE
+  SACK
+  TIN
+  BAG
+}
+
 enum OrderStatus {
   PENDING
   PREPARING
@@ -42,6 +57,12 @@ enum StockMoveType {
   COOK
   /// Order cancel / qty-down put-back (offsets SALE for net usage).
   RESTORE
+  /// Main store → kitchen issue (daily transfer).
+  KITCHEN_TRANSFER
+  /// Kitchen → store return.
+  KITCHEN_RETURN
+  /// Kitchen closing extra / wastage (kitchen balance only).
+  KITCHEN_OUT
 }
 
 /// How the guest paid (offline label — no card gateway).
@@ -71,6 +92,30 @@ enum HotelExpensePeriod {
   MONTHLY
 }
 
+/// How a worker is normally paid (rate interpretation).
+enum WorkerPayType {
+  DAILY
+  MONTHLY
+}
+
+/// Worker advance / opening ledger (lena = advance, dena = payable).
+enum WorkerLedgerKind {
+  /// Data-shift: opening بنام (worker owes hotel) — Debit.
+  OPENING_ADVANCE
+  /// Data-shift: opening جمع (hotel owes worker) — Credit.
+  OPENING_PAYABLE
+  /// Net cash / advance paid out (Debit, hotel expense).
+  ADVANCE
+  /// Monthly salary jama — Credit (no cash yet).
+  SALARY_CREDIT
+  /// Other debit (khana bill, etc.) — Debit, hotel expense.
+  OTHER_DEBIT
+  /// Legacy: advance cut from a salary payment — treated as Credit.
+  RECOVERY
+  /// Legacy: old payable cleared with cash — treated as Debit.
+  SETTLE_PAYABLE
+}
+
 /// Cash drawer counters on the daily restaurant close report.
 enum CashCounterKind {
   COUNTER_1
@@ -90,6 +135,8 @@ enum PrintJobType {
   BILL
   BILL_EDIT
   TEST
+  /// A4 / office PDF reports (close, audit, kitchen, supplier) via Other print printers
+  REPORT
 }
 
 enum PrintJobStatus {
@@ -99,24 +146,23 @@ enum PrintJobStatus {
   FAILED
 }
 
-/// Kitchen routing station — maps to KOT printers (Beverages / Cooking / BBQ).
-enum KitchenStation {
-  BEVERAGES
-  COOKING
-  BBQ
-}
-
 /// MENU = normal dish; PER_HEAD = cover charge (settings-priced, no kitchen print).
 enum OrderLineKind {
   MENU
   PER_HEAD
 }
 
-/// NORMAL = store recipe on sale; SPECIAL = daily cooked pot; MIX = store + pot.
+/// NORMAL = store recipe on sale; SPECIAL = daily cooked pot; MIX = deal (multi store ± pot).
 enum MenuItemKind {
   NORMAL
   SPECIAL
   MIX
+}
+
+/// One line inside a MIX deal: store recipe or optional cooked pot.
+enum MenuDealPartKind {
+  STORE
+  SPECIAL
 }
 
 enum DailyBatchStatus {
@@ -197,6 +243,8 @@ model Printer {
   paperWidth Int         @default(80)
   printsKot  Boolean     @default(true)
   printsBill Boolean     @default(false)
+  /// A4 / office PDFs (close, audit, kitchen, supplier) — server Windows printers
+  printsOther Boolean    @default(false)
   /// Counter / station label e.g. "Cashier 1" (industrial multi-counter)
   station    String      @default("")
   /// Comma separated menu categories for KOT routing; empty = all
@@ -276,8 +324,11 @@ model User {
   cashReceived      Payment[]   @relation("PaymentHandedTo")
   tipShares         TipShare[]
   dayCloses         DayStockClose[]
+  kitchenDayCloses  KitchenDayClose[]
   dayCashCloses     DayCashClose[]
   hotelExpenses     HotelExpense[]
+  workerSalaryPayments WorkerSalaryPayment[]
+  workerLedgerEntries  WorkerLedgerEntry[]
   /// Soft-delete: keeps bill/payment history FKs intact while removing login.
   deletedAt         DateTime?
   createdAt         DateTime    @default(now())
@@ -300,16 +351,22 @@ model StoreItem {
   categoryId     String
   category       StoreCategory       @relation(fields: [categoryId], references: [id])
   unit           UnitType
+  /// How the item is bought (tray, box…). NONE = buy in stock unit only.
+  packUnit       PackUnit            @default(NONE)
+  /// Stock units inside one pack (e.g. 30 eggs per tray). Ignored when packUnit is NONE.
+  unitsPerPack   Decimal             @default(1) @db.Decimal(14, 3)
   quantityOnHand Decimal             @default(0) @db.Decimal(14, 3)
   ratePerUnit    Decimal             @default(0) @db.Decimal(14, 2)
   reorderLevel   Decimal             @default(0) @db.Decimal(14, 3)
   active         Boolean             @default(true)
-  ingredients    RecipeIngredient[]
-  movements      StockMovement[]
-  purchaseLines  PurchaseLine[]
-  dayCloseLines  DayStockCloseLine[]
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
+  ingredients         RecipeIngredient[]
+  movements           StockMovement[]
+  purchaseLines       PurchaseLine[]
+  dayCloseLines       DayStockCloseLine[]
+  kitchenStock         KitchenStock[]
+  kitchenDayCloseLines KitchenDayCloseLine[]
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
 
   @@unique([categoryId, name])
 }
@@ -392,20 +449,40 @@ model SupplierPayment {
 }
 
 model StockMovement {
-  id          String        @id @default(cuid())
-  storeItemId String
-  storeItem   StoreItem     @relation(fields: [storeItemId], references: [id])
-  type        StockMoveType @default(IN)
-  quantity    Decimal       @db.Decimal(14, 3)
-  ratePerUnit Decimal?      @db.Decimal(14, 2)
-  note        String?
-  orderId     String?
-  order       Order?        @relation(fields: [orderId], references: [id], onDelete: SetNull)
-  purchaseId  String?
-  purchase    Purchase?     @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
-  dayCloseId  String?
-  dayClose    DayStockClose? @relation(fields: [dayCloseId], references: [id], onDelete: SetNull)
-  createdAt   DateTime      @default(now())
+  id             String          @id @default(cuid())
+  storeItemId    String
+  storeItem      StoreItem       @relation(fields: [storeItemId], references: [id])
+  type           StockMoveType   @default(IN)
+  quantity       Decimal         @db.Decimal(14, 3)
+  ratePerUnit    Decimal?        @db.Decimal(14, 2)
+  note           String?
+  /// Kitchen station code for transfer / sale / cook / kitchen-out (null = store-only move).
+  kitchenStation String?
+  orderId        String?
+  order          Order?          @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  purchaseId     String?
+  purchase       Purchase?       @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
+  dayCloseId     String?
+  dayClose       DayStockClose?  @relation(fields: [dayCloseId], references: [id], onDelete: SetNull)
+  createdAt      DateTime        @default(now())
+
+  @@index([kitchenStation, createdAt])
+}
+
+/// User-managed kitchen stations (KOT routing + station stock / closing).
+model KitchenStationDef {
+  id        String   @id @default(cuid())
+  /// Stable code stored on menu / stock / movements (e.g. COOKING, BBQ, TANDOOR).
+  code      String   @unique
+  name      String
+  sortOrder Int      @default(0)
+  active    Boolean  @default(true)
+  /// Seeded defaults — code cannot be changed; soft-deactivate only if unused.
+  system    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([active, sortOrder])
 }
 
 /// One stock close per business day (day starts at the time set in Settings).
@@ -433,11 +510,78 @@ model DayStockCloseLine {
   close       DayStockClose @relation(fields: [closeId], references: [id], onDelete: Cascade)
   storeItemId String
   storeItem   StoreItem     @relation(fields: [storeItemId], references: [id])
+  /// Legacy field — store closing now uses transferredQty for kitchen issues.
   autoQty     Decimal       @db.Decimal(14, 3)
+  /// Qty issued to kitchen today (from KITCHEN_TRANSFER movements).
+  transferredQty Decimal    @default(0) @db.Decimal(14, 3)
+  /// Manual store-side used (separate from Extra).
+  usedQty     Decimal       @default(0) @db.Decimal(14, 3)
+  /// Extra used at store (wastage, staff meal, etc.).
   extraQty    Decimal       @default(0) @db.Decimal(14, 3)
+  /// Physical count left in store at closing.
+  leftoverQty Decimal       @default(0) @db.Decimal(14, 3)
   reason      String?
   ratePerUnit Decimal       @db.Decimal(14, 2)
   amount      Decimal       @db.Decimal(14, 2)
+
+  @@unique([closeId, storeItemId])
+}
+
+/// Qty sitting at a kitchen station after store → station transfers (recipe sales deduct here).
+model KitchenStock {
+  id             String   @id @default(cuid())
+  storeItemId    String
+  storeItem      StoreItem @relation(fields: [storeItemId], references: [id], onDelete: Cascade)
+  /// KitchenStationDef.code
+  station        String   @default("COOKING")
+  quantityOnHand Decimal  @default(0) @db.Decimal(14, 3)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([storeItemId, station])
+  @@index([station])
+}
+
+/// Kitchen daily closing per station — recipe use vs transfers (separate from store closing).
+model KitchenDayClose {
+  id                 String                @id @default(cuid())
+  businessDate       String
+  /// KitchenStationDef.code
+  station            String                @default("COOKING")
+  stockUsedValue     Decimal               @db.Decimal(14, 2)
+  transferredValue   Decimal               @default(0) @db.Decimal(14, 2)
+  sales              Decimal               @default(0) @db.Decimal(14, 2)
+  profit             Decimal               @default(0) @db.Decimal(14, 2)
+  closedById         String?
+  closedBy           User?                 @relation(fields: [closedById], references: [id], onDelete: SetNull)
+  editedAt           DateTime?
+  editedById         String?
+  editedByName       String?
+  editReason         String?
+  lines              KitchenDayCloseLine[]
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  @@unique([businessDate, station])
+}
+
+model KitchenDayCloseLine {
+  id              String          @id @default(cuid())
+  closeId         String
+  close           KitchenDayClose @relation(fields: [closeId], references: [id], onDelete: Cascade)
+  storeItemId     String
+  storeItem       StoreItem       @relation(fields: [storeItemId], references: [id])
+  kitchenOnHand   Decimal         @db.Decimal(14, 3)
+  transferredQty  Decimal         @default(0) @db.Decimal(14, 3)
+  /// Recipe / bill auto use for the day.
+  autoQty         Decimal         @default(0) @db.Decimal(14, 3)
+  /// Declared used (defaults to autoQty; editable for manual closing).
+  usedQty         Decimal         @default(0) @db.Decimal(14, 3)
+  /// Extra used (wastage, staff meal, etc.).
+  extraQty        Decimal         @default(0) @db.Decimal(14, 3)
+  reason          String?
+  ratePerUnit     Decimal         @db.Decimal(14, 2)
+  amount          Decimal         @db.Decimal(14, 2)
 
   @@unique([closeId, storeItemId])
 }
@@ -455,10 +599,13 @@ model Recipe {
   category    String             @default("General")
   baseUnit    UnitType           @default(KG)
   baseQty     Decimal            @default(1) @db.Decimal(14, 3)
+  /// Target kitchen prep time for linked menu items (minutes).
+  prepMinutes Int                @default(15)
   notes       String?
   active      Boolean            @default(true)
   ingredients RecipeIngredient[]
   menuItems   MenuItem[]
+  dealParts   MenuDealPart[]
   specialCook SpecialProduct[]   @relation("SpecialCookRecipe")
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt
@@ -481,7 +628,8 @@ model MenuItem {
   name           String
   category       String?
   /// Kitchen printer station (Beverages / Cooking / BBQ).
-  kitchenStation KitchenStation @default(COOKING)
+  /// KitchenStationDef.code — KOT + station stock.
+  kitchenStation String @default("COOKING")
   kind           MenuItemKind   @default(NORMAL)
   sellUnit       UnitType
   sellingPrice   Decimal        @db.Decimal(14, 2)
@@ -496,19 +644,40 @@ model MenuItem {
   qtyStep        Decimal?       @db.Decimal(14, 3)
   /// false = only min + n×step (no free decimal typing).
   allowCustomQty Boolean        @default(true)
-  /// Store recipe (NORMAL / MIX store part). Null for pure SPECIAL.
+  /// Store recipe (NORMAL / primary MIX store part). Null for pure SPECIAL.
   recipeId       String?
   recipe         Recipe?        @relation(fields: [recipeId], references: [id])
-  /// Daily cooked pot (SPECIAL / MIX batch part).
+  /// Daily cooked pot (SPECIAL / primary MIX pot). Optional for store-only deals.
   specialProductId String?
   specialProduct   SpecialProduct? @relation(fields: [specialProductId], references: [id])
-  /// MIX only: how many special plates per 1 menu qty.
+  /// SPECIAL half/full share, or primary MIX pot plates per 1 deal (legacy / denormalized).
   mixSpecialPlates Decimal?     @db.Decimal(14, 3)
   active         Boolean        @default(true)
   orderItems     OrderItem[]
   modifiers      MenuModifier[]
+  /// MIX deal lines (multiple store recipes ± optional pots). Source of truth for MIX.
+  dealParts      MenuDealPart[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
+}
+
+/// One part of a MIX deal: inventory recipe and/or cooked pot plates per 1 deal qty.
+model MenuDealPart {
+  id               String           @id @default(cuid())
+  menuItemId       String
+  menuItem         MenuItem         @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  kind             MenuDealPartKind
+  recipeId         String?
+  recipe           Recipe?          @relation(fields: [recipeId], references: [id], onDelete: Restrict)
+  specialProductId String?
+  specialProduct   SpecialProduct?  @relation(fields: [specialProductId], references: [id], onDelete: Restrict)
+  /// Per 1 deal: recipe multiplier (STORE) or pot plates (SPECIAL).
+  quantity         Decimal          @default(1) @db.Decimal(14, 3)
+  sortOrder        Int              @default(0)
+  label            String?
+  createdAt        DateTime         @default(now())
+
+  @@index([menuItemId, sortOrder])
 }
 
 /// Optional add-on on a menu item (e.g. Extra cheese +50).
@@ -534,17 +703,21 @@ model SpecialProduct {
   servingLabel String          @default("Plate")
   /// Waiter: BOTH = serving + Rs; SERVING_ONLY / RS_ONLY lock the other path.
   sellMode     SpecialSellMode @default(BOTH)
-  /// Price of one serving (plate/glass/box…).
+  /// Price of one full serving (plate/glass/box…).
   platePrice   Decimal         @db.Decimal(14, 2)
-  /// Grams (or ml≈g) in one serving. Rs sale converts via platePrice/plateGrams.
+  /// Optional separate half-serving sell price. Null = no half plate on Waiter.
+  halfPlatePrice Decimal?      @db.Decimal(14, 2)
+  /// Grams (or ml≈g) in one full serving. Rs sale converts via platePrice/plateGrams.
   plateGrams   Decimal         @db.Decimal(14, 3)
   /// Recipe used when System Manager logs morning cook (store OUT once).
   cookRecipeId String?
   cookRecipe   Recipe?         @relation("SpecialCookRecipe", fields: [cookRecipeId], references: [id])
   /// KOT station for the synced SPECIAL menu row (Beverages / Cooking / BBQ).
-  kitchenStation KitchenStation @default(COOKING)
+  /// KitchenStationDef.code — KOT + station stock.
+  kitchenStation String @default("COOKING")
   active       Boolean         @default(true)
   menuItems    MenuItem[]
+  dealParts    MenuDealPart[]
   batches      DailyBatch[]
   closeLines   DayBatchCloseLine[]
   createdAt    DateTime        @default(now())
@@ -561,8 +734,12 @@ model DailyBatch {
   openingCarryGrams  Decimal          @default(0) @db.Decimal(14, 3)
   /// Newly cooked today (grams).
   cookedGrams        Decimal          @default(0) @db.Decimal(14, 3)
+  /// Sum of ingredient cost from cook logs today (actual amounts used).
+  cookCostTotal      Decimal          @default(0) @db.Decimal(14, 2)
   /// Sold via orders (grams).
   soldGrams          Decimal          @default(0) @db.Decimal(14, 3)
+  /// Grams moved to the next day's opening carry (orphan / post-close cook recovery).
+  carryOutGrams      Decimal          @default(0) @db.Decimal(14, 3)
   status             DailyBatchStatus @default(OPEN)
   note               String?
   cookedById         String?
@@ -656,6 +833,16 @@ model Order {
   servedByName  String?
   kotRounds     Int             @default(1)
   billRequestedAt DateTime?
+  /// When the ticket entered (or re-entered) PENDING — used for start-delay alerts.
+  pendingAt     DateTime        @default(now())
+  /// When kitchen pressed Start (PREPARING).
+  preparingAt   DateTime?
+  /// When kitchen marked READY.
+  readyAt       DateTime?
+  /// Set when the 1-minute pending alert was sent (avoid spam).
+  pendingAlertedAt DateTime?
+  /// Set when the first over-target prep alert was sent.
+  lateAlertedAt DateTime?
   /// Why the Main Cashier cancelled (required on cancel).
   cancelReason  String?
   cancelledAt   DateTime?
@@ -678,6 +865,8 @@ model Order {
   @@index([waiterId])
   @@index([creditCustomerId])
   @@index([cancelledAt])
+  @@index([status, pendingAt])
+  @@index([status, preparingAt])
 }
 
 /// Audit trail when Main Cashier edits a PAID bill (reason + before/after amounts).
@@ -764,13 +953,15 @@ model OrderItem {
   amount          Decimal       @db.Decimal(14, 2)
   unitCost        Decimal       @default(0) @db.Decimal(14, 2)
   costAmount      Decimal       @default(0) @db.Decimal(14, 2)
-  /// Grams taken from daily special batch (SPECIAL / MIX).
+  /// Grams taken from daily special batch (SPECIAL / primary MIX pot).
   batchGrams      Decimal       @default(0) @db.Decimal(14, 3)
   specialProductId String?
   saleMode        SpecialSaleMode?
   notes           String?
   /// Selected modifiers snapshot: [{ id?, name, priceDelta }]
   modifiersJson   Json?
+  /// MIX deal stock snapshot: { recipes:[{recipeId,quantity}], specials:[{specialProductId,grams}] }
+  dealTakesJson   Json?
   kotRound        Int           @default(1)
   addedById       String?
   addedBy         User?         @relation("OrderItemAddedBy", fields: [addedById], references: [id])
@@ -860,9 +1051,86 @@ model HotelExpense {
   note        String?
   createdById String?
   createdBy   User?              @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  /// Optional link from Worker Record salary payment (cascade deletes payment if expense removed).
+  workerSalaryPayment WorkerSalaryPayment?
+  /// Optional link from Worker advance ledger (cash advance expense).
+  workerLedgerEntry   WorkerLedgerEntry?
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt
 
   @@index([spentAt])
   @@index([category])
+}
+
+/// Non-login staff for salary / payroll (cleaners, helpers, etc.).
+model Worker {
+  id        String       @id @default(cuid())
+  name      String
+  jobTitle  String?
+  phone     String?
+  payType   WorkerPayType @default(MONTHLY)
+  /// Expected daily or monthly rate (hint when paying; payment amount can differ).
+  rate      Decimal      @default(0) @db.Decimal(14, 2)
+  active    Boolean      @default(true)
+  note      String?
+  deletedAt DateTime?
+  payments  WorkerSalaryPayment[]
+  ledger    WorkerLedgerEntry[]
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@index([active])
+  @@index([deletedAt])
+  @@index([name])
+}
+
+/// One salary payout — also creates a HotelExpense (category Salary) for cash portion.
+model WorkerSalaryPayment {
+  id               String             @id @default(cuid())
+  workerId         String
+  worker           Worker             @relation(fields: [workerId], references: [id], onDelete: Restrict)
+  /// Business day the salary belongs to (noon local).
+  paidOn           DateTime
+  /// Gross salary for this payment (cash + advance recovery).
+  amount           Decimal            @db.Decimal(14, 2)
+  /// Cut from remaining advance (not cash out).
+  advanceRecovered Decimal            @default(0) @db.Decimal(14, 2)
+  /// Cleared from opening payable / dena (adds to cash out).
+  payableSettled   Decimal            @default(0) @db.Decimal(14, 2)
+  period           HotelExpensePeriod @default(DAILY)
+  note             String?
+  hotelExpenseId   String?            @unique
+  hotelExpense     HotelExpense?      @relation(fields: [hotelExpenseId], references: [id], onDelete: Cascade)
+  ledgerEntries    WorkerLedgerEntry[]
+  createdById      String?
+  createdBy        User?              @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  @@index([paidOn])
+  @@index([workerId, paidOn])
+}
+
+/// Opening balances, advances given, recoveries, payable settlements.
+model WorkerLedgerEntry {
+  id              String           @id @default(cuid())
+  workerId        String
+  worker          Worker           @relation(fields: [workerId], references: [id], onDelete: Restrict)
+  kind            WorkerLedgerKind
+  amount          Decimal          @db.Decimal(14, 2)
+  /// Business day (noon local).
+  entryOn         DateTime
+  note            String?
+  hotelExpenseId  String?          @unique
+  hotelExpense    HotelExpense?    @relation(fields: [hotelExpenseId], references: [id], onDelete: Cascade)
+  salaryPaymentId String?
+  salaryPayment   WorkerSalaryPayment? @relation(fields: [salaryPaymentId], references: [id], onDelete: Cascade)
+  createdById     String?
+  createdBy       User?            @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([workerId, kind])
+  @@index([entryOn])
+  @@index([salaryPaymentId])
 }

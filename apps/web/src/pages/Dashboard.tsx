@@ -213,8 +213,9 @@ export function DashboardPage() {
       {role === "STORE" && <StoreDash data={data} can={can} />}
       {role === "WAITER" && <WaiterDash data={data} can={can} />}
       {role === "SUPERVISOR" && <ManagerDash data={data} can={can} />}
+      {role === "MANAGER" && <ManagerDash data={data} can={can} />}
       {role === "MAIN_CASHIER" && <CashierDash data={data} can={can} />}
-      {!["ADMIN", "SYSTEM_MANAGER", "CASHIER", "MAIN_CASHIER", "KITCHEN", "STORE", "WAITER", "SUPERVISOR"].includes(role) && (
+      {!["ADMIN", "SYSTEM_MANAGER", "CASHIER", "MAIN_CASHIER", "KITCHEN", "STORE", "WAITER", "SUPERVISOR", "MANAGER"].includes(role) && (
         <AdminDash data={data} can={can} />
       )}
     </div>

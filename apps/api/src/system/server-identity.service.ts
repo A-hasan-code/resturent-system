@@ -1,10 +1,17 @@
 import { Injectable, OnModuleInit } from "@nestjs/common";
 import { randomUUID } from "crypto";
-import { existsSync, statSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
 import { hostname, networkInterfaces } from "os";
 import { join } from "path";
 import { SettingsService } from "./settings.service";
-import { ANDROID_APK, appVersion, downloadsDir, httpPort } from "../config/env";
+import {
+  ANDROID_APK,
+  DESKTOP_UPDATE_JSON,
+  DESKTOP_UPDATE_ZIP,
+  appVersion,
+  downloadsDir,
+  httpPort,
+} from "../config/env";
 
 export const APP_ID = "hotel-system";
 export const MDNS_HOST = "hotel.local";
@@ -69,6 +76,7 @@ export class ServerIdentityService implements OnModuleInit {
       urls: addresses.map((a) => `http://${a.ip}:${this.port}`),
       mdnsUrl: `http://${MDNS_HOST}:${this.port}`,
       androidApk: this.androidApk(),
+      desktopUpdate: this.desktopUpdate(),
       time: new Date().toISOString(),
     };
   }
@@ -79,6 +87,48 @@ export class ServerIdentityService implements OnModuleInit {
     if (!file || !existsSync(file)) return null;
     const s = statSync(file);
     return { path: `/downloads/${ANDROID_APK}`, size: s.size, updatedAt: s.mtime.toISOString() };
+  }
+
+  /** Package Additional PCs pull to auto-update the Electron shell over the LAN. */
+  private desktopUpdate() {
+    const dir = downloadsDir();
+    if (!dir) return null;
+    const manifestPath = join(dir, DESKTOP_UPDATE_JSON);
+    const zipPath = join(dir, DESKTOP_UPDATE_ZIP);
+    if (existsSync(manifestPath)) {
+      try {
+        const raw = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+          version?: string;
+          file?: string;
+          path?: string;
+          sha256?: string;
+          size?: number;
+        };
+        const fileName = raw.file || DESKTOP_UPDATE_ZIP;
+        const file = join(dir, fileName);
+        if (!existsSync(file)) return null;
+        const s = statSync(file);
+        return {
+          version: String(raw.version || this.version),
+          path: raw.path || `/downloads/${fileName}`,
+          file: fileName,
+          sha256: raw.sha256 || undefined,
+          size: raw.size ?? s.size,
+          updatedAt: s.mtime.toISOString(),
+        };
+      } catch {
+        /* fall through to zip-only */
+      }
+    }
+    if (!existsSync(zipPath)) return null;
+    const s = statSync(zipPath);
+    return {
+      version: this.version,
+      path: `/downloads/${DESKTOP_UPDATE_ZIP}`,
+      file: DESKTOP_UPDATE_ZIP,
+      size: s.size,
+      updatedAt: s.mtime.toISOString(),
+    };
   }
 }
 

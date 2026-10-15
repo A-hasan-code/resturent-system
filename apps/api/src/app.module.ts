@@ -19,6 +19,7 @@ import { CloseModule } from "./close/close.controller";
 import { CreditModule } from "./credit/credit.module";
 import { SpecialsModule } from "./specials/specials.module";
 import { FinanceModule } from "./finance/finance.module";
+import { WorkersModule } from "./workers/workers.controller";
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { FinanceModule } from "./finance/finance.module";
     PaymentsModule,
     AuditModule,
     ExpensesModule,
+    WorkersModule,
     CloseModule,
     CreditModule,
     SpecialsModule,

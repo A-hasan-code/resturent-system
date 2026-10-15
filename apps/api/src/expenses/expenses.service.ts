@@ -4,7 +4,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
 import { FinanceService } from "../finance/finance.service";
 import { toNumber } from "../common/units";
-import { businessWindow } from "../common/business-day";
+import { businessQueryRange } from "../common/business-day";
 import { CreateExpenseCategoryDto, CreateHotelExpenseDto, UpdateHotelExpenseDto } from "./expenses.dto";
 
 const money2 = (n: number) => Math.round(n * 100) / 100;
@@ -13,6 +13,7 @@ function dayStamp(isoDate: string) {
   return new Date(`${isoDate}T12:00:00`);
 }
 
+/** Calendar date of a noon-stamped spentAt (matches the business date the form saved). */
 function localDate(d: Date) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -73,12 +74,11 @@ export class ExpensesService {
     private readonly finance: FinanceService
   ) {}
 
-  /** Inclusive business-day range → [from, to) using restaurant day-start. */
+  /** Inclusive business-day range → [from, to) using restaurant day-start (+ TZ pad). */
   private async businessRange(from: string, to: string) {
     const start = await this.settings.dayStart();
-    const a = businessWindow(from, start.h, start.m);
-    const b = businessWindow(to, start.h, start.m);
-    return { start: a.from, end: b.to };
+    const range = businessQueryRange(from, to, start.h, start.m);
+    return { start: range.gte, end: range.lt };
   }
 
   private row(e: {
@@ -91,6 +91,8 @@ export class ExpensesService {
     note: string | null;
     createdAt: Date;
     createdBy: { id: string; name: string } | null;
+    workerSalaryPayment?: { id: string } | null;
+    workerLedgerEntry?: { id: string } | null;
   }): LedgerRow {
     return {
       id: e.id,
@@ -105,7 +107,8 @@ export class ExpensesService {
       note: e.note,
       createdAt: e.createdAt.toISOString(),
       createdBy: e.createdBy,
-      editable: true,
+      // Salary / advance from Worker record — edit there; no delete after pay
+      editable: !e.workerSalaryPayment && !e.workerLedgerEntry,
     };
   }
 
@@ -288,7 +291,11 @@ export class ExpensesService {
           ...(cat ? { category: { equals: cat, mode: "insensitive" } } : {}),
         },
         orderBy: [{ spentAt: "desc" }, { createdAt: "desc" }],
-        include: { createdBy: { select: { id: true, name: true } } },
+        include: {
+          createdBy: { select: { id: true, name: true } },
+          workerSalaryPayment: { select: { id: true } },
+          workerLedgerEntry: { select: { id: true } },
+        },
       }),
       this.prisma.supplierPayment.findMany({
         where: { paidAt: { gte: start, lt: end } },
@@ -456,6 +463,7 @@ export class ExpensesService {
   }
 
   async create(dto: CreateHotelExpenseDto, userId: string) {
+    await this.settings.assertHotelOpen();
     const amount = money2(dto.amount);
     if (amount <= 0) throw new BadRequestException("Amount must be greater than zero");
     const title = dto.title.trim();
@@ -481,8 +489,18 @@ export class ExpensesService {
   }
 
   async update(id: string, dto: UpdateHotelExpenseDto) {
-    const existing = await this.prisma.hotelExpense.findUnique({ where: { id } });
+    await this.settings.assertHotelOpen();
+    const existing = await this.prisma.hotelExpense.findUnique({
+      where: { id },
+      include: {
+        workerSalaryPayment: { select: { id: true } },
+        workerLedgerEntry: { select: { id: true } },
+      },
+    });
     if (!existing) throw new NotFoundException("Expense not found");
+    if (existing.workerSalaryPayment || existing.workerLedgerEntry) {
+      throw new BadRequestException("Salary / advance cannot be edited here — use Worker record");
+    }
     await this.finance.assertNotLocked(existing.spentAt);
 
     if (dto.amount != null && dto.amount <= 0) {
@@ -514,8 +532,18 @@ export class ExpensesService {
   }
 
   async remove(id: string) {
-    const existing = await this.prisma.hotelExpense.findUnique({ where: { id } });
+    await this.settings.assertHotelOpen();
+    const existing = await this.prisma.hotelExpense.findUnique({
+      where: { id },
+      include: {
+        workerSalaryPayment: { select: { id: true } },
+        workerLedgerEntry: { select: { id: true } },
+      },
+    });
     if (!existing) throw new NotFoundException("Expense not found");
+    if (existing.workerSalaryPayment || existing.workerLedgerEntry) {
+      throw new BadRequestException("Salary / advance cannot be deleted — edit in Worker record");
+    }
     await this.finance.assertNotLocked(existing.spentAt);
     try {
       await this.prisma.hotelExpense.delete({ where: { id } });

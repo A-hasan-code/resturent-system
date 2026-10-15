@@ -1,7 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { CostingService } from "../common/costing.service";
-import { businessDateOf, businessWindow } from "../common/business-day";
+import { businessDateOf, businessQueryWindow, isoDay } from "../common/business-day";
 import { toNumber } from "../common/units";
 import { AuthUser } from "../common/decorators";
 import { TipService } from "../system/tip.service";
@@ -29,11 +29,6 @@ type DashOrder = {
   cancelledBy?: string | null;
 };
 
-function isoDay(d: Date) {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
 @Injectable()
 export class DashboardService {
   constructor(
@@ -45,12 +40,16 @@ export class DashboardService {
   ) {}
 
   private async netProfitWindows() {
+    const day = await this.settings.dayStart();
     const now = new Date();
-    const today = isoDay(now);
-    const monthFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-    const monthTo = isoDay(new Date(now.getFullYear(), now.getMonth() + 1, 0));
-    const yearFrom = `${now.getFullYear()}-01-01`;
-    const yearTo = `${now.getFullYear()}-12-31`;
+    // Must use restaurant business date (not calendar midnight) — mornings before dayStart
+    // still belong to yesterday; calendar "today" totals were empty until dayStart.
+    const today = businessDateOf(now, day.h, day.m);
+    const [by, bm] = today.split("-").map(Number);
+    const monthFrom = `${String(by).padStart(4, "0")}-${String(bm).padStart(2, "0")}-01`;
+    const monthTo = isoDay(new Date(by, bm, 0));
+    const yearFrom = `${by}-01-01`;
+    const yearTo = `${by}-12-31`;
     const [daily, monthly, yearly] = await Promise.all([
       this.expenses.periodTotals(today, today),
       this.expenses.periodTotals(monthFrom, monthTo),
@@ -92,8 +91,9 @@ export class DashboardService {
     const day = await this.settings.dayStart();
     const now = new Date();
     const bizDate = businessDateOf(now, day.h, day.m);
-    const { from: start, to: dayEnd } = businessWindow(bizDate, day.h, day.m);
-    const inBizDay = { gte: start, lt: dayEnd };
+    // Same TZ pad as Bills — without it, installed Windows servers show empty today stats.
+    const win = businessQueryWindow(bizDate, day.h, day.m);
+    const inBizDay = { gte: win.gte, lt: win.lt };
     const staleBefore = new Date(Date.now() - STALE_MINUTES * 60 * 1000);
 
     // Older/demo orders often saved costTotal=0 — fill from recipes first
@@ -135,10 +135,10 @@ export class DashboardService {
       cancelledCount,
       cancelledList,
     ] = await Promise.all([
-      this.prisma.order.count({ where: { status: "PENDING" } }),
-      this.prisma.order.count({ where: { status: "PREPARING" } }),
-      this.prisma.order.count({ where: { status: "READY" } }),
-      this.prisma.order.count({ where: { status: "SERVED" } }),
+      this.prisma.order.count({ where: { status: "PENDING", tableId: { not: null } } }),
+      this.prisma.order.count({ where: { status: "PREPARING", tableId: { not: null } } }),
+      this.prisma.order.count({ where: { status: "READY", tableId: { not: null } } }),
+      this.prisma.order.count({ where: { status: "SERVED", tableId: { not: null } } }),
       this.prisma.order.count({
         where: { status: "COMPLETED", updatedAt: inBizDay },
       }),
@@ -188,7 +188,7 @@ export class DashboardService {
         where: { status: { not: "CANCELLED" } },
       }),
       this.prisma.order.findMany({
-        where: { status: { in: ["PENDING", "PREPARING", "READY"] } },
+        where: { status: { in: ["PENDING", "PREPARING", "READY"] }, tableId: { not: null } },
         include: { items: true },
         orderBy: { createdAt: "asc" },
         take: 25,
@@ -196,12 +196,14 @@ export class DashboardService {
       this.prisma.order.count({
         where: {
           status: { in: ["PENDING", "PREPARING"] },
+          tableId: { not: null },
           createdAt: { lte: staleBefore },
         },
       }),
       this.prisma.order.findMany({
         where: {
           status: { in: ["PENDING", "PREPARING"] },
+          tableId: { not: null },
           createdAt: { lte: staleBefore },
         },
         include: { items: true },
@@ -233,9 +235,9 @@ export class DashboardService {
         where: { type: "SALE", createdAt: inBizDay },
         select: { quantity: true, ratePerUnit: true },
       }),
-      this.tips.tipsTodayTotal(start),
-      this.tips.tipsTodayForUser(user.id, start),
-      this.tips.tipBoard(start),
+      this.tips.tipsTodayTotal(win.gte, win.lt),
+      this.tips.tipsTodayForUser(user.id, win.gte, win.lt),
+      this.tips.tipBoard(win.gte, win.lt),
       this.prisma.order.count({
         where: { waiterId: user.id, createdAt: inBizDay, status: { not: "CANCELLED" } },
       }),

@@ -4,6 +4,8 @@ import { dirname, isAbsolute, join, resolve } from "path";
 const PATH_KEYS = ["HOTEL_DATA_DIR", "PG_BIN", "WEB_DIST", "DOWNLOADS_DIR"];
 
 export const ANDROID_APK = "hotel-system.apk";
+export const DESKTOP_UPDATE_JSON = "desktop-update.json";
+export const DESKTOP_UPDATE_ZIP = "desktop-update.zip";
 
 /**
  * Installed server: HOTEL_ENV_FILE (written by the installer under ProgramData).
@@ -65,7 +67,7 @@ export function webDistDir(): string | null {
   return null;
 }
 
-/** Files offered to staff devices at /downloads (the Android APK). Installed layout: app/downloads. */
+/** Files offered to staff devices at /downloads (APK + desktop auto-update). Installed layout: app/downloads. */
 export function downloadsDir(): string | null {
   for (const p of [process.env.DOWNLOADS_DIR, resolve(__dirname, "../../../downloads")]) {
     if (p && existsSync(p)) return p;
