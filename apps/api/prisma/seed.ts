@@ -1,4 +1,4 @@
-import { KitchenStation, PackUnit, PrismaClient, UnitType } from "@prisma/client";
+import { PackUnit, PrismaClient, UnitType } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { FULL_MENU_RECIPES } from "./full-menu-recipes";
 
@@ -338,7 +338,7 @@ const STORE_ITEMS: StoreDef[] = [
 type MenuSeed = {
   name: string;
   category: string;
-  station: KitchenStation;
+  station: string;
   unit: UnitType;
   price: number;
   recipeKey?: string;
@@ -362,7 +362,7 @@ const PCS_FIXED: Pick<MenuSeed, "minQty" | "qtyStep" | "allowCustomQty" | "maxQt
 function halfKg(
   name: string,
   category: string,
-  station: KitchenStation,
+  station: string,
   pricePerKg: number,
   recipeKey?: string
 ): MenuSeed {
@@ -384,7 +384,7 @@ function halfKg(
 function fullKg(
   name: string,
   category: string,
-  station: KitchenStation,
+  station: string,
   pricePerKg: number,
   recipeKey?: string
 ): MenuSeed {
@@ -406,7 +406,7 @@ function fullKg(
 function fullHandiKg(
   name: string,
   category: string,
-  station: KitchenStation,
+  station: string,
   pricePerKg: number,
   recipeKey?: string
 ): MenuSeed {
@@ -428,7 +428,7 @@ function fullHandiKg(
 function halfFull(
   base: string,
   category: string,
-  station: KitchenStation,
+  station: string,
   half: number,
   full: number,
   recipeKey?: string
@@ -459,7 +459,7 @@ function halfFull(
 function byKg(
   name: string,
   category: string,
-  station: KitchenStation,
+  station: string,
   pricePerKg: number,
   recipeKey?: string
 ): MenuSeed {
@@ -482,7 +482,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Mutton Khada Sijji (5hr advance)",
     category: "Live Kitchen",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 4500,
     recipeKey: "mutton_khada_sijji",
@@ -491,7 +491,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Ranjha Goshat",
     category: "Live Kitchen",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 4500,
     recipeKey: "ranjha_goshat",
@@ -500,22 +500,22 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Khada Sijji",
     category: "Live Kitchen",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 2000,
     recipeKey: "chicken_khada_sijji",
     ...PCS_FIXED,
   },
   // Shinwari: card half/full ≈ 950/1800 & 2200/4100 → per-kg rates on Half/Full lines
-  halfKg("Chicken Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 1900, "chicken_shinwari_karahi"),
-  fullKg("Chicken Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 1800, "chicken_shinwari_karahi"),
-  halfKg("Mutton Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 4400, "mutton_shinwari_karahi"),
-  fullKg("Mutton Shinwari Karahi", "Live Kitchen", KitchenStation.COOKING, 4100, "mutton_shinwari_karahi"),
+  halfKg("Chicken Shinwari Karahi", "Live Kitchen", "COOKING", 1900, "chicken_shinwari_karahi"),
+  fullKg("Chicken Shinwari Karahi", "Live Kitchen", "COOKING", 1800, "chicken_shinwari_karahi"),
+  halfKg("Mutton Shinwari Karahi", "Live Kitchen", "COOKING", 4400, "mutton_shinwari_karahi"),
+  fullKg("Mutton Shinwari Karahi", "Live Kitchen", "COOKING", 4100, "mutton_shinwari_karahi"),
   // Banu Pulao → Special Pakistani (KG) — see below
   {
     name: "Dam Pukhat",
     category: "Live Kitchen",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 1000,
     recipeKey: "dam_pukhat",
@@ -524,7 +524,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Rosh + Daal",
     category: "Live Kitchen",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 1500,
     recipeKey: "mutton_namkeen_rosh",
@@ -533,7 +533,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Paneer BBQ",
     category: "Live Kitchen",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 400,
     recipeKey: "paneer_bbq",
@@ -542,7 +542,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Beef BBQ",
     category: "Live Kitchen",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 350,
     recipeKey: "beef_bbq_live",
@@ -551,7 +551,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Afghani Boti",
     category: "Live Kitchen",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 200,
     recipeKey: "afghani_boti_live",
@@ -562,7 +562,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Plain Paratha",
     category: "Breakfast & Paratha",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 60,
     recipeKey: "plain_paratha",
@@ -570,7 +570,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Aloo Paratha",
     category: "Breakfast & Paratha",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 100,
     recipeKey: "aloo_paratha",
@@ -578,7 +578,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Special Chicken Paratha",
     category: "Breakfast & Paratha",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 200,
     recipeKey: "special_chicken_paratha",
@@ -586,7 +586,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Egg Paratha",
     category: "Breakfast & Paratha",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 150,
     recipeKey: "egg_paratha",
@@ -594,18 +594,18 @@ const MENU: MenuSeed[] = [
   {
     name: "Omelette",
     category: "Breakfast & Paratha",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 100,
     recipeKey: "omelette",
   },
-  ...halfFull("Yogurt", "Breakfast & Paratha", KitchenStation.COOKING, 100, 200, "yogurt_bowl"),
+  ...halfFull("Yogurt", "Breakfast & Paratha", "COOKING", 100, 200, "yogurt_bowl"),
 
   // Appetizers (bowl portions)
   ...halfFull(
     "Quetta Sangat Special Soup",
     "Appetizers",
-    KitchenStation.COOKING,
+    "COOKING",
     450,
     700,
     "sangat_special_soup"
@@ -613,16 +613,16 @@ const MENU: MenuSeed[] = [
   ...halfFull(
     "Chicken Hot & Sour Soup",
     "Appetizers",
-    KitchenStation.COOKING,
+    "COOKING",
     400,
     650,
     "chicken_hot_sour_soup"
   ),
-  ...halfFull("Chicken Corn Soup", "Appetizers", KitchenStation.COOKING, 400, 600, "chicken_corn_soup"),
+  ...halfFull("Chicken Corn Soup", "Appetizers", "COOKING", 400, 600, "chicken_corn_soup"),
   ...halfFull(
     "Chicken Vegetable Soup",
     "Appetizers",
-    KitchenStation.COOKING,
+    "COOKING",
     400,
     600,
     "chicken_veg_soup"
@@ -630,7 +630,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Quetta Sangat Special Fries",
     category: "Appetizers",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 300,
     recipeKey: "special_fries",
@@ -640,7 +640,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Tikka Boti",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 200,
     recipeKey: "chicken_tikka_boti",
@@ -648,7 +648,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Malai Boti",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 300,
     recipeKey: "chicken_malai_boti",
@@ -656,7 +656,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Kasturi Boti",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 350,
     recipeKey: "chicken_kasturi_boti",
@@ -664,7 +664,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Afghani Boti",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 200,
     recipeKey: "chicken_afghani_boti",
@@ -672,7 +672,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Makhmali Kabab",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 250,
     recipeKey: "chicken_makhmali_kabab",
@@ -680,7 +680,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Kalmi Tikka",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 450,
     recipeKey: "chicken_kalmi_tikka",
@@ -688,7 +688,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Seekh Kabab",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 180,
     recipeKey: "chicken_seekh_kabab",
@@ -696,7 +696,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Reshmi Kabab",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 220,
     recipeKey: "chicken_reshmi_kabab",
@@ -704,7 +704,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Beef Kabab",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 230,
     recipeKey: "beef_kabab",
@@ -712,7 +712,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Turkish Kabab",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 300,
     recipeKey: "chicken_turkish_kabab",
@@ -720,7 +720,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Tikka Chest Piece",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 400,
     recipeKey: "chicken_tikka_chest",
@@ -728,7 +728,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Tikka Leg Piece",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 350,
     recipeKey: "chicken_tikka_leg",
@@ -736,7 +736,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Afghani Tikka Chest Piece",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 450,
     recipeKey: "afghani_tikka_chest",
@@ -744,35 +744,35 @@ const MENU: MenuSeed[] = [
   {
     name: "Afghani Tikka Leg Piece",
     category: "BBQ",
-    station: KitchenStation.BBQ,
+    station: "BBQ",
     unit: UnitType.PCS,
     price: 400,
     recipeKey: "afghani_tikka_leg",
   },
   // PDF Special Grill Fish Rs 600–1200 by weight — mid list rate
-  byKg("Special Grill Fish (By Weight)", "BBQ", KitchenStation.BBQ, 900, "grill_fish"),
+  byKg("Special Grill Fish (By Weight)", "BBQ", "BBQ", 900, "grill_fish"),
 
   // Pakistani Special — Quetta Sangat Special meat (PDF half|full = 500g|1kg)
   halfKg(
     "Mutton Namkeen Gosht Special",
     "Pakistani Special",
-    KitchenStation.COOKING,
+    "COOKING",
     4000,
     "mutton_namkeen_gosht"
   ),
   fullKg(
     "Mutton Namkeen Gosht Special",
     "Pakistani Special",
-    KitchenStation.COOKING,
+    "COOKING",
     4000,
     "mutton_namkeen_gosht"
   ),
-  halfKg("Beef Namkeen Gosht", "Pakistani Special", KitchenStation.COOKING, 2600, "beef_namkeen_gosht"),
-  fullKg("Beef Namkeen Gosht", "Pakistani Special", KitchenStation.COOKING, 2400, "beef_namkeen_gosht"),
+  halfKg("Beef Namkeen Gosht", "Pakistani Special", "COOKING", 2600, "beef_namkeen_gosht"),
+  fullKg("Beef Namkeen Gosht", "Pakistani Special", "COOKING", 2400, "beef_namkeen_gosht"),
   {
     name: "Mutton Rosh (Special Daal)",
     category: "Pakistani Special",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 1500,
     recipeKey: "mutton_namkeen_rosh",
@@ -781,7 +781,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Beef Namkeen Platter",
     category: "Pakistani Special",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 1000,
     recipeKey: "beef_namkeen_platter",
@@ -793,62 +793,62 @@ const MENU: MenuSeed[] = [
   halfKg(
     "Quetta Sangat Special Chicken Karahi",
     "Chicken Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     1800,
     "sangat_chicken_karahi"
   ),
   fullKg(
     "Quetta Sangat Special Chicken Karahi",
     "Chicken Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     1700,
     "sangat_chicken_karahi"
   ),
-  halfKg("Special Desi Murgha Karahi", "Chicken Karahi", KitchenStation.COOKING, 3300, "desi_murgha_karahi"),
-  fullKg("Special Desi Murgha Karahi", "Chicken Karahi", KitchenStation.COOKING, 3200, "desi_murgha_karahi"),
+  halfKg("Special Desi Murgha Karahi", "Chicken Karahi", "COOKING", 3300, "desi_murgha_karahi"),
+  fullKg("Special Desi Murgha Karahi", "Chicken Karahi", "COOKING", 3200, "desi_murgha_karahi"),
   halfKg(
     "Chicken Lahori Karahi (Red Chilli)",
     "Chicken Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     1800,
     "chicken_lahori_karahi"
   ),
   fullKg(
     "Chicken Lahori Karahi (Red Chilli)",
     "Chicken Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     1700,
     "chicken_lahori_karahi"
   ),
   halfKg(
     "Chicken Karahi (Black Pepper)",
     "Chicken Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     1900,
     "chicken_black_pepper_karahi"
   ),
   fullKg(
     "Chicken Karahi (Black Pepper)",
     "Chicken Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     1800,
     "chicken_black_pepper_karahi"
   ),
-  halfKg("Chicken Afghani Karahi (White)", "Chicken Karahi", KitchenStation.COOKING, 1900, "chicken_afghani_handi"),
-  fullKg("Chicken Afghani Karahi (White)", "Chicken Karahi", KitchenStation.COOKING, 1800, "chicken_afghani_handi"),
-  halfKg("Chicken Achari Karahi", "Chicken Karahi", KitchenStation.COOKING, 1900, "chicken_achari_karahi"),
-  fullKg("Chicken Achari Karahi", "Chicken Karahi", KitchenStation.COOKING, 1800, "chicken_achari_karahi"),
+  halfKg("Chicken Afghani Karahi (White)", "Chicken Karahi", "COOKING", 1900, "chicken_afghani_handi"),
+  fullKg("Chicken Afghani Karahi (White)", "Chicken Karahi", "COOKING", 1800, "chicken_afghani_handi"),
+  halfKg("Chicken Achari Karahi", "Chicken Karahi", "COOKING", 1900, "chicken_achari_karahi"),
+  fullKg("Chicken Achari Karahi", "Chicken Karahi", "COOKING", 1800, "chicken_achari_karahi"),
   halfKg(
     "Chicken Peshawari Karahi (Shinwari)",
     "Chicken Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     1800,
     "chicken_shinwari_karahi"
   ),
   fullKg(
     "Chicken Peshawari Karahi (Shinwari)",
     "Chicken Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     1700,
     "chicken_shinwari_karahi"
   ),
@@ -857,80 +857,80 @@ const MENU: MenuSeed[] = [
   halfKg(
     "Quetta Sangat Special Beef Karahi",
     "Beef Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     2600,
     "sangat_beef_karahi"
   ),
   fullKg(
     "Quetta Sangat Special Beef Karahi",
     "Beef Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     2500,
     "sangat_beef_karahi"
   ),
-  halfKg("Beef Lahori Karahi (Red Chilli)", "Beef Karahi", KitchenStation.COOKING, 2600, "beef_lahori_karahi"),
-  fullKg("Beef Lahori Karahi (Red Chilli)", "Beef Karahi", KitchenStation.COOKING, 2500, "beef_lahori_karahi"),
-  halfKg("Beef Karahi (Black Pepper)", "Beef Karahi", KitchenStation.COOKING, 2600, "beef_black_pepper_karahi"),
-  fullKg("Beef Karahi (Black Pepper)", "Beef Karahi", KitchenStation.COOKING, 2500, "beef_black_pepper_karahi"),
-  halfKg("Beef Afghani Karahi (White)", "Beef Karahi", KitchenStation.COOKING, 2600, "beef_afghani_karahi"),
-  fullKg("Beef Afghani Karahi (White)", "Beef Karahi", KitchenStation.COOKING, 2500, "beef_afghani_karahi"),
+  halfKg("Beef Lahori Karahi (Red Chilli)", "Beef Karahi", "COOKING", 2600, "beef_lahori_karahi"),
+  fullKg("Beef Lahori Karahi (Red Chilli)", "Beef Karahi", "COOKING", 2500, "beef_lahori_karahi"),
+  halfKg("Beef Karahi (Black Pepper)", "Beef Karahi", "COOKING", 2600, "beef_black_pepper_karahi"),
+  fullKg("Beef Karahi (Black Pepper)", "Beef Karahi", "COOKING", 2500, "beef_black_pepper_karahi"),
+  halfKg("Beef Afghani Karahi (White)", "Beef Karahi", "COOKING", 2600, "beef_afghani_karahi"),
+  fullKg("Beef Afghani Karahi (White)", "Beef Karahi", "COOKING", 2500, "beef_afghani_karahi"),
 
   // Mutton Karahi — PDF 2100|4000, 2000|3800, 2100|4000, 2200|4100
   halfKg(
     "Quetta Sangat Special Mutton Karahi",
     "Mutton Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     4200,
     "sangat_mutton_karahi"
   ),
   fullKg(
     "Quetta Sangat Special Mutton Karahi",
     "Mutton Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     4000,
     "sangat_mutton_karahi"
   ),
   halfKg(
     "Mutton Lahori Karahi (Red Chilli)",
     "Mutton Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     4000,
     "mutton_lahori_karahi"
   ),
   fullKg(
     "Mutton Lahori Karahi (Red Chilli)",
     "Mutton Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     3800,
     "mutton_lahori_karahi"
   ),
   halfKg(
     "Mutton Karahi (Black Pepper)",
     "Mutton Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     4000,
     "mutton_black_pepper_karahi"
   ),
   fullKg(
     "Mutton Karahi (Black Pepper)",
     "Mutton Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     3800,
     "mutton_black_pepper_karahi"
   ),
-  halfKg("Mutton Afghani Karahi (White)", "Mutton Karahi", KitchenStation.COOKING, 4200, "mutton_afghani_karahi"),
-  fullKg("Mutton Afghani Karahi (White)", "Mutton Karahi", KitchenStation.COOKING, 4000, "mutton_afghani_karahi"),
+  halfKg("Mutton Afghani Karahi (White)", "Mutton Karahi", "COOKING", 4200, "mutton_afghani_karahi"),
+  fullKg("Mutton Afghani Karahi (White)", "Mutton Karahi", "COOKING", 4000, "mutton_afghani_karahi"),
   halfKg(
     "Mutton Peshawari Karahi (Shinwari)",
     "Mutton Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     4400,
     "mutton_peshawari_karahi"
   ),
   fullKg(
     "Mutton Peshawari Karahi (Shinwari)",
     "Mutton Karahi",
-    KitchenStation.COOKING,
+    "COOKING",
     4100,
     "mutton_peshawari_karahi"
   ),
@@ -939,44 +939,44 @@ const MENU: MenuSeed[] = [
   halfKg(
     "Special Mutton Handi (With Bone)",
     "Mutton Handi",
-    KitchenStation.COOKING,
+    "COOKING",
     4400,
     "special_mutton_handi"
   ),
   fullHandiKg(
     "Special Mutton Handi (With Bone)",
     "Mutton Handi",
-    KitchenStation.COOKING,
+    "COOKING",
     4100,
     "special_mutton_handi"
   ),
-  halfKg("Mutton Handi (With Bone)", "Mutton Handi", KitchenStation.COOKING, 4400, "mutton_handi"),
-  fullHandiKg("Mutton Handi (With Bone)", "Mutton Handi", KitchenStation.COOKING, 4100, "mutton_handi"),
+  halfKg("Mutton Handi (With Bone)", "Mutton Handi", "COOKING", 4400, "mutton_handi"),
+  fullHandiKg("Mutton Handi (With Bone)", "Mutton Handi", "COOKING", 4100, "mutton_handi"),
   halfKg(
     "Mutton Hari Mirch Handi (With Bone)",
     "Mutton Handi",
-    KitchenStation.COOKING,
+    "COOKING",
     4500,
     "mutton_hari_mirch_handi"
   ),
   fullHandiKg(
     "Mutton Hari Mirch Handi (With Bone)",
     "Mutton Handi",
-    KitchenStation.COOKING,
+    "COOKING",
     4300,
     "mutton_hari_mirch_handi"
   ),
   halfKg(
     "Mutton Afghani Handi (White / With Bone)",
     "Mutton Handi",
-    KitchenStation.COOKING,
+    "COOKING",
     4400,
     "mutton_afghani_handi"
   ),
   fullHandiKg(
     "Mutton Afghani Handi (White / With Bone)",
     "Mutton Handi",
-    KitchenStation.COOKING,
+    "COOKING",
     4100,
     "mutton_afghani_handi"
   ),
@@ -985,41 +985,41 @@ const MENU: MenuSeed[] = [
   halfKg(
     "Quetta Sangat Special Chicken Handi",
     "Chicken Handi",
-    KitchenStation.COOKING,
+    "COOKING",
     2000,
     "sangat_chicken_handi"
   ),
   fullHandiKg(
     "Quetta Sangat Special Chicken Handi",
     "Chicken Handi",
-    KitchenStation.COOKING,
+    "COOKING",
     1900,
     "sangat_chicken_handi"
   ),
-  halfKg("Chicken Handi", "Chicken Handi", KitchenStation.COOKING, 1800, "chicken_handi"),
-  fullHandiKg("Chicken Handi", "Chicken Handi", KitchenStation.COOKING, 1700, "chicken_handi"),
+  halfKg("Chicken Handi", "Chicken Handi", "COOKING", 1800, "chicken_handi"),
+  fullHandiKg("Chicken Handi", "Chicken Handi", "COOKING", 1700, "chicken_handi"),
   // Hari Mirch — card full only 1200
   fullHandiKg(
     "Chicken Hari Mirch Handi",
     "Chicken Handi",
-    KitchenStation.COOKING,
+    "COOKING",
     1200,
     "chicken_hari_mirch_handi"
   ),
-  halfKg("Chicken Afghani Handi (White)", "Chicken Handi", KitchenStation.COOKING, 1900, "chicken_afghani_handi"),
+  halfKg("Chicken Afghani Handi (White)", "Chicken Handi", "COOKING", 1900, "chicken_afghani_handi"),
   fullHandiKg(
     "Chicken Afghani Handi (White)",
     "Chicken Handi",
-    KitchenStation.COOKING,
+    "COOKING",
     1900,
     "chicken_afghani_handi"
   ),
-  halfKg("Chicken Achari Handi", "Chicken Handi", KitchenStation.COOKING, 1900, "chicken_achari_handi"),
-  fullHandiKg("Chicken Achari Handi", "Chicken Handi", KitchenStation.COOKING, 1750, "chicken_achari_handi"),
+  halfKg("Chicken Achari Handi", "Chicken Handi", "COOKING", 1900, "chicken_achari_handi"),
+  fullHandiKg("Chicken Achari Handi", "Chicken Handi", "COOKING", 1750, "chicken_achari_handi"),
   {
     name: "Chicken Jalfrezi",
     category: "Chicken Handi",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 900,
     recipeKey: "chicken_jalfrezi",
@@ -1028,7 +1028,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Chatkhara",
     category: "Chicken Handi",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 900,
     recipeKey: "chicken_chatkhara",
@@ -1037,7 +1037,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Ginger",
     category: "Chicken Handi",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 1000,
     recipeKey: "chicken_ginger",
@@ -1048,21 +1048,21 @@ const MENU: MenuSeed[] = [
   ...halfFull(
     "Quetta Sangat Special Rice",
     "Chinese Rice",
-    KitchenStation.COOKING,
+    "COOKING",
     450,
     900,
     "sangat_special_rice"
   ),
-  ...halfFull("Chicken Fried Rice", "Chinese Rice", KitchenStation.COOKING, 400, 800, "chicken_fried_rice"),
-  ...halfFull("Chicken Masala Rice", "Chinese Rice", KitchenStation.COOKING, 400, 800, "chicken_masala_rice"),
-  ...halfFull("Egg Fried Rice", "Chinese Rice", KitchenStation.COOKING, 350, 700, "egg_fried_rice"),
-  ...halfFull("Vegetable Rice", "Chinese Rice", KitchenStation.COOKING, 350, 700, "vegetable_rice"),
+  ...halfFull("Chicken Fried Rice", "Chinese Rice", "COOKING", 400, 800, "chicken_fried_rice"),
+  ...halfFull("Chicken Masala Rice", "Chinese Rice", "COOKING", 400, 800, "chicken_masala_rice"),
+  ...halfFull("Egg Fried Rice", "Chinese Rice", "COOKING", 350, 700, "egg_fried_rice"),
+  ...halfFull("Vegetable Rice", "Chinese Rice", "COOKING", 350, 700, "vegetable_rice"),
 
   // Chinese Combo
   {
     name: "Chicken Manchurian + Fried Rice",
     category: "Chinese Combo",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 1050,
     recipeKey: "chicken_manchurian_fried_rice",
@@ -1070,7 +1070,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Garlic + Fried Rice",
     category: "Chinese Combo",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 800,
     recipeKey: "chicken_garlic_fried_rice",
@@ -1078,7 +1078,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Chicken Black Pepper + Fried Rice",
     category: "Chinese Combo",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 800,
     recipeKey: "chicken_black_pepper_fried_rice",
@@ -1088,7 +1088,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Green Salad",
     category: "Salad",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 100,
     recipeKey: "green_salad",
@@ -1096,7 +1096,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Kachumar Salad",
     category: "Salad",
-    station: KitchenStation.COOKING,
+    station: "COOKING",
     unit: UnitType.PCS,
     price: 120,
     recipeKey: "kachumar_salad",
@@ -1106,7 +1106,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Regular Cold Drink",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 80,
     recipeKey: "regular_cold_drink",
@@ -1115,7 +1115,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Can Pack",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 120,
     recipeKey: "can_pack",
@@ -1124,7 +1124,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Can Pack (Sugar Free)",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 130,
     recipeKey: "can_pack_sf",
@@ -1133,7 +1133,7 @@ const MENU: MenuSeed[] = [
   {
     name: "1 Litre Drink",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 180,
     recipeKey: "drink_1l",
@@ -1142,7 +1142,7 @@ const MENU: MenuSeed[] = [
   {
     name: "1.5 Litre Drink",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 220,
     recipeKey: "drink_1_5l",
@@ -1151,7 +1151,7 @@ const MENU: MenuSeed[] = [
   {
     name: "2 Litre Drink",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 280,
     recipeKey: "drink_2l",
@@ -1160,7 +1160,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Mineral Water (Small)",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 50,
     recipeKey: "water_small",
@@ -1169,7 +1169,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Mineral Water (Large)",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 100,
     recipeKey: "water_large",
@@ -1178,7 +1178,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Quetta Sangat Special Doodh Patti",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 70,
     recipeKey: "doodh_patti",
@@ -1187,7 +1187,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Gur Wali Chaye",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 100,
     recipeKey: "gur_wali_chaye",
@@ -1196,7 +1196,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Green Tea",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 70,
     recipeKey: "green_tea_cup",
@@ -1205,7 +1205,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Sulaimani Qehwa",
     category: "Beverages",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 70,
     recipeKey: "sulaimani_qehwa",
@@ -1216,7 +1216,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Biscuit",
     category: "Grocery",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 20,
     recipeKey: "biscuit_1pc",
@@ -1225,7 +1225,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Nimko",
     category: "Grocery",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 50,
     recipeKey: "nimko_1pk",
@@ -1234,7 +1234,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Cigarette (Full)",
     category: "Grocery",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 500,
     recipeKey: "cigarette_full",
@@ -1243,7 +1243,7 @@ const MENU: MenuSeed[] = [
   {
     name: "Cigarette (Half)",
     category: "Grocery",
-    station: KitchenStation.BEVERAGES,
+    station: "BEVERAGES",
     unit: UnitType.PCS,
     price: 260,
     recipeKey: "cigarette_half",
@@ -2007,7 +2007,7 @@ async function seedCatalog() {
 
     const baseMenu = {
       category: product.category,
-      kitchenStation: KitchenStation.COOKING,
+      kitchenStation: "COOKING",
       kind: "SPECIAL" as const,
       sellUnit: UnitType.PCS,
       specialProductId: product.id,
