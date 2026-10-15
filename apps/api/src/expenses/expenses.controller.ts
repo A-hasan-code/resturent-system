@@ -4,6 +4,7 @@ import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
 import { CreateExpenseCategoryDto, CreateHotelExpenseDto, UpdateHotelExpenseDto } from "./expenses.dto";
 import { ExpensesService } from "./expenses.service";
+import { FinanceModule } from "../finance/finance.module";
 
 @Controller("expenses")
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -54,6 +55,7 @@ export class ExpensesController {
 }
 
 @Module({
+  imports: [FinanceModule],
   providers: [ExpensesService],
   controllers: [ExpensesController],
   exports: [ExpensesService],

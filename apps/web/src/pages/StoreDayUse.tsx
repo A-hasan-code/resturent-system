@@ -5,6 +5,10 @@ import { useI18n, useT, type MessageKey } from "../i18n";
 import { useToast } from "../toast";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
+import { DateField } from "../components/DateField";
+import { useShiftOpen } from "../hotel-gate";
+import { printCountSheet } from "./closing-print";
+import { sanitizeQty } from "../inputSanitize";
 
 const PAGE_SIZE = 15;
 
@@ -16,7 +20,10 @@ type Row = {
   onHand: number;
   rate: number;
   autoQty: number;
+  transferredQty?: number;
   extraQty: number;
+  usedQty?: number;
+  leftoverQty?: number;
   reason: string;
   value: number;
 };
@@ -63,11 +70,15 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
   const toast = useToast();
   const { user } = useAuth();
   const isAdmin = user?.roleCode === "ADMIN";
+  const shiftOpen = useShiftOpen();
 
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [history, setHistory] = useState<HistoryRow[]>([]);
+  const [date, setDate] = useState("");
   const [viewDate, setViewDate] = useState<string | null>(null);
+  const [used, setUsed] = useState<Record<string, string>>({});
   const [extra, setExtra] = useState<Record<string, string>>({});
+  const [leftover, setLeftover] = useState<Record<string, string>>({});
   const [reason, setReason] = useState<Record<string, string>>({});
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
@@ -77,13 +88,23 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
 
   function applySheet(data: Sheet) {
     setSheet(data);
-    const qty: Record<string, string> = {};
+    setDate(data.businessDate);
+    const usedQty: Record<string, string> = {};
+    const extraQty: Record<string, string> = {};
+    const leftQty: Record<string, string> = {};
     const why: Record<string, string> = {};
     for (const item of data.items) {
-      qty[item.id] = item.extraQty ? String(item.extraQty) : "";
+      const u = item.usedQty ?? 0;
+      const e = item.extraQty ?? 0;
+      const left = item.leftoverQty ?? item.onHand;
+      usedQty[item.id] = u ? String(u) : "";
+      extraQty[item.id] = e ? String(e) : "";
+      leftQty[item.id] = left || left === 0 ? String(left) : "";
       why[item.id] = item.reason || REASONS[0].value;
     }
-    setExtra(qty);
+    setUsed(usedQty);
+    setExtra(extraQty);
+    setLeftover(leftQty);
     setReason(why);
     setEditing(false);
   }
@@ -93,11 +114,11 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
     setHistory(list);
   }
 
-  async function load(date?: string | null) {
-    const path = date ? `/store/day-use?date=${date}` : "/store/day-use";
+  async function load(nextDate?: string | null) {
+    const path = nextDate ? `/store/day-use?date=${nextDate}` : "/store/day-use";
     const data = await api<Sheet>(path);
     applySheet(data);
-    setViewDate(date && date !== data.today ? date : null);
+    setViewDate(nextDate && nextDate !== data.today ? nextDate : null);
   }
 
   function startEdit() {
@@ -134,20 +155,24 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
 
   const preview = useMemo(() => {
     if (!sheet) return { used: 0, profit: 0 };
-    const used = sheet.items.reduce((s, i) => {
+    const usedVal = sheet.items.reduce((s, i) => {
+      const usedQty = Math.max(0, Number(used[i.id]) || 0);
       const extraQty = Math.max(0, Number(extra[i.id]) || 0);
-      return s + (i.autoQty + extraQty) * i.rate;
+      const transferred = i.transferredQty ?? i.autoQty;
+      return s + (transferred + usedQty + extraQty) * i.rate;
     }, 0);
-    return { used, profit: sheet.sales - used };
-  }, [sheet, extra]);
+    return { used: usedVal, profit: sheet.sales - usedVal };
+  }, [sheet, used, extra]);
 
   const isToday = sheet?.isToday !== false;
-  const canStartEdit = !!sheet?.canEdit && (canManage || isAdmin);
+  // API sets canEdit for today (managers) or any day (admin). Admin may edit past even after shift end.
+  const canStartEdit = !!sheet?.canEdit && (isAdmin || ((canManage || isAdmin) && shiftOpen));
   const editable = canStartEdit && editing;
 
-  async function openDate(date: string) {
+  async function openDate(next: string) {
     try {
-      await load(date);
+      setDate(next);
+      await load(next);
     } catch (e) {
       toast.push(e instanceof Error ? e.message : t("common.failed"), "err");
     }
@@ -163,14 +188,23 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
 
   async function save(e: FormEvent) {
     e.preventDefault();
-    if (!sheet || !editable || !isToday) return;
+    if (!sheet || !editable) return;
     const lines = sheet.items
       .map((i) => ({
         storeItemId: i.id,
+        usedQty: Math.max(0, Number(used[i.id]) || 0),
         extraQty: Math.max(0, Number(extra[i.id]) || 0),
+        leftoverQty: Math.max(0, Number(leftover[i.id]) || 0),
         reason: reason[i.id] || REASONS[0].value,
       }))
-      .filter((l) => l.extraQty > 0);
+      .filter(
+        (l) =>
+          l.usedQty > 0 ||
+          l.extraQty > 0 ||
+          l.leftoverQty > 0 ||
+          (sheet.items.find((i) => i.id === l.storeItemId)?.transferredQty ?? 0) !== 0 ||
+          (sheet.items.find((i) => i.id === l.storeItemId)?.onHand ?? 0) !== 0
+      );
     setBusy(true);
     try {
       const data = await api<Sheet>("/store/day-use", {
@@ -193,6 +227,7 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
 
   return (
     <form onSubmit={save}>
+      {!shiftOpen && <p className="muted tiny">{t("hotel.shiftEnded")}</p>}
       <div
         className="row"
         style={{
@@ -203,17 +238,75 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
         }}
       >
         <div style={{ flex: "1 1 16rem", minWidth: 0 }}>
-          <h2 style={{ margin: 0 }}>{t("store.tabUsed")}</h2>
+          <h2 style={{ margin: 0 }}>{t("store.tabStoreClose")}</h2>
           <p className="muted" style={{ margin: "0.25rem 0 0" }}>
-            {t("store.dayUseHint")}
+            {t("store.storeCloseHint")}
           </p>
+          <button
+            type="button"
+            className="btn ghost sm"
+            style={{ marginTop: 8 }}
+            disabled={!sheet}
+            onClick={() => {
+              if (!sheet) return;
+              const ok = printCountSheet({
+                title: t("store.tabStoreClose"),
+                subtitle: t("store.countSheetHint"),
+                dateLabel: `${t("store.dayDate")}: ${sheet.businessDate}`,
+                columns: [
+                  { key: "onHand", label: t("store.onHand") },
+                  { key: "transferred", label: t("store.transferredToKitchen") },
+                  { key: "remaining", label: t("store.countRemaining") },
+                ],
+                blankCols: ["remaining"],
+                rows: sheet.items
+                  .filter((i) => i.onHand > 0 || (i.transferredQty ?? i.autoQty) !== 0 || i.extraQty > 0)
+                  .map((i) => ({
+                    name: i.name,
+                    category: i.category,
+                    unit: unitLabel(i.unit),
+                    values: {
+                      onHand: i.onHand,
+                      transferred: i.transferredQty ?? i.autoQty,
+                    },
+                  })),
+              });
+              if (!ok) toast.push(t("store.printBlocked"), "err");
+            }}
+          >
+            {t("store.printCountSheet")}
+          </button>
         </div>
         <div style={{ textAlign: "right", flex: "0 0 auto", marginLeft: "auto" }}>
-          <div className="tiny muted">{t("store.dayDate")}</div>
-          <strong>{sheet?.businessDate ?? "—"}</strong>
+          <div className="field" style={{ margin: 0, textAlign: "left" }}>
+            <label htmlFor="store-close-date" className="tiny muted">
+              {t("store.dayDate")}
+            </label>
+            <div className="row" style={{ gap: 8, alignItems: "center", justifyContent: "flex-end" }}>
+              <DateField
+                id="store-close-date"
+                value={date || sheet?.businessDate || ""}
+                max={sheet?.today}
+                onChange={(v) => {
+                  setDate(v);
+                  setEditing(false);
+                  void openDate(v);
+                }}
+              />
+              {viewDate && (
+                <button type="button" className="btn ok sm" onClick={() => void backToToday()}>
+                  {t("store.backToToday")}
+                </button>
+              )}
+            </div>
+          </div>
           {isToday ? (
             <div className="tiny" style={{ color: "var(--ok)", marginTop: 2 }}>
               {t("store.todayBadge")}
+            </div>
+          ) : canStartEdit ? (
+            <div className="tiny" style={{ color: "var(--warn, #b08900)", marginTop: 2 }}>
+              {t("store.adminPastEditBadge")}
             </div>
           ) : (
             <div className="tiny muted" style={{ marginTop: 2 }}>
@@ -326,7 +419,7 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
           <strong>{sheet ? money(sheet.sales) : "—"}</strong>
         </div>
         <div className="panel stat">
-          <span>{t("store.stockUsedToday")}</span>
+          <span>{t("store.issuedToKitchen")}</span>
           <strong>{money(preview.used)}</strong>
         </div>
         <div className="panel stat">
@@ -351,11 +444,18 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
           }}
         >
           <p className="muted" style={{ margin: 0 }}>
-            {t("store.dayPastReadOnly")}
+            {canStartEdit ? t("store.dayPastAdminEdit") : t("store.dayPastReadOnly")}
           </p>
-          <button type="button" className="btn ok sm" onClick={() => void backToToday()}>
-            {t("store.backToToday")}
-          </button>
+          <div className="row" style={{ gap: 8 }}>
+            {canStartEdit && !editing && (
+              <button type="button" className="btn sm" onClick={startEdit}>
+                {t("store.editClosing")}
+              </button>
+            )}
+            <button type="button" className="btn ok sm" onClick={() => void backToToday()}>
+              {t("store.backToToday")}
+            </button>
+          </div>
         </div>
       )}
 
@@ -390,15 +490,20 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
               <tr>
                 <th>{t("common.item")}</th>
                 <th>{t("store.onHand")}</th>
-                <th>{t("store.billUsed")}</th>
+                <th>{t("store.transferredToKitchen")}</th>
+                <th>{t("store.manualUsed")}</th>
                 <th>{t("store.extraUsed")}</th>
+                <th>{t("store.leftover")}</th>
                 <th>{t("store.reason")}</th>
                 <th>{t("common.value")}</th>
               </tr>
             </thead>
             <tbody>
               {pageShown.map((i) => {
+                const usedQty = Math.max(0, Number(used[i.id]) || 0);
                 const extraQty = Math.max(0, Number(extra[i.id]) || 0);
+                const leftQty = Math.max(0, Number(leftover[i.id]) || 0);
+                const transferred = i.transferredQty ?? i.autoQty;
                 return (
                   <tr key={i.id}>
                     <td>
@@ -409,17 +514,47 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
                       {i.onHand} {unitLabel(i.unit)}
                     </td>
                     <td className="nowrap">
-                      {i.autoQty} {unitLabel(i.unit)}
+                      {transferred} {unitLabel(i.unit)}
                     </td>
                     <td>
                       <input
-                        type="number"
+                        type="text"
+                        inputMode="decimal"
                         className="field-ctrl sm"
-                        min={0}
-                        step="0.001"
+                        value={used[i.id] ?? ""}
+                        disabled={!editable}
+                        onChange={(e) =>
+                          setUsed((prev) => ({ ...prev, [i.id]: sanitizeQty(e.target.value) }))
+                        }
+                        placeholder="0"
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        className="field-ctrl sm"
                         value={extra[i.id] ?? ""}
                         disabled={!editable}
-                        onChange={(e) => setExtra((prev) => ({ ...prev, [i.id]: e.target.value }))}
+                        onChange={(e) =>
+                          setExtra((prev) => ({ ...prev, [i.id]: sanitizeQty(e.target.value) }))
+                        }
+                        placeholder="0"
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        className="field-ctrl sm"
+                        value={leftover[i.id] ?? ""}
+                        disabled={!editable}
+                        onChange={(e) =>
+                          setLeftover((prev) => ({
+                            ...prev,
+                            [i.id]: sanitizeQty(e.target.value),
+                          }))
+                        }
                         placeholder="0"
                       />
                     </td>
@@ -427,7 +562,7 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
                       <select
                         className="field-ctrl wide"
                         value={reason[i.id] || REASONS[0].value}
-                        disabled={!editable || extraQty <= 0}
+                        disabled={!editable || (usedQty <= 0 && extraQty <= 0 && leftQty <= 0)}
                         onChange={(e) => setReason((prev) => ({ ...prev, [i.id]: e.target.value }))}
                       >
                         {REASONS.map((r) => (
@@ -437,7 +572,7 @@ export function StoreDayUse({ canManage, onChanged }: { canManage: boolean; onCh
                         ))}
                       </select>
                     </td>
-                    <td className="nowrap">{money((i.autoQty + extraQty) * i.rate)}</td>
+                    <td className="nowrap">{money((transferred + usedQty + extraQty) * i.rate)}</td>
                   </tr>
                 );
               })}

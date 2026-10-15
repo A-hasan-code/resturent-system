@@ -2,12 +2,11 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
-  NotFoundException,
 } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
 import { toNumber } from "../common/units";
-import { businessDateOf, businessWindow } from "../common/business-day";
+import { businessDateOf, businessQueryWindow } from "../common/business-day";
 import { AuthUser } from "../common/decorators";
 import { SaveDayUseDto } from "./dto";
 
@@ -30,13 +29,16 @@ export class DayUseService {
     if (!DATE_RE.test(businessDate)) {
       throw new BadRequestException("Invalid business date");
     }
-    const window = businessWindow(businessDate, start.h, start.m);
+    const window = businessQueryWindow(businessDate, start.h, start.m);
     return {
       ...start,
       businessDate,
       today,
       isToday: businessDate === today,
-      ...window,
+      from: window.from,
+      to: window.to,
+      gte: window.gte,
+      lt: window.lt,
     };
   }
 
@@ -70,20 +72,27 @@ export class DayUseService {
     const clock = await this.clock(dateStr);
     const isAdmin = user?.roleCode === "ADMIN";
 
-    const [items, salesMoves, close, paid] = await Promise.all([
+    const [items, transferMoves, close, paid] = await Promise.all([
       this.prisma.storeItem.findMany({
         where: { active: true },
         include: { category: true },
         orderBy: [{ category: { sortOrder: "asc" } }, { name: "asc" }],
       }),
       this.prisma.stockMovement.findMany({
-        where: { type: "SALE", createdAt: { gte: clock.from, lt: clock.to } },
-        select: { storeItemId: true, quantity: true },
+        where: {
+          type: { in: ["KITCHEN_TRANSFER", "KITCHEN_RETURN"] },
+          createdAt: { gte: clock.gte, lt: clock.lt },
+        },
+        select: { storeItemId: true, quantity: true, type: true },
       }),
       this.prisma.dayStockClose.findUnique({
         where: { businessDate: clock.businessDate },
         include: {
-          lines: true,
+          lines: {
+            include: {
+              storeItem: { include: { category: true } },
+            },
+          },
           closedBy: { select: { name: true } },
         },
       }),
@@ -91,40 +100,152 @@ export class DayUseService {
         where: {
           paymentStatus: "PAID",
           status: { not: "CANCELLED" },
-          createdAt: { gte: clock.from, lt: clock.to },
+          createdAt: { gte: clock.gte, lt: clock.lt },
         },
         _sum: { total: true },
       }),
     ]);
 
-    if (dateStr && !clock.isToday && !close) {
-      throw new NotFoundException(`No closing saved for ${clock.businessDate}`);
-    }
+    // Past dates without a saved close still load (live transfers for that day) so
+    // staff/admin can pick a date from the calendar and enter or edit closing.
 
-    const auto = new Map<string, number>();
-    for (const m of salesMoves) {
-      auto.set(m.storeItemId, (auto.get(m.storeItemId) ?? 0) + Math.abs(toNumber(m.quantity)));
+    /** Store closing tracks kitchen issues (transfers), not recipe bill use. */
+    const transferred = new Map<string, number>();
+    for (const m of transferMoves) {
+      const abs = Math.abs(toNumber(m.quantity));
+      if (m.type === "KITCHEN_TRANSFER") {
+        transferred.set(m.storeItemId, (transferred.get(m.storeItemId) ?? 0) + abs);
+      } else if (m.type === "KITCHEN_RETURN") {
+        transferred.set(m.storeItemId, (transferred.get(m.storeItemId) ?? 0) - abs);
+      }
+    }
+    for (const [id, qty] of [...transferred.entries()]) {
+      transferred.set(id, qty3(qty));
     }
     const extra = new Map(close?.lines.map((l) => [l.storeItemId, l]) ?? []);
 
-    const rows = items.map((item) => {
-      const saved = extra.get(item.id);
-      const autoQty = qty3(auto.get(item.id) ?? 0);
-      const extraQty = saved ? qty3(toNumber(saved.extraQty)) : 0;
-      const rate = toNumber(item.ratePerUnit);
-      return {
-        id: item.id,
-        name: item.name,
-        category: item.category.name,
-        unit: item.unit,
-        onHand: toNumber(item.quantityOnHand),
-        rate,
-        autoQty,
-        extraQty,
-        reason: saved?.reason ?? "",
-        value: money2((autoQty + extraQty) * rate),
-      };
-    });
+    type SheetRow = {
+      id: string;
+      name: string;
+      category: string;
+      unit: string;
+      onHand: number;
+      rate: number;
+      autoQty: number;
+      transferredQty: number;
+      usedQty: number;
+      extraQty: number;
+      leftoverQty: number;
+      reason: string;
+      value: number;
+    };
+
+    const lineUsed = (line: {
+      usedQty?: unknown;
+      extraQty?: unknown;
+    }) => {
+      const u = qty3(toNumber(line.usedQty));
+      const e = qty3(toNumber(line.extraQty));
+      // Older rows only had extraQty (used was stored there).
+      if (u <= 0 && e > 0 && line.usedQty == null) return { usedQty: e, extraQty: 0 };
+      return { usedQty: u, extraQty: e };
+    };
+
+    let rows: SheetRow[];
+    if (close && !clock.isToday) {
+      // Past saved closing: exact snapshot (never mix with today's live stock).
+      rows = close.lines
+        .map((line) => {
+          const item = line.storeItem;
+          const transferredQty = qty3(toNumber(line.transferredQty));
+          const { usedQty, extraQty } = lineUsed(line as { usedQty?: unknown; extraQty?: unknown });
+          const leftoverQty = qty3(toNumber((line as { leftoverQty?: unknown }).leftoverQty));
+          const rate = toNumber(line.ratePerUnit);
+          return {
+            id: item.id,
+            name: item.name,
+            category: item.category.name,
+            unit: item.unit,
+            // Past: show counted leftover as on-hand for that day (not current stock).
+            onHand: leftoverQty,
+            rate,
+            autoQty: transferredQty,
+            transferredQty,
+            usedQty,
+            extraQty,
+            leftoverQty,
+            reason: line.reason ?? "",
+            value: money2(toNumber(line.amount)),
+          };
+        })
+        .sort(
+          (a, b) =>
+            a.category.localeCompare(b.category) || a.name.localeCompare(b.name)
+        );
+    } else if (!clock.isToday) {
+      // Past day, not yet saved: only that day's transfers — no today's leftover stock.
+      rows = items
+        .map((item) => {
+          const transferredQty = qty3(transferred.get(item.id) ?? 0);
+          const rate = toNumber(item.ratePerUnit);
+          return {
+            id: item.id,
+            name: item.name,
+            category: item.category.name,
+            unit: item.unit,
+            onHand: 0,
+            rate,
+            autoQty: transferredQty,
+            transferredQty,
+            usedQty: 0,
+            extraQty: 0,
+            leftoverQty: 0,
+            reason: "",
+            value: money2(transferredQty * rate),
+          };
+        })
+        .filter((r) => Math.abs(r.transferredQty) > 0.0005);
+    } else {
+      // Today: live transfers + any saved used/extra/leftover.
+      rows = items
+        .map((item) => {
+          const saved = extra.get(item.id);
+          // Always use live transfers for today (saved.transferred can be stale mid-day).
+          const transferredQty = qty3(transferred.get(item.id) ?? 0);
+          const autoQty = transferredQty; // legacy field name kept for older clients
+          const split = saved
+            ? lineUsed(saved as { usedQty?: unknown; extraQty?: unknown })
+            : { usedQty: 0, extraQty: 0 };
+          const leftoverQty = saved
+            ? qty3(toNumber((saved as { leftoverQty?: unknown }).leftoverQty))
+            : qty3(toNumber(item.quantityOnHand));
+          const rate = toNumber(item.ratePerUnit);
+          const onHand = toNumber(item.quantityOnHand);
+          return {
+            id: item.id,
+            name: item.name,
+            category: item.category.name,
+            unit: item.unit,
+            onHand,
+            rate,
+            autoQty,
+            transferredQty,
+            usedQty: split.usedQty,
+            extraQty: split.extraQty,
+            leftoverQty: saved ? leftoverQty : onHand,
+            reason: saved?.reason ?? "",
+            value: money2((transferredQty + split.usedQty + split.extraQty) * rate),
+          };
+        })
+        .filter(
+          (r) =>
+            Math.abs(r.onHand) > 0.0005 ||
+            Math.abs(r.transferredQty) > 0.0005 ||
+            Math.abs(r.usedQty) > 0.0005 ||
+            Math.abs(r.extraQty) > 0.0005 ||
+            Math.abs(r.leftoverQty) > 0.0005
+        );
+    }
 
     const stockUsedValue = close
       ? money2(toNumber(close.stockUsedValue))
@@ -133,11 +254,11 @@ export class DayUseService {
       ? money2(toNumber(close.sales))
       : money2(toNumber(paid._sum.total));
 
-    // Only today’s business day can be entered or updated — past days are view-only.
+    // Today: store managers + admin. Past days: admin only.
     const canEdit =
-      clock.isToday &&
       !!user &&
-      (user.permissions.includes("store.manage") || isAdmin);
+      (user.permissions.includes("store.manage") || isAdmin) &&
+      (clock.isToday || !!isAdmin);
 
     return {
       businessDate: clock.businessDate,
@@ -164,22 +285,36 @@ export class DayUseService {
   async save(user: AuthUser, dto: SaveDayUseDto) {
     const clock = await this.clock(dto.businessDate);
     const isAdmin = user.roleCode === "ADMIN";
+    // Past-day admin edits may run after hotel close; today still requires hotel open.
+    if (clock.isToday || !isAdmin) {
+      await this.settings.assertHotelOpen();
+    }
 
-    if (!clock.isToday) {
+    if (!clock.isToday && !isAdmin) {
       throw new ForbiddenException(
-        "Past day closings are view-only. Only today’s closing can be saved or edited."
+        "Past day closings are view-only. Only an admin can edit a past closing."
       );
     }
     if (!user.permissions.includes("store.manage") && !isAdmin) {
       throw new ForbiddenException("Not allowed to save day closing");
     }
 
-    const wanted = new Map<string, { extraQty: number; reason: string }>();
+    const wanted = new Map<
+      string,
+      { usedQty: number; extraQty: number; leftoverQty: number | null; reason: string }
+    >();
     for (const line of dto.lines ?? []) {
-      const extraQty = qty3(Math.max(0, line.extraQty || 0));
-      if (extraQty <= 0) continue;
+      const usedQty = qty3(Math.max(0, line.usedQty ?? 0));
+      const extraQty = qty3(Math.max(0, line.extraQty ?? 0));
+      const leftoverQty =
+        line.leftoverQty == null || Number.isNaN(Number(line.leftoverQty))
+          ? null
+          : qty3(Math.max(0, Number(line.leftoverQty)));
+      if (usedQty <= 0 && extraQty <= 0 && leftoverQty == null) continue;
       wanted.set(line.storeItemId, {
+        usedQty,
         extraQty,
+        leftoverQty,
         reason: (line.reason || "Wastage / spoilage").trim().slice(0, 80),
       });
     }
@@ -194,13 +329,24 @@ export class DayUseService {
         if (!itemIds.has(id)) throw new BadRequestException("Item is not in inventory");
       }
 
-      const salesMoves = await tx.stockMovement.findMany({
-        where: { type: "SALE", createdAt: { gte: clock.from, lt: clock.to } },
-        select: { storeItemId: true, quantity: true },
+      const transferMoves = await tx.stockMovement.findMany({
+        where: {
+          type: { in: ["KITCHEN_TRANSFER", "KITCHEN_RETURN"] },
+          createdAt: { gte: clock.gte, lt: clock.lt },
+        },
+        select: { storeItemId: true, quantity: true, type: true },
       });
-      const auto = new Map<string, number>();
-      for (const m of salesMoves) {
-        auto.set(m.storeItemId, (auto.get(m.storeItemId) ?? 0) + Math.abs(toNumber(m.quantity)));
+      const transferred = new Map<string, number>();
+      for (const m of transferMoves) {
+        const abs = Math.abs(toNumber(m.quantity));
+        if (m.type === "KITCHEN_TRANSFER") {
+          transferred.set(m.storeItemId, (transferred.get(m.storeItemId) ?? 0) + abs);
+        } else {
+          transferred.set(m.storeItemId, (transferred.get(m.storeItemId) ?? 0) - abs);
+        }
+      }
+      for (const [id, qty] of [...transferred.entries()]) {
+        transferred.set(id, qty3(qty));
       }
 
       const existing = await tx.dayStockClose.findUnique({
@@ -208,16 +354,23 @@ export class DayUseService {
         include: { lines: true },
       });
       const previous = new Map(
-        existing?.lines.map((l) => [l.storeItemId, toNumber(l.extraQty)]) ?? []
+        existing?.lines.map((l) => {
+          const u = toNumber((l as { usedQty?: unknown }).usedQty);
+          const e = toNumber(l.extraQty);
+          return [l.storeItemId, u > 0 ? u + e : e] as const;
+        }) ?? []
       );
+      const onHandById = new Map(items.map((i) => [i.id, toNumber(i.quantityOnHand)]));
 
       for (const item of items) {
-        const next = wanted.get(item.id)?.extraQty ?? 0;
+        const w = wanted.get(item.id);
+        const next = qty3((w?.usedQty ?? 0) + (w?.extraQty ?? 0));
         const prev = qty3(previous.get(item.id) ?? 0);
         const delta = qty3(next - prev);
-        if (delta > 0 && delta - toNumber(item.quantityOnHand) > 0.0001) {
+        const onHand = onHandById.get(item.id) ?? 0;
+        if (delta > 0 && delta - onHand > 0.0001) {
           throw new BadRequestException(
-            `Not enough ${item.name}. Available: ${toNumber(item.quantityOnHand)} ${item.unit}`
+            `Not enough ${item.name}. Available: ${onHand} ${item.unit}`
           );
         }
       }
@@ -241,27 +394,46 @@ export class DayUseService {
 
       let stockUsed = 0;
       for (const item of items) {
-        const next = wanted.get(item.id)?.extraQty ?? 0;
+        const w = wanted.get(item.id);
+        const usedQty = w?.usedQty ?? 0;
+        const extraQty = w?.extraQty ?? 0;
+        const next = qty3(usedQty + extraQty);
         const prev = qty3(previous.get(item.id) ?? 0);
         const delta = qty3(next - prev);
+        let onHand = onHandById.get(item.id) ?? 0;
         if (delta !== 0) {
           await tx.storeItem.update({
             where: { id: item.id },
             data: { quantityOnHand: { increment: -delta } },
           });
+          onHand = qty3(onHand - delta);
+          onHandById.set(item.id, onHand);
         }
-        const autoQty = qty3(auto.get(item.id) ?? 0);
+        const leftoverQty =
+          w?.leftoverQty != null ? qty3(Math.max(0, w.leftoverQty)) : qty3(Math.max(0, onHand));
+        if (Math.abs(leftoverQty - onHand) > 0.0001) {
+          await tx.storeItem.update({
+            where: { id: item.id },
+            data: { quantityOnHand: leftoverQty },
+          });
+          onHandById.set(item.id, leftoverQty);
+          onHand = leftoverQty;
+        }
+        const transferredQty = qty3(transferred.get(item.id) ?? 0);
         const rate = toNumber(item.ratePerUnit);
-        const amount = money2((autoQty + next) * rate);
+        const amount = money2((transferredQty + next) * rate);
         stockUsed += amount;
-        if (autoQty <= 0 && next <= 0) continue;
+        if (transferredQty <= 0 && next <= 0 && leftoverQty <= 0) continue;
         await tx.dayStockCloseLine.create({
           data: {
             closeId: close.id,
             storeItemId: item.id,
-            autoQty,
-            extraQty: next,
-            reason: next > 0 ? wanted.get(item.id)?.reason ?? null : null,
+            autoQty: transferredQty,
+            transferredQty,
+            usedQty,
+            extraQty,
+            leftoverQty,
+            reason: next > 0 || w?.leftoverQty != null ? w?.reason ?? null : null,
             ratePerUnit: rate,
             amount,
           },
@@ -273,7 +445,7 @@ export class DayUseService {
               type: "OUT",
               quantity: -next,
               ratePerUnit: rate,
-              note: `Day use · ${clock.businessDate} · ${wanted.get(item.id)?.reason ?? "Extra"}`,
+              note: `Day use · ${clock.businessDate} · ${w?.reason ?? "Extra"}`,
               dayCloseId: close.id,
             },
           });
@@ -284,7 +456,7 @@ export class DayUseService {
         where: {
           paymentStatus: "PAID",
           status: { not: "CANCELLED" },
-          createdAt: { gte: clock.from, lt: clock.to },
+          createdAt: { gte: clock.gte, lt: clock.lt },
         },
         _sum: { total: true },
       });

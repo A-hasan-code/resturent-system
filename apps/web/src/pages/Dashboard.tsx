@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 import { api, money, unitLabel } from "../api";
 import { useToast } from "../toast";
 import { useAuth } from "../auth";
+import { HotelGatePanel } from "../components/HotelGatePanel";
 import { MessageKey, useI18n, useT } from "../i18n";
 
 type LowItem = {
@@ -23,10 +24,15 @@ type DashOrder = {
   status: string;
   paymentStatus: string;
   total: number;
+  paidAmount?: number;
+  due?: number;
   createdAt: string;
   waitMinutes: number;
   stale: boolean;
   items: { name: string; quantity: number; sellUnit: string }[];
+  cancelReason?: string | null;
+  cancelledAt?: string | null;
+  cancelledBy?: string | null;
 };
 
 type UsageRow = {
@@ -73,12 +79,19 @@ type Stats = {
   pendingKitchen: number;
   preparing: number;
   ready: number;
+  served?: number;
   completed: number;
+  staleCount?: number;
   ordersToday: number;
   orderAmountToday: number;
   totalOrders: number;
   unpaidCount: number;
   unpaidAmount: number;
+  paidCount?: number;
+  cancelledToday?: number;
+  cancelledCount?: number;
+  cancelledOrders?: DashOrder[];
+  paidTodayCount?: number;
   creditOutstanding?: number;
   creditOutstandingCount?: number;
   creditPaidToday?: number;
@@ -129,6 +142,17 @@ function itemsLine(o: DashOrder) {
   return o.items
     .map((i) => `${i.quantity} ${unitLabel(i.sellUnit)} ${i.name}`)
     .join(", ");
+}
+
+function itemsPreview(o: DashOrder, max = 2) {
+  const parts = o.items.map(
+    (i) => `${i.quantity} ${unitLabel(i.sellUnit)} ${i.name}`,
+  );
+  if (parts.length <= max) return { text: parts.join(" · "), more: 0 };
+  return {
+    text: parts.slice(0, max).join(" · "),
+    more: parts.length - max,
+  };
 }
 
 export function DashboardPage() {
@@ -189,8 +213,9 @@ export function DashboardPage() {
       {role === "STORE" && <StoreDash data={data} can={can} />}
       {role === "WAITER" && <WaiterDash data={data} can={can} />}
       {role === "SUPERVISOR" && <ManagerDash data={data} can={can} />}
+      {role === "MANAGER" && <ManagerDash data={data} can={can} />}
       {role === "MAIN_CASHIER" && <CashierDash data={data} can={can} />}
-      {!["ADMIN", "SYSTEM_MANAGER", "CASHIER", "MAIN_CASHIER", "KITCHEN", "STORE", "WAITER", "SUPERVISOR"].includes(role) && (
+      {!["ADMIN", "SYSTEM_MANAGER", "CASHIER", "MAIN_CASHIER", "KITCHEN", "STORE", "WAITER", "SUPERVISOR", "MANAGER"].includes(role) && (
         <AdminDash data={data} can={can} />
       )}
     </div>
@@ -274,6 +299,7 @@ function AdminDash({
   const salesToday = data ? money(data.orderAmountToday ?? data.salesToday ?? 0) : "—";
   return (
     <>
+      <HotelGatePanel />
       <StaleAlert
         orders={data?.staleOrders ?? []}
         minutes={data?.staleMinutes ?? 10}
@@ -284,17 +310,46 @@ function AdminDash({
         <LowStockAlert items={data?.lowStock ?? []} count={data?.lowStockCount ?? 0} />
       )}
 
+      <p className="dash-section-title">{t("dash.sectionOrders")}</p>
+      <div className="stats dash-stats-today">
+        <div className="panel stat">
+          <span>{t("dash.ordersToday")}</span>
+          <strong>{data ? data.ordersToday ?? 0 : "—"}</strong>
+          <span className="tiny muted dash-stat-hint">{t("dash.hintPlacedToday")}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.paidTodayCount")}</span>
+          <strong style={{ color: (data?.paidTodayCount ?? 0) ? "var(--ok)" : undefined }}>
+            {data ? data.paidTodayCount ?? 0 : "—"}
+          </strong>
+          <span className="tiny muted dash-stat-hint">{t("dash.hintPaidCount")}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.unpaidBills")}</span>
+          <strong style={{ color: (data?.unpaidCount ?? 0) ? "var(--danger)" : undefined }}>
+            {data ? data.unpaidCount ?? 0 : "—"}
+            <span className="tiny muted dash-stat-sub">
+              {data ? money(data.unpaidAmount) : ""}
+            </span>
+          </strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.cancelledToday")}</span>
+          <strong style={{ color: (data?.cancelledToday ?? 0) ? "var(--danger)" : undefined }}>
+            {data ? data.cancelledToday ?? 0 : "—"}
+          </strong>
+          <span className="tiny muted dash-stat-hint">
+            {t("dash.cancelledAll", { n: data?.cancelledCount ?? 0 })}
+          </span>
+        </div>
+      </div>
+
       <p className="dash-section-title">{t("dash.sectionToday")}</p>
       <div className="stats dash-stats-today">
         <div className="panel stat stat-sales">
           <span>{t("dash.salesToday")}</span>
           <strong>{salesToday}</strong>
           <span className="tiny muted dash-stat-hint">{t("dash.hintBillTotal")}</span>
-        </div>
-        <div className="panel stat">
-          <span>{t("dash.ordersToday")}</span>
-          <strong>{data?.ordersToday ?? "—"}</strong>
-          <span className="tiny muted dash-stat-hint">{t("dash.hintPlacedToday")}</span>
         </div>
         <div className="panel stat">
           <span>{t("dash.collectedToday")}</span>
@@ -329,13 +384,9 @@ function AdminDash({
       <p className="dash-section-title">{t("dash.sectionOverview")}</p>
       <div className="stats">
         <div className="panel stat">
-          <span>{t("dash.unpaid")}</span>
-          <strong style={{ color: (data?.unpaidCount ?? 0) ? "var(--danger)" : undefined }}>
-            {data?.unpaidCount ?? "—"}
-            <span className="tiny muted dash-stat-sub">
-              {data ? money(data.unpaidAmount) : ""}
-            </span>
-          </strong>
+          <span>{t("dash.paidAll")}</span>
+          <strong>{data ? data.paidCount ?? 0 : "—"}</strong>
+          <span className="tiny muted dash-stat-hint">{t("dash.hintPaidAll")}</span>
         </div>
         <div className="panel stat">
           <span>{t("dash.pendingKitchen")}</span>
@@ -372,14 +423,29 @@ function AdminDash({
           empty={t("dash.emptyKitchen")}
           orders={(data?.kitchenQueue ?? []).slice(0, 8)}
           showTotal
+          linkTo="/kitchen"
         />
         <OrderList
           title={t("dash.unpaidBills")}
           empty={t("dash.emptyUnpaid")}
-          orders={(data?.unpaidOrders ?? []).slice(0, 8)}
+          orders={(data?.unpaidOrders ?? [])
+            .filter((o) => o.status !== "CANCELLED" && o.paymentStatus !== "VOID")
+            .slice(0, 8)}
           showTotal
+          showPayment
+          linkTo="/bills"
         />
       </div>
+      {(data?.cancelledOrders?.length ?? 0) > 0 && (
+        <OrderList
+          title={t("dash.cancelledOrders")}
+          empty={t("dash.emptyCancelled")}
+          orders={(data?.cancelledOrders ?? []).slice(0, 8)}
+          showTotal
+          showCancelReason
+          linkTo="/bills"
+        />
+      )}
 
       <Shortcuts can={can} />
     </>
@@ -399,11 +465,46 @@ function CashierDash({
       <StaleAlert
         orders={data?.staleOrders ?? []}
         minutes={data?.staleMinutes ?? 10}
-        link="/waiter"
-        linkLabel={t("dash.openPos")}
+        link="/kitchen"
+        linkLabel={t("dash.openKitchen")}
         message={t("dash.delayedWaiting")}
       />
 
+      <p className="dash-section-title">{t("dash.sectionOrders")}</p>
+      <div className="stats dash-stats-today">
+        <div className="panel stat">
+          <span>{t("dash.ordersToday")}</span>
+          <strong>{data ? data.ordersToday ?? 0 : "—"}</strong>
+          <span className="tiny muted dash-stat-hint">{t("dash.hintPlacedToday")}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.paidTodayCount")}</span>
+          <strong style={{ color: (data?.paidTodayCount ?? 0) ? "var(--ok)" : undefined }}>
+            {data ? data.paidTodayCount ?? 0 : "—"}
+          </strong>
+          <span className="tiny muted dash-stat-hint">{t("dash.hintPaidCount")}</span>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.unpaidBills")}</span>
+          <strong style={{ color: (data?.unpaidCount ?? 0) ? "var(--danger)" : undefined }}>
+            {data ? data.unpaidCount ?? 0 : "—"}
+            <span className="tiny muted dash-stat-sub">
+              {data ? money(data.unpaidAmount) : ""}
+            </span>
+          </strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("dash.cancelledToday")}</span>
+          <strong style={{ color: (data?.cancelledToday ?? 0) ? "var(--danger)" : undefined }}>
+            {data ? data.cancelledToday ?? 0 : "—"}
+          </strong>
+          <span className="tiny muted dash-stat-hint">
+            {t("dash.cancelledAll", { n: data?.cancelledCount ?? 0 })}
+          </span>
+        </div>
+      </div>
+
+      <p className="dash-section-title">{t("dash.sectionToday")}</p>
       <div className="stats dash-stats-today">
         <div className="panel stat stat-sales">
           <span>{t("dash.salesToday")}</span>
@@ -413,19 +514,6 @@ function CashierDash({
           <span className="tiny muted dash-stat-hint">
             {t("dash.hintNOrders", { n: data?.ordersToday ?? 0 })} · {t("dash.hintBillTotal")}
           </span>
-        </div>
-        <div className="panel stat">
-          <span>{t("dash.ordersToday")}</span>
-          <strong>{data?.ordersToday ?? "—"}</strong>
-        </div>
-        <div className="panel stat">
-          <span>{t("dash.unpaidBills")}</span>
-          <strong style={{ color: (data?.unpaidCount ?? 0) ? "var(--danger)" : undefined }}>
-            {data?.unpaidCount ?? "—"}
-            <span className="tiny muted dash-stat-sub">
-              {data ? money(data.unpaidAmount) : ""}
-            </span>
-          </strong>
         </div>
         <div className="panel stat">
           <span>{t("dash.creditDue")}</span>
@@ -471,6 +559,10 @@ function CashierDash({
           <strong>{data?.ready ?? "—"}</strong>
         </div>
         <div className="panel stat">
+          <span>{t("dash.served")}</span>
+          <strong>{data?.served ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
           <span>{t("dash.completed")}</span>
           <strong>{data?.completed ?? "—"}</strong>
         </div>
@@ -480,15 +572,28 @@ function CashierDash({
         <OrderList
           title={t("dash.collectPayment")}
           empty={t("dash.emptyUnpaidOrders")}
-          orders={data?.unpaidOrders ?? []}
+          orders={(data?.unpaidOrders ?? []).filter((o) => o.status !== "CANCELLED" && o.paymentStatus !== "VOID")}
           showTotal
+          showPayment
+          linkTo="/bills"
         />
         <OrderList
           title={t("dash.longWaits")}
           empty={t("dash.emptyDelayed")}
           orders={data?.staleOrders ?? []}
+          linkTo="/waiter"
         />
       </div>
+      {(data?.cancelledOrders?.length ?? 0) > 0 && (
+        <OrderList
+          title={t("dash.cancelledOrders")}
+          empty={t("dash.emptyCancelled")}
+          orders={data?.cancelledOrders ?? []}
+          showTotal
+          showCancelReason
+          linkTo="/bills"
+        />
+      )}
 
       <Shortcuts can={can} focus={["orders", "bills"]} />
     </>
@@ -549,9 +654,13 @@ function KitchenDash({
           </strong>
         </div>
         <div className="panel stat">
+          <span>{t("dash.served")}</span>
+          <strong>{data?.served ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
           <span>{t("dash.delayed", { n: data?.staleMinutes ?? 10 })}</span>
-          <strong style={{ color: (data?.staleOrders.length ?? 0) ? "var(--danger)" : undefined }}>
-            {data?.staleOrders.length ?? "—"}
+          <strong style={{ color: (data?.staleCount ?? data?.staleOrders.length ?? 0) ? "var(--danger)" : undefined }}>
+            {data?.staleCount ?? data?.staleOrders.length ?? "—"}
           </strong>
         </div>
       </div>
@@ -714,6 +823,10 @@ function WaiterDash({
           <strong>{data?.ready ?? "—"}</strong>
         </div>
         <div className="panel stat">
+          <span>{t("dash.served")}</span>
+          <strong>{data?.served ?? "—"}</strong>
+        </div>
+        <div className="panel stat">
           <span>{t("dash.completed")}</span>
           <strong>{data?.completed ?? "—"}</strong>
         </div>
@@ -779,12 +892,17 @@ function ManagerDash({
           empty={t("dash.emptyKitchen")}
           orders={(data?.kitchenQueue ?? []).slice(0, 8)}
           showTotal
+          linkTo="/kitchen"
         />
         <OrderList
           title={t("dash.unpaidBills")}
           empty={t("dash.emptyUnpaid")}
-          orders={(data?.unpaidOrders ?? []).slice(0, 8)}
+          orders={(data?.unpaidOrders ?? [])
+            .filter((o) => o.status !== "CANCELLED" && o.paymentStatus !== "VOID")
+            .slice(0, 8)}
           showTotal
+          showPayment
+          linkTo="/bills"
         />
       </div>
 
@@ -799,6 +917,8 @@ function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: 
   const staff = data?.staffOrdersToday ?? [];
   const [tipsPage, setTipsPage] = useState(1);
   const [staffPage, setStaffPage] = useState(1);
+  const showTips = tips.length > 0 || !!personal;
+  const showStaff = !personal && staff.length > 0;
 
   useEffect(() => {
     setTipsPage(1);
@@ -811,69 +931,76 @@ function TipAndStaffPanels({ data, personal }: { data: Stats | null; personal?: 
   const pageTips = paginate(tips, tipsPage, PAGE_SIZE);
   const pageStaff = paginate(staff, staffPage, PAGE_SIZE);
 
-  if (!tips.length && !staff.length) return null;
+  if (!showTips && !showStaff) return null;
+
+  const sole = (showTips && !showStaff) || (!showTips && showStaff);
+
   return (
-    <div className="dash-grid" style={{ marginBottom: "1rem" }}>
-      <div className="panel panel-pad">
-        <h2 className="dash-h2" style={{ marginTop: 0 }}>
-          {personal ? t("dash.myTipBreakdown") : t("dash.tipBoard")}
-        </h2>
-        {!tips.length ? (
-          <div className="empty">{t("dash.emptyTips")}</div>
-        ) : (
-          <>
-          <table>
+    <div className={`dash-grid${sole ? " dash-grid-solo" : ""}`} style={{ marginBottom: "1rem" }}>
+      {showTips && (
+        <div className="panel panel-pad dash-panel">
+          <div className="dash-panel-head">
+            <h2 className="dash-h2">
+              {personal ? t("dash.myTipBreakdown") : t("dash.tipBoard")}
+            </h2>
+            {tips.length > 0 && (
+              <span className="tiny muted">{tips.length}</span>
+            )}
+          </div>
+          {!tips.length ? (
+            <div className="empty empty-compact">{t("dash.emptyTips")}</div>
+          ) : (
+            <>
+              <table className="dash-table">
+                <thead>
+                  <tr>
+                    <th>{t("common.name")}</th>
+                    <th>{t("common.role")}</th>
+                    <th>{t("dash.tip")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageTips.map((r) => (
+                    <tr key={r.userId}>
+                      <td>{r.name}</td>
+                      <td className="muted">{r.roleName || r.roleCode}</td>
+                      <td className="dash-num">{money(r.tip)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <Pagination page={tipsPage} pageSize={PAGE_SIZE} total={tips.length} onChange={setTipsPage} />
+            </>
+          )}
+        </div>
+      )}
+      {showStaff && (
+        <div className="panel panel-pad dash-panel">
+          <div className="dash-panel-head">
+            <h2 className="dash-h2">{t("dash.staffOrdersToday")}</h2>
+            <span className="tiny muted">{staff.length}</span>
+          </div>
+          <table className="dash-table">
             <thead>
               <tr>
                 <th>{t("common.name")}</th>
                 <th>{t("common.role")}</th>
-                <th>{t("dash.tip")}</th>
+                <th>{t("dash.ordersCol")}</th>
+                <th>{t("common.amount")}</th>
               </tr>
             </thead>
             <tbody>
-              {pageTips.map((r) => (
+              {pageStaff.map((r) => (
                 <tr key={r.userId}>
                   <td>{r.name}</td>
-                  <td>{r.roleName || r.roleCode}</td>
-                  <td>{money(r.tip)}</td>
+                  <td className="muted">{r.roleName || r.roleCode}</td>
+                  <td className="dash-num">{r.orders}</td>
+                  <td className="dash-num">{money(r.amount)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <Pagination page={tipsPage} pageSize={PAGE_SIZE} total={tips.length} onChange={setTipsPage} />
-          </>
-        )}
-      </div>
-      {!personal && (
-        <div className="panel panel-pad">
-          <h2 className="dash-h2" style={{ marginTop: 0 }}>{t("dash.staffOrdersToday")}</h2>
-          {!staff.length ? (
-            <div className="empty">{t("dash.emptyStaffOrders")}</div>
-          ) : (
-            <>
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("common.name")}</th>
-                  <th>{t("common.role")}</th>
-                  <th>{t("dash.ordersCol")}</th>
-                  <th>{t("common.amount")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pageStaff.map((r) => (
-                  <tr key={r.userId}>
-                    <td>{r.name}</td>
-                    <td>{r.roleName || r.roleCode}</td>
-                    <td>{r.orders}</td>
-                    <td>{money(r.amount)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <Pagination page={staffPage} pageSize={PAGE_SIZE} total={staff.length} onChange={setStaffPage} />
-            </>
-          )}
+          <Pagination page={staffPage} pageSize={PAGE_SIZE} total={staff.length} onChange={setStaffPage} />
         </div>
       )}
     </div>
@@ -967,44 +1094,103 @@ function OrderList({
   orders,
   showTotal,
   highlightNew,
+  showCancelReason,
+  showPayment,
+  linkTo,
 }: {
   title: string;
   empty: string;
   orders: DashOrder[];
   showTotal?: boolean;
   highlightNew?: boolean;
+  showCancelReason?: boolean;
+  showPayment?: boolean;
+  linkTo?: string;
 }) {
   const t = useT();
   const { ts } = useI18n();
   return (
-    <div className="panel panel-pad">
-      <h2 className="dash-h2" style={{ marginTop: 0 }}>{title}</h2>
+    <div className="panel panel-pad dash-panel">
+      <div className="dash-panel-head">
+        <h2 className="dash-h2">{title}</h2>
+        <div className="dash-panel-meta">
+          {orders.length > 0 && (
+            <span className="tiny muted">{orders.length}</span>
+          )}
+          {linkTo && (
+            <Link className="tiny dash-panel-link" to={linkTo}>
+              {t("common.view")}
+            </Link>
+          )}
+        </div>
+      </div>
       {!orders.length ? (
-        <div className="empty">{empty}</div>
+        <div className="empty empty-compact">{empty}</div>
       ) : (
         <ul className="dash-order-list">
-          {orders.map((o) => (
-            <li key={o.id} className={o.stale ? "is-stale" : highlightNew ? "is-new" : ""}>
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <strong>
-                  #{o.orderNo} · {o.tableNo || t("common.walkIn")}
-                </strong>
-                <span className="tiny muted">{waitLabel(o.waitMinutes, t)}</span>
-              </div>
-              <div className="tiny muted">{itemsLine(o)}</div>
-              <div className="row" style={{ marginTop: "0.25rem", gap: "0.35rem" }}>
-                <span
-                  className={`badge ${
-                    o.status === "READY" ? "ready" : "pending"
-                  }`}
-                >
-                  {ts(o.status)}
-                </span>
-                {showTotal && <span className="tiny">{money(o.total)}</span>}
-                {o.stale && <span className="badge unpaid">{ts("DELAYED")}</span>}
-              </div>
-            </li>
-          ))}
+          {orders.map((o) => {
+            const preview = itemsPreview(o);
+            const statusKey = showPayment ? o.paymentStatus : o.status;
+            const statusClass =
+              statusKey === "CANCELLED"
+                ? "cancelled"
+                : statusKey === "READY" || statusKey === "PAID"
+                  ? "ready"
+                  : statusKey === "UNPAID" || statusKey === "PARTIAL"
+                    ? "unpaid"
+                    : "pending";
+            return (
+              <li
+                key={o.id}
+                className={
+                  o.stale ? "is-stale" : highlightNew ? "is-new" : o.status === "CANCELLED" ? "is-cancelled" : ""
+                }
+              >
+                <div className="dash-order-top">
+                  <div className="dash-order-title">
+                    <strong>#{o.orderNo}</strong>
+                    <span className="dash-order-table">
+                      {o.tableNo || t("common.walkIn")}
+                    </span>
+                  </div>
+                  <span className="tiny muted dash-order-wait">
+                    {showCancelReason && o.cancelledBy
+                      ? o.cancelledBy
+                      : waitLabel(o.waitMinutes, t)}
+                  </span>
+                </div>
+                <div className="dash-order-items" title={itemsLine(o)}>
+                  {preview.text}
+                  {preview.more > 0 && (
+                    <span className="dash-order-more">
+                      {" "}
+                      {t("dash.moreItems", { n: preview.more })}
+                    </span>
+                  )}
+                </div>
+                {showCancelReason && o.cancelReason && (
+                  <div className="dash-order-reason">
+                    {t("bills.cancelReason")}: {o.cancelReason}
+                  </div>
+                )}
+                <div className="dash-order-foot">
+                  <div className="dash-order-badges">
+                    <span className={`badge ${statusClass}`}>{ts(statusKey)}</span>
+                    {o.stale && <span className="badge delayed">{ts("DELAYED")}</span>}
+                  </div>
+                  {showTotal && (
+                    <span className="dash-order-total">
+                      {money(
+                        showPayment && o.due != null
+                          ? o.due
+                          : o.total
+                      )}
+                    </span>
+                  )}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
@@ -1023,9 +1209,11 @@ function Shortcuts({
     !focus || focus.includes(key);
 
   return (
-    <div className="panel panel-pad">
-      <h2 className="dash-h2" style={{ marginTop: 0 }}>{t("dash.shortcuts")}</h2>
-      <div className="row">
+    <div className="panel panel-pad dash-panel dash-shortcuts">
+      <div className="dash-panel-head">
+        <h2 className="dash-h2">{t("dash.shortcuts")}</h2>
+      </div>
+      <div className="dash-shortcut-row">
         {show("orders") && can("order.create", "order.addItems", "order.viewOwn") && (
           <Link className="btn" to="/waiter">
             {t("nav.waiter")}

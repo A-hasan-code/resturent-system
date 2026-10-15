@@ -1,14 +1,26 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { api, money, unitLabel } from "../api";
+import {
+  PACK_UNITS,
+  api,
+  formatStockQty,
+  money,
+  packUnitLabel,
+  unitLabel,
+} from "../api";
 import { useAuth } from "../auth";
 import { useI18n, useT, type MessageKey } from "../i18n";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
+import { useConfirm } from "../components/ConfirmModal";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 import { downloadExcelCsv } from "../csv";
 import { StorePurchasing } from "./StorePurchasing";
 import { StoreDayUse } from "./StoreDayUse";
+import { KitchenDayUse } from "./KitchenDayUse";
+import { KitchenTransfer } from "./KitchenTransfer";
+import { KitchenStationsManage } from "./KitchenStationsManage";
+import { sanitizePlainText, sanitizeQty } from "../inputSanitize";
 
 const PAGE_SIZE = 15;
 
@@ -16,6 +28,8 @@ type Item = {
   id: string;
   name: string;
   unit: string;
+  packUnit?: string;
+  unitsPerPack?: number;
   quantityOnHand: number;
   ratePerUnit: number;
   reorderLevel: number;
@@ -74,9 +88,22 @@ const OUT_REASONS: { value: string; key: MessageKey }[] = [
 export function StorePage() {
   const { can } = useAuth();
   const toast = useToast();
+  const ask = useConfirm();
   const t = useT();
   const { ts } = useI18n();
-  const [tab, setTab] = useState<"stock" | "buy" | "suppliers" | "daily" | "moves" | "usage" | "alerts">("stock");
+  const canManage = can("store.manage");
+  const [tab, setTab] = useState<
+    | "stock"
+    | "buy"
+    | "suppliers"
+    | "daily"
+    | "moves"
+    | "transfer"
+    | "stations"
+    | "usage"
+    | "kitchenClose"
+    | "alerts"
+  >("stock");
   const [cats, setCats] = useState<Cat[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [moves, setMoves] = useState<Movement[]>([]);
@@ -91,6 +118,7 @@ export function StorePage() {
   const [moveOpen, setMoveOpen] = useState<"IN" | "OUT" | "ADJUST" | null>(null);
   const [rateOpen, setRateOpen] = useState(false);
   const [editItem, setEditItem] = useState<FlatItem | null>(null);
+  const [editName, setEditName] = useState("");
   const [editRate, setEditRate] = useState("");
   const [editReorder, setEditReorder] = useState("");
   const [itemId, setItemId] = useState("");
@@ -103,9 +131,13 @@ export function StorePage() {
   const [newName, setNewName] = useState("");
   const [newCat, setNewCat] = useState("");
   const [newUnit, setNewUnit] = useState("KG");
+  const [newPackUnit, setNewPackUnit] = useState("NONE");
+  const [newUnitsPerPack, setNewUnitsPerPack] = useState("1");
   const [newRate, setNewRate] = useState("");
   const [newQty, setNewQty] = useState("0");
   const [newReorder, setNewReorder] = useState("5");
+  const [editPackUnit, setEditPackUnit] = useState("NONE");
+  const [editUnitsPerPack, setEditUnitsPerPack] = useState("1");
 
   async function load() {
     try {
@@ -171,9 +203,42 @@ export function StorePage() {
 
   function openRateEdit(item: FlatItem) {
     setEditItem(item);
+    setEditName(item.name);
     setEditRate(String(item.ratePerUnit));
     setEditReorder(String(item.reorderLevel));
+    setEditPackUnit(item.packUnit || "NONE");
+    setEditUnitsPerPack(String(item.unitsPerPack && item.unitsPerPack > 0 ? item.unitsPerPack : 1));
     setRateOpen(true);
+  }
+
+  async function removeItem(item: FlatItem) {
+    if (
+      !(await ask({
+        title: t("store.deleteTitle"),
+        body: t("store.deleteConfirm", { name: item.name }),
+        danger: true,
+      }))
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await api<{ usedInRecipes?: string[] }>(`/store/items/${item.id}`, {
+        method: "DELETE",
+      });
+      toast.push(t("store.deleted"), "ok");
+      if (res.usedInRecipes?.length) {
+        toast.push(
+          t("store.deleteRecipeWarn", { names: res.usedInRecipes.join(", ") }),
+          "err"
+        );
+      }
+      await load();
+    } catch (err) {
+      toast.push(err instanceof Error ? err.message : t("store.deleteFailed"), "err");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function saveRate(e: FormEvent) {
@@ -181,12 +246,25 @@ export function StorePage() {
     if (!editItem) return;
     setBusy(true);
     try {
+      const packUnit = editPackUnit || "NONE";
+      const body: Record<string, unknown> = {
+        ratePerUnit: Number(editRate),
+        reorderLevel: Number(editReorder),
+        packUnit,
+        unitsPerPack: packUnit === "NONE" ? 1 : Math.max(1, Number(editUnitsPerPack) || 1),
+      };
+      if (canManage) {
+        const name = editName.trim();
+        if (!name) {
+          toast.push(t("common.failed"), "err");
+          setBusy(false);
+          return;
+        }
+        body.name = name;
+      }
       await api(`/store/items/${editItem.id}`, {
         method: "PATCH",
-        body: JSON.stringify({
-          ratePerUnit: Number(editRate),
-          reorderLevel: Number(editReorder),
-        }),
+        body: JSON.stringify(body),
       });
       toast.push(t("store.rateUpdated"), "ok");
       setRateOpen(false);
@@ -264,12 +342,15 @@ export function StorePage() {
     e.preventDefault();
     setBusy(true);
     try {
+      const packUnit = newPackUnit || "NONE";
       await api("/store/items", {
         method: "POST",
         body: JSON.stringify({
           name: newName.trim(),
           categoryId: newCat,
           unit: newUnit,
+          packUnit,
+          unitsPerPack: packUnit === "NONE" ? 1 : Math.max(1, Number(newUnitsPerPack) || 1),
           quantityOnHand: Number(newQty) || 0,
           ratePerUnit: Number(newRate) || 0,
           reorderLevel: Number(newReorder) || 0,
@@ -280,6 +361,8 @@ export function StorePage() {
       setNewName("");
       setNewRate("");
       setNewQty("0");
+      setNewPackUnit("NONE");
+      setNewUnitsPerPack("1");
       await load();
     } catch (err) {
       toast.push(err instanceof Error ? err.message : t("store.addFailed"), "err");
@@ -378,7 +461,8 @@ export function StorePage() {
         <div>
           <h1>{t("store.title")}</h1>
           <p>
-            {t("store.stockIn")} · {t("store.tabBuy")} · {t("store.tabUsed")} · {t("store.ledger")}
+            {t("store.stockIn")} · {t("store.tabBuy")} · {t("store.tabKitchenTransfer")} ·{" "}
+            {t("store.tabStoreClose")} · {t("store.tabKitchenClose")}
           </p>
         </div>
         <div className="row">
@@ -402,6 +486,9 @@ export function StorePage() {
               </button>
               <button type="button" className="btn ok sm" onClick={() => openMove("IN")}>
                 {t("store.stockIn")}
+              </button>
+              <button type="button" className="btn danger sm" onClick={() => openMove("OUT")}>
+                {t("store.stockOut")}
               </button>
               <button type="button" className="btn ghost sm" onClick={() => openMove("ADJUST")}>
                 {t("store.adjust")}
@@ -446,7 +533,10 @@ export function StorePage() {
               ["suppliers", "store.tabSuppliers"],
               ["daily", "store.tabDaily"],
               ["moves", "store.tabMoves"],
-              ["usage", "store.tabUsed"],
+              ["transfer", "store.tabKitchenTransfer"],
+              ["stations", "store.tabKitchenStations"],
+              ["usage", "store.tabStoreClose"],
+              ["kitchenClose", "store.tabKitchenClose"],
               ["alerts", "store.tabLow"],
             ] as const
           ).map(([k, key]) => (
@@ -506,7 +596,16 @@ export function StorePage() {
                       </td>
                       <td>{i.name}</td>
                       <td>
-                        {i.quantityOnHand} {unitLabel(i.unit)}
+                        {formatStockQty(i.quantityOnHand, i.unit, i.packUnit, i.unitsPerPack)}
+                        {i.packUnit && i.packUnit !== "NONE" && Number(i.unitsPerPack) > 1 ? (
+                          <div className="tiny muted">
+                            {t("store.packHint", {
+                              pack: packUnitLabel(i.packUnit),
+                              n: String(i.unitsPerPack),
+                              unit: unitLabel(i.unit),
+                            })}
+                          </div>
+                        ) : null}
                       </td>
                       <td>
                         {money(i.ratePerUnit)}/{unitLabel(i.unit)}
@@ -531,10 +630,25 @@ export function StorePage() {
                             </button>
                             <button
                               type="button"
+                              className="btn danger sm"
+                              onClick={() => openMove("OUT", i)}
+                            >
+                              {t("store.stockOut")}
+                            </button>
+                            <button
+                              type="button"
                               className="btn ghost sm"
                               onClick={() => openRateEdit(i)}
                             >
                               {t("store.editRate")}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn danger sm"
+                              disabled={busy}
+                              onClick={() => void removeItem(i)}
+                            >
+                              {t("store.deleteItem")}
                             </button>
                           </div>
                         </td>
@@ -578,9 +692,13 @@ export function StorePage() {
                       <td>
                         <span
                           className={`badge ${
-                            m.type === "IN"
+                            m.type === "IN" || m.type === "RESTORE" || m.type === "KITCHEN_RETURN"
                               ? "paid"
-                              : m.type === "OUT" || m.type === "SALE"
+                              : m.type === "OUT" ||
+                                  m.type === "SALE" ||
+                                  m.type === "COOK" ||
+                                  m.type === "KITCHEN_TRANSFER" ||
+                                  m.type === "KITCHEN_OUT"
                                 ? "unpaid"
                                 : "pending"
                           }`}
@@ -615,7 +733,19 @@ export function StorePage() {
             </div>
           )}
 
+          {tab === "transfer" && (
+            <KitchenTransfer canManage={can("store.manage")} onChanged={() => void load()} />
+          )}
+
+          {tab === "stations" && (
+            <KitchenStationsManage canManage={can("store.manage")} onChanged={() => void load()} />
+          )}
+
           {tab === "usage" && <StoreDayUse canManage={can("store.manage")} onChanged={() => void load()} />}
+
+          {tab === "kitchenClose" && (
+            <KitchenDayUse canManage={can("store.manage")} onChanged={() => void load()} />
+          )}
 
           {tab === "alerts" && (
             <div className="panel panel-pad">
@@ -639,7 +769,7 @@ export function StorePage() {
                           <div className="tiny muted">{i.category}</div>
                         </td>
                         <td>
-                          {i.quantityOnHand} {unitLabel(i.unit)}
+                          {formatStockQty(i.quantityOnHand, i.unit, i.packUnit, i.unitsPerPack)}
                         </td>
                         <td>
                           {i.reorderLevel} {unitLabel(i.unit)}
@@ -728,14 +858,23 @@ export function StorePage() {
             <label>
               {moveOpen === "ADJUST" ? t("store.newQty") : t("store.quantity")}
             </label>
-            <input value={qty} onChange={(e) => setQty(e.target.value)} required />
+            <input
+              value={qty}
+              inputMode="decimal"
+              onChange={(e) => setQty(sanitizeQty(e.target.value))}
+              required
+            />
           </div>
           {moveOpen === "IN" && (
             <>
               <p className="muted tiny">{t("store.stockInHint")}</p>
               <div className="field">
                 <label>{t("store.purchaseRate")}</label>
-                <input value={rate} onChange={(e) => setRate(e.target.value)} />
+                <input
+                  value={rate}
+                  inputMode="decimal"
+                  onChange={(e) => setRate(sanitizeQty(e.target.value))}
+                />
               </div>
             </>
           )}
@@ -758,7 +897,7 @@ export function StorePage() {
             <label>{t("store.note")}</label>
             <input
               value={note}
-              onChange={(e) => setNote(e.target.value)}
+              onChange={(e) => setNote(sanitizePlainText(e.target.value))}
               placeholder={t("store.notePh")}
             />
           </div>
@@ -776,7 +915,11 @@ export function StorePage() {
           <div className="modal-scroll">
           <div className="field">
             <label>{t("common.name")}</label>
-            <input value={newName} onChange={(e) => setNewName(e.target.value)} required />
+            <input
+              value={newName}
+              onChange={(e) => setNewName(sanitizePlainText(e.target.value))}
+              required
+            />
           </div>
           <div className="field">
             <label>{t("common.category")}</label>
@@ -801,17 +944,53 @@ export function StorePage() {
             </div>
             <div className="field">
               <label>{t("store.reorder")}</label>
-              <input value={newReorder} onChange={(e) => setNewReorder(e.target.value)} />
+              <input
+                value={newReorder}
+                inputMode="decimal"
+                onChange={(e) => setNewReorder(sanitizeQty(e.target.value))}
+              />
+            </div>
+          </div>
+          <div className="grid-2">
+            <div className="field">
+              <label>{t("store.packUnit")}</label>
+              <select value={newPackUnit} onChange={(e) => setNewPackUnit(e.target.value)}>
+                {PACK_UNITS.map((u) => (
+                  <option key={u} value={u}>
+                    {u === "NONE" ? t("store.packUnitNone") : packUnitLabel(u)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label>{t("store.unitsPerPack")}</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={newUnitsPerPack}
+                disabled={newPackUnit === "NONE"}
+                onChange={(e) => setNewUnitsPerPack(sanitizeQty(e.target.value))}
+              />
+              <span className="tiny muted">{t("store.unitsPerPackHint")}</span>
             </div>
           </div>
           <div className="grid-2">
             <div className="field">
               <label>{t("store.openingQty")}</label>
-              <input value={newQty} onChange={(e) => setNewQty(e.target.value)} />
+              <input
+                value={newQty}
+                inputMode="decimal"
+                onChange={(e) => setNewQty(sanitizeQty(e.target.value))}
+              />
             </div>
             <div className="field">
               <label>{t("store.todayRate")}</label>
-              <input value={newRate} onChange={(e) => setNewRate(e.target.value)} required />
+              <input
+                value={newRate}
+                inputMode="decimal"
+                onChange={(e) => setNewRate(sanitizeQty(e.target.value))}
+                required
+              />
             </div>
           </div>
           </div>
@@ -839,19 +1018,32 @@ export function StorePage() {
           <div className="modal-scroll">
           {editItem && (
             <p className="muted">
-              {editItem.category} · {t("store.currentStock")} {editItem.quantityOnHand}{" "}
-              {unitLabel(editItem.unit)}
+              {editItem.category} · {t("store.currentStock")}{" "}
+              {formatStockQty(
+                editItem.quantityOnHand,
+                editItem.unit,
+                editItem.packUnit,
+                editItem.unitsPerPack
+              )}
             </p>
+          )}
+          {canManage && (
+            <div className="field">
+              <label>{t("common.name")}</label>
+              <input
+                value={editName}
+                onChange={(e) => setEditName(sanitizePlainText(e.target.value))}
+                required
+              />
+            </div>
           )}
           <div className="grid-2">
             <div className="field">
               <label>{t("store.ratePerUnit")}</label>
               <input
                 value={editRate}
-                onChange={(e) => setEditRate(e.target.value)}
-                type="number"
-                step="0.01"
-                min="0"
+                onChange={(e) => setEditRate(sanitizeQty(e.target.value))}
+                inputMode="decimal"
                 required
               />
             </div>
@@ -859,12 +1051,33 @@ export function StorePage() {
               <label>{t("store.reorderLevel")}</label>
               <input
                 value={editReorder}
-                onChange={(e) => setEditReorder(e.target.value)}
-                type="number"
-                step="0.01"
-                min="0"
+                onChange={(e) => setEditReorder(sanitizeQty(e.target.value))}
+                inputMode="decimal"
                 required
               />
+            </div>
+          </div>
+          <div className="grid-2">
+            <div className="field">
+              <label>{t("store.packUnit")}</label>
+              <select value={editPackUnit} onChange={(e) => setEditPackUnit(e.target.value)}>
+                {PACK_UNITS.map((u) => (
+                  <option key={u} value={u}>
+                    {u === "NONE" ? t("store.packUnitNone") : packUnitLabel(u)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label>{t("store.unitsPerPack")}</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={editUnitsPerPack}
+                disabled={editPackUnit === "NONE"}
+                onChange={(e) => setEditUnitsPerPack(sanitizeQty(e.target.value))}
+              />
+              <span className="tiny muted">{t("store.unitsPerPackHint")}</span>
             </div>
           </div>
           </div>

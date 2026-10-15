@@ -1,4 +1,5 @@
 import PDFDocument from "pdfkit";
+import { forEachBufferedPage } from "../common/pdf-page";
 import { VENDOR } from "../common/vendor";
 
 type Hotel = { name: string; tagline: string; address: string; phone: string };
@@ -244,10 +245,7 @@ function ensureSpace(doc: PDFKit.PDFDocument, need: number, onNewPage?: () => vo
 }
 
 function footer(doc: PDFKit.PDFDocument, hotel: Hotel, supplierName: string) {
-  const range = doc.bufferedPageRange();
-  for (let i = range.start; i < range.start + range.count; i++) {
-    doc.switchToPage(i);
-    const n = i - range.start + 1;
+  forEachBufferedPage(doc, (n, total) => {
     doc.save();
     doc
       .strokeColor(LINE)
@@ -260,13 +258,13 @@ function footer(doc: PDFKit.PDFDocument, hotel: Hotel, supplierName: string) {
       `${hotel.name} · ${supplierName} · ${VENDOR.line} · ${VENDOR.phoneDisplay}`,
       PAGE.margin,
       PAGE.height - 22,
-      { lineBreak: false, width: PAGE.width - PAGE.margin * 2 - 90 },
+      { lineBreak: false, width: PAGE.width - PAGE.margin * 2 - 90 }
     );
-    doc.text(`Page ${n} of ${range.count}`, PAGE.width - PAGE.margin - 80, PAGE.height - 22, {
+    doc.text(`Page ${n} of ${total}`, PAGE.width - PAGE.margin - 80, PAGE.height - 22, {
       width: 80,
       align: "right",
       lineBreak: false,
     });
     doc.restore();
-  }
+  });
 }

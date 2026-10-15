@@ -18,7 +18,7 @@ import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
 import { PrismaService } from "../prisma/prisma.service";
 import { PrintService } from "./print.service";
-import { listWindowsPrinters } from "./drivers";
+import { listUsbDevices, listWindowsPrinters } from "./drivers";
 
 const MANUAL_KINDS = [PrinterKind.WINDOWS, PrinterKind.NETWORK, PrinterKind.FILE] as const;
 
@@ -29,6 +29,7 @@ class PrinterDto {
   @IsOptional() @IsIn([58, 72, 80, 112]) paperWidth?: number;
   @IsOptional() @IsBoolean() printsKot?: boolean;
   @IsOptional() @IsBoolean() printsBill?: boolean;
+  @IsOptional() @IsBoolean() printsOther?: boolean;
   @IsOptional() @IsString() @MaxLength(60) station?: string;
   @IsOptional() @IsString() @MaxLength(300) categories?: string;
   @IsOptional() @IsBoolean() active?: boolean;
@@ -41,6 +42,7 @@ class UpdatePrinterDto {
   @IsOptional() @IsIn([58, 72, 80, 112]) paperWidth?: number;
   @IsOptional() @IsBoolean() printsKot?: boolean;
   @IsOptional() @IsBoolean() printsBill?: boolean;
+  @IsOptional() @IsBoolean() printsOther?: boolean;
   @IsOptional() @IsString() @MaxLength(60) station?: string;
   @IsOptional() @IsString() @MaxLength(300) categories?: string;
   @IsOptional() @IsBoolean() active?: boolean;
@@ -72,6 +74,7 @@ export class PrintersController {
       paperWidth: p.paperWidth,
       printsKot: p.printsKot,
       printsBill: p.printsBill,
+      printsOther: p.printsOther,
       station: p.station,
       categories: p.categories,
       active: p.active,
@@ -101,6 +104,24 @@ export class PrintersController {
     }
   }
 
+  /** Active Other-print printers (A4 / PDF reports on this server). */
+  @Get("other")
+  @RequirePerms("printers.manage", "print.bill", "close.view", "payments.view", "store.view", "reports.view")
+  other() {
+    return this.print.listOtherPrinters();
+  }
+
+  /** USB / PnP devices on the main server PC (incl. Unknown USB missing drivers). */
+  @Get("devices")
+  @RequirePerms("printers.manage")
+  async devices() {
+    try {
+      return await listUsbDevices();
+    } catch {
+      return [];
+    }
+  }
+
   @Post()
   @RequirePerms("printers.manage")
   create(@Body() dto: PrinterDto) {
@@ -119,10 +140,10 @@ export class PrintersController {
     if (!exists) throw new NotFoundException("Printer not found");
     if (exists.kind === "AGENT") {
       // Agent owns connection/target; admin only configures role + paper.
-      const { name, paperWidth, printsKot, printsBill, station, categories, active } = dto;
+      const { name, paperWidth, printsKot, printsBill, printsOther, station, categories, active } = dto;
       return this.prisma.printer.update({
         where: { id },
-        data: { name, paperWidth, printsKot, printsBill, station, categories, active },
+        data: { name, paperWidth, printsKot, printsBill, printsOther, station, categories, active },
       });
     }
     if (dto.kind === "AGENT") {
@@ -131,13 +152,14 @@ export class PrintersController {
     return this.prisma.printer.update({ where: { id }, data: dto });
   }
 
+  /** Soft-remove: keeps the row so Active can restore (hard-delete lost printers forever). */
   @Delete(":id")
   @RequirePerms("printers.manage")
   async remove(@Param("id") id: string) {
-    await this.prisma.printer.delete({ where: { id } }).catch(() => {
-      throw new NotFoundException("Printer not found");
-    });
-    return { ok: true };
+    const exists = await this.prisma.printer.findUnique({ where: { id } });
+    if (!exists) throw new NotFoundException("Printer not found");
+    await this.prisma.printer.update({ where: { id }, data: { active: false } });
+    return { ok: true, active: false };
   }
 
   @Post(":id/test")

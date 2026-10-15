@@ -12,7 +12,18 @@ import { OrdersService } from "./orders.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
-import { AddItemsDto, CreateOrderDto, EditOrderDto, PayOrderDto, PrintKotDto, UpdateOrderDto, UpdateStatusDto } from "./dto";
+import {
+  AddItemsDto,
+  CancelOrderDto,
+  CreateOrderDto,
+  EditOrderDto,
+  PayOrderDto,
+  PrintKotDto,
+  PutOnCreditDto,
+  ReassignCreditDto,
+  UpdateOrderDto,
+  UpdateStatusDto,
+} from "./dto";
 
 @Controller("orders")
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -25,9 +36,23 @@ export class OrdersController {
     @CurrentUser() user: AuthUser,
     @Query("paymentStatus") paymentStatus?: string,
     @Query("status") status?: string,
-    @Query("view") view?: string
+    @Query("view") view?: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("includeCredit") includeCredit?: string
   ) {
-    return this.orders.list(user, paymentStatus, status, view === "billing");
+    return this.orders.list(user, paymentStatus, status, view === "billing", {
+      from,
+      to,
+      includeCredit: includeCredit === "1" || includeCredit === "true",
+    });
+  }
+
+  /** Active kitchen tickets (PENDING / PREPARING / READY) — not capped by general list take:100. */
+  @Get("kitchen")
+  @RequirePerms("kitchen.view")
+  listKitchen(@CurrentUser() user: AuthUser) {
+    return this.orders.listKitchen(user);
   }
 
   @Get("per-head")
@@ -54,10 +79,35 @@ export class OrdersController {
     return this.orders.addItems(user, id, dto);
   }
 
+  /** Guest arrived — release kitchen hold, start timers, print KOT. */
+  @Post(":id/start-reserved")
+  @RequirePerms("order.create", "order.addItems", "order.edit")
+  startReserved(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    return this.orders.startReserved(user, id);
+  }
+
   @Post(":id/edit")
   @RequirePerms("order.edit")
   editItems(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: EditOrderDto) {
     return this.orders.editItems(user, id, dto);
+  }
+
+  @Post(":id/cancel")
+  @RequirePerms("order.edit")
+  cancel(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: CancelOrderDto) {
+    return this.orders.cancel(user, id, dto);
+  }
+
+  @Post(":id/reverse")
+  @RequirePerms("order.edit")
+  reverse(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: CancelOrderDto) {
+    return this.orders.reverse(user, id, dto);
+  }
+
+  @Post(":id/print-cancel-kot")
+  @RequirePerms("order.edit", "print.kot")
+  printCancelKot(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    return this.orders.printCancelKot(user, id);
   }
 
   @Patch(":id")
@@ -101,6 +151,22 @@ export class OrdersController {
   @RequirePerms("order.pay")
   pay(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: PayOrderDto) {
     return this.orders.pay(user, id, dto);
+  }
+
+  @Post(":id/put-on-credit")
+  @RequirePerms("order.pay")
+  putOnCredit(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: PutOnCreditDto) {
+    return this.orders.putOnCredit(user, id, dto);
+  }
+
+  @Patch(":id/credit-customer")
+  @RequirePerms("order.pay")
+  reassignCredit(
+    @CurrentUser() user: AuthUser,
+    @Param("id") id: string,
+    @Body() dto: ReassignCreditDto
+  ) {
+    return this.orders.reassignCredit(user, id, dto.creditCustomerId);
   }
 
   @Post(":id/release-credit")

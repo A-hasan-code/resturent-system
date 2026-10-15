@@ -16,6 +16,12 @@ export class CreditController {
     return this.credit.list(q);
   }
 
+  @Get("aging")
+  @RequirePerms("bill.view", "order.pay", "payments.view")
+  aging() {
+    return this.credit.aging();
+  }
+
   @Get(":id")
   @RequirePerms("bill.view", "order.pay")
   get(@Param("id") id: string) {

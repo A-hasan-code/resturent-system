@@ -1,6 +1,7 @@
 import {
   ArrayMinSize,
   IsArray,
+  IsBoolean,
   IsEnum,
   IsIn,
   IsNumber,
@@ -12,7 +13,7 @@ import {
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
-import { ExtraExpensePaidBy, UnitType } from "@prisma/client";
+import { ExtraExpensePaidBy, PackUnit, UnitType } from "@prisma/client";
 
 export class CreateStoreItemDto {
   @IsString()
@@ -24,6 +25,16 @@ export class CreateStoreItemDto {
 
   @IsEnum(UnitType)
   unit!: UnitType;
+
+  @IsEnum(PackUnit)
+  @IsOptional()
+  packUnit?: PackUnit;
+
+  /** Stock units inside one pack (e.g. 30 eggs / tray). */
+  @IsNumber()
+  @Min(1)
+  @IsOptional()
+  unitsPerPack?: number;
 
   @IsNumber()
   @Min(0)
@@ -56,6 +67,15 @@ export class UpdateStoreItemDto {
   @Min(0)
   @IsOptional()
   reorderLevel?: number;
+
+  @IsEnum(PackUnit)
+  @IsOptional()
+  packUnit?: PackUnit;
+
+  @IsNumber()
+  @Min(1)
+  @IsOptional()
+  unitsPerPack?: number;
 
   @IsOptional()
   active?: boolean;
@@ -163,6 +183,11 @@ export class PurchaseLineDto {
   @IsNumber()
   @Min(0)
   ratePerUnit!: number;
+
+  /** When true, quantity/rate are in pack units (tray/box…); converted to stock units. */
+  @IsBoolean()
+  @IsOptional()
+  inPacks?: boolean;
 }
 
 export class CreatePurchaseDto {
@@ -212,10 +237,27 @@ export class DayUseLineDto {
   @IsString()
   storeItemId!: string;
 
-  /** Extra used today, on top of what bills already deducted. */
+  /**
+   * Total used for this line (manual closing).
+   * Kitchen: includes recipe auto + manual. Store: store-side used (not kitchen transfer).
+   * Falls back to extraQty for older clients.
+   */
   @IsNumber()
   @Min(0)
-  extraQty!: number;
+  @IsOptional()
+  usedQty?: number;
+
+  /** Physical count remaining at close. */
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  leftoverQty?: number;
+
+  /** Legacy: extra beyond recipe/transfer. Prefer usedQty. */
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  extraQty?: number;
 
   @IsString()
   @IsOptional()
@@ -238,6 +280,95 @@ export class SaveDayUseDto {
   @ValidateNested({ each: true })
   @Type(() => DayUseLineDto)
   lines!: DayUseLineDto[];
+}
+
+export class KitchenTransferLineDto {
+  @IsString()
+  storeItemId!: string;
+
+  @IsNumber()
+  @Min(0.001)
+  quantity!: number;
+}
+
+export class KitchenTransferDto {
+  @IsString()
+  @MinLength(1)
+  station!: string;
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => KitchenTransferLineDto)
+  lines!: KitchenTransferLineDto[];
+
+  @IsString()
+  @IsOptional()
+  note?: string;
+}
+
+export class KitchenReturnDto {
+  @IsString()
+  @MinLength(1)
+  station!: string;
+
+  @IsString()
+  storeItemId!: string;
+
+  @IsNumber()
+  @Min(0.001)
+  quantity!: number;
+
+  @IsString()
+  @IsOptional()
+  note?: string;
+}
+
+export class SaveKitchenDayUseDto {
+  @IsString()
+  @MinLength(1)
+  station!: string;
+
+  @IsString()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  @IsOptional()
+  businessDate?: string;
+
+  @IsString()
+  @IsOptional()
+  editReason?: string;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => DayUseLineDto)
+  lines!: DayUseLineDto[];
+}
+
+export class CreateKitchenStationDto {
+  @IsString()
+  @MinLength(1)
+  name!: string;
+
+  /** Optional; auto from name if omitted (e.g. Tandoor → TANDOOR). */
+  @IsString()
+  @IsOptional()
+  @Matches(/^[A-Z][A-Z0-9_]{0,39}$/)
+  code?: string;
+}
+
+export class UpdateKitchenStationDto {
+  @IsString()
+  @MinLength(1)
+  @IsOptional()
+  name?: string;
+
+  @IsNumber()
+  @IsOptional()
+  sortOrder?: number;
+
+  @IsBoolean()
+  @IsOptional()
+  active?: boolean;
 }
 
 export class SupplierPaymentDto {

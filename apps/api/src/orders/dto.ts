@@ -8,12 +8,23 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  MaxLength,
   Min,
+  MinLength,
   ValidateIf,
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
 import { OrderStatus } from "@prisma/client";
+
+export class PerHeadPackageLineDto {
+  @IsString()
+  menuItemId!: string;
+
+  @IsNumber()
+  @Min(0.001)
+  quantity!: number;
+}
 
 export class OrderLineDto {
   /** MENU (default) or PER_HEAD cover charge. */
@@ -29,9 +40,57 @@ export class OrderLineDto {
   @Min(0.001)
   quantity!: number;
 
+  /** SPECIAL: PLATE (default) or RS. MIX uses MIX / MIX_SOLO_STORE server-side. */
+  @IsOptional()
+  @IsIn(["PLATE", "RS", "MIX"])
+  saleMode?: "PLATE" | "RS" | "MIX";
+
+  /** SPECIAL RS mode: rupees to convert into grams. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  amountRs?: number;
+
+  /** MIX: if special pot is out, sell store part only (e.g. sirf Rosh). */
+  @IsOptional()
+  @IsBoolean()
+  soloStoreFallback?: boolean;
+
+  /** Optional priced modifiers (Extra cheese, …). */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => OrderModifierDto)
+  modifiers?: OrderModifierDto[];
+
+  /**
+   * With PER_HEAD: kitchen package lines (included, Rs 0).
+   * menuItemId must be in Settings per-head package.
+   */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PerHeadPackageLineDto)
+  packageLines?: PerHeadPackageLineDto[];
+
   @IsString()
   @IsOptional()
   notes?: string;
+}
+
+export class OrderModifierDto {
+  /** Required — server resolves name + priceDelta from MenuModifier (client prices ignored). */
+  @IsString()
+  @MinLength(1)
+  id!: string;
+
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  @IsOptional()
+  @IsNumber()
+  priceDelta?: number;
 }
 
 export class CreateOrderDto {
@@ -58,6 +117,36 @@ export class CreateOrderDto {
   @IsOptional()
   servedByName?: string;
 
+  /** Guest name for reservation / advance (pre) order. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  guestName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  guestPhone?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  partySize?: number;
+
+  /** Expected arrival (ISO datetime). Marks advance / reserved order. */
+  @IsOptional()
+  @IsString()
+  reservedFor?: string;
+
+  /**
+   * Advance / reserved pre-order: keep off kitchen board and timers until
+   * supervisor/cashier starts when the guest arrives.
+   */
+  @IsOptional()
+  @IsBoolean()
+  kitchenHold?: boolean;
+
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
@@ -69,7 +158,7 @@ export class CreateOrderDto {
   @IsBoolean()
   printKot?: boolean;
 
-  /** Seated credit account. The order is the invoice; cash is collected later. */
+  /** Credit account (table or takeaway). The order is the invoice; cash is collected later. */
   @IsOptional()
   @IsString()
   creditCustomerId?: string;
@@ -84,12 +173,50 @@ export class EditLineDto {
   quantity!: number;
 }
 
+/** New menu lines added during bill edit (paid or unpaid). */
+export class EditAddLineDto {
+  @IsString()
+  menuItemId!: string;
+
+  @IsNumber()
+  @Min(0.001)
+  quantity!: number;
+
+  @IsOptional()
+  @IsIn(["PLATE", "RS", "MIX"])
+  saleMode?: "PLATE" | "RS" | "MIX";
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  amountRs?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  soloStoreFallback?: boolean;
+
+  @IsString()
+  @IsOptional()
+  notes?: string;
+}
+
 export class EditOrderDto {
   @IsArray()
-  @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => EditLineDto)
   items!: EditLineDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => EditAddLineDto)
+  addItems?: EditAddLineDto[];
+
+  /** Required when editing a PAID bill (Main Cashier audit reason). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  reason?: string;
 
   /** Move the open bill onto this table. The previous table is released. */
   @IsOptional()
@@ -144,13 +271,13 @@ export class PrintKotDto {
 }
 
 export class PayOrderDto {
-  /** Cash the guest handed over (may be more than the amount due; change is returned). */
+  /** Cash/card amount the guest handed over (may be more than due for cash; change returned). */
   @IsNumber()
   @Min(0)
   @IsOptional()
   amount?: number;
 
-  /** Discount to apply on the bill (gross − discount = net due). */
+  /** Discount to apply on the bill (gross − discount = net food). */
   @IsNumber()
   @Min(0)
   @IsOptional()
@@ -162,15 +289,46 @@ export class PayOrderDto {
   @IsOptional()
   tip?: number;
 
+  /** How the guest paid. Default CASH. Non-cash does not go in the cash drawer. */
+  @IsOptional()
+  @IsIn(["CASH", "CARD", "WALLET", "BANK"])
+  method?: "CASH" | "CARD" | "WALLET" | "BANK";
+
   /** Free-text name of who served the table. */
   @IsString()
   @IsOptional()
   servedByName?: string;
 
-  /** Cashier the collected cash was handed to. Required when the payer does not keep a cash drawer. */
+  /** Cashier the collected cash was handed to. Required when the payer does not keep a cash drawer (cash only). */
   @IsString()
   @IsOptional()
   handedToId?: string;
+}
+
+/** Move an existing credit invoice onto another credit customer. */
+export class ReassignCreditDto {
+  @IsString()
+  creditCustomerId!: string;
+}
+
+/** Put an unpaid table or takeaway bill on a credit customer's account (no cash now). */
+export class PutOnCreditDto {
+  @IsString()
+  creditCustomerId!: string;
+
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  discount?: number;
+
+  @IsString()
+  @IsOptional()
+  servedByName?: string;
+
+  /** If true, mark COMPLETED so the table frees (guest left). Kitchen must be Ready/Served. */
+  @IsOptional()
+  @IsBoolean()
+  releaseTable?: boolean;
 }
 
 export class UpdateOrderDto {
@@ -183,4 +341,10 @@ export class UpdateOrderDto {
 export class UpdateStatusDto {
   @IsEnum(OrderStatus)
   status!: OrderStatus;
+}
+
+export class CancelOrderDto {
+  @IsString()
+  @MaxLength(200)
+  reason!: string;
 }

@@ -110,6 +110,7 @@ Produces `releases/HotelSystem-Setup-<VERSION>.exe`, a single offline installer 
 - **PostgreSQL 16:** listens on localhost only
 - **WinSW:** runs the server as a Windows service
 - **the server, web app and desktop app**
+- **desktop auto-update package** for Additional PCs (`/downloads/desktop-update.zip`)
 - **the Android app**, served to tablets at `/downloads/hotel-system.apk`
 
 You need Inno Setup 6 to build it (`winget install JRSoftware.InnoSetup`), plus Android Studio for the APK. Pass `-SkipAndroid` to `packaging/windows/Build-Release.ps1` to build without it. Bump the version in `VERSION` before building.
@@ -136,12 +137,12 @@ The installer offers two choices:
   - runs migrations and the seed
   - opens the firewall
   - shows the addresses tablets should use
-- **Additional PC: desktop app only.** The app finds the server on the network by itself.
+- **Additional PC: desktop app only.** The app finds the server on the network by itself. After you upgrade the Main PC, cashier PCs auto-download the new desktop shell from the server (one Windows permission prompt). See [docs/INDUSTRIAL-SETUP.md](docs/INDUSTRIAL-SETUP.md#updating-additional-cashier-pcs).
 
-Upgrading means running a newer installer over the old one. Data, secrets and ports are kept. Uninstalling asks whether to keep the restaurant data.
+Upgrading means running a newer installer over the old one **on the Main PC**. Data, secrets and ports are kept. Uninstalling asks whether to keep the restaurant data.
 
 ## Operations
 
-- **Backups:** automatic daily `pg_dump` (the last 30 are kept) in `C:\ProgramData\HotelSystem\backups`. Manual backup and restore are under *Settings → Backup*.
+- **Backups:** manual `pg_dump` (plus a safety copy before restore) in `C:\ProgramData\HotelSystem\backups`. Create and restore under *Settings → Backup*.
 - **Logs:** `C:\ProgramData\HotelSystem\logs`
 - **Services:** `services.msc` → *Hotel System Server*, *Hotel System Database*

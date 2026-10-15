@@ -10,12 +10,18 @@ import { BillsPage } from "./pages/Bills";
 import { KitchenPage } from "./pages/Kitchen";
 import { WaiterPage } from "./pages/Waiter";
 import { SettingsPage } from "./pages/Settings";
+import { DeveloperSetupPage } from "./pages/DeveloperSetup";
+import { BillDesignPage } from "./pages/BillDesign";
+import { TableSettingsPage } from "./pages/TableSettings";
 import { UsersPage } from "./pages/Users";
 import { PaymentsPage } from "./pages/Payments";
 import { AuditPage } from "./pages/Audit";
 import { HotelExpensesPage } from "./pages/HotelExpenses";
+import { WorkersPage } from "./pages/Workers";
 import { CloseReportPage } from "./pages/CloseReport";
 import { CreditCustomersPage } from "./pages/CreditCustomers";
+import { FinancePage } from "./pages/Finance";
+import { SpecialsPage } from "./pages/Specials";
 
 function Private({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
@@ -46,15 +52,21 @@ export function App() {
         <Route path="store" element={<StorePage />} />
         <Route path="recipes" element={<RecipesPage />} />
         <Route path="menu" element={<MenuPage />} />
+        <Route path="specials" element={<SpecialsPage />} />
         <Route path="orders" element={<Navigate to="/waiter" replace />} />
         <Route path="bills" element={<BillsPage />} />
         <Route path="credit" element={<CreditCustomersPage />} />
         <Route path="kitchen" element={<KitchenPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="developer" element={<DeveloperSetupPage />} />
+        <Route path="bill-design" element={<BillDesignPage />} />
+        <Route path="table-settings" element={<TableSettingsPage />} />
         <Route path="users" element={<UsersPage />} />
         <Route path="payments" element={<PaymentsPage />} />
+        <Route path="finance" element={<FinancePage />} />
         <Route path="audit" element={<AuditPage />} />
         <Route path="expenses" element={<HotelExpensesPage />} />
+        <Route path="workers" element={<WorkersPage />} />
         <Route path="close" element={<CloseReportPage />} />
       </Route>
     </Routes>

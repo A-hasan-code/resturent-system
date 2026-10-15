@@ -51,6 +51,11 @@ SignedUninstaller=no
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Messages]
+; Same Setup.exe = install OR in-place update. Never uninstall first.
+WelcomeLabel2=This will install or UPDATE [name] on your computer.%n%nIf Hotel System is already installed, just continue — restaurant data (menu, orders, stock, users) is kept in ProgramData.%n%nDo NOT uninstall before updating.
+FinishedLabel=Setup finished. Your data was kept if this was an update.%n%nIf the server failed to start with a service error, restart the PC and run this Setup again as Administrator.
+
 [Types]
 Name: "server"; Description: "Main PC: server + desktop app (install on ONE PC only)"
 #if WithDesktop == "1"
@@ -130,19 +135,27 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Mode: String;
+  ErrFile: String;
+  ErrText: AnsiString;
 begin
   if CurStep <> ssPostInstall then Exit;
   if WizardIsComponentSelected('server') then Mode := 'server' else Mode := 'client';
   if Mode = 'server' then
-    WizardForm.StatusLabel.Caption := 'Configuring database and server (1-2 minutes)...'
+    WizardForm.StatusLabel.Caption := 'Updating server (data kept; migrate only, 1-2 min)...'
   else
     WizardForm.StatusLabel.Caption := 'Configuring desktop app...';
   WizardForm.ProgressGauge.Style := npbstMarquee;
   try
-    if not RunSetupScript(Mode) then
-      MsgBox('Setup did not complete. See the log file:' + #13#10 +
-        ExpandConstant('{commonappdata}\HotelSystem\logs\install.log') + #13#10#13#10 +
-        'Run the installer again to retry.', mbError, MB_OK);
+    if not RunSetupScript(Mode) then begin
+      ErrFile := ExpandConstant('{commonappdata}\HotelSystem\logs\last-error.txt');
+      if LoadStringFromFile(ErrFile, ErrText) then
+        MsgBox(String(ErrText), mbError, MB_OK)
+      else
+        MsgBox('Setup did not complete (server configuration).' + #13#10#13#10 +
+          'See log:' + #13#10 +
+          ExpandConstant('{commonappdata}\HotelSystem\logs\install.log') + #13#10#13#10 +
+          'Run the installer again as Administrator to retry.', mbError, MB_OK);
+    end;
   finally
     WizardForm.ProgressGauge.Style := npbstNormal;
   end;

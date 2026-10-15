@@ -1,42 +1,19 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { api, uploadApi } from "../api";
+import { api, unitLabel, uploadApi } from "../api";
 import { useAuth } from "../auth";
 import { useToast } from "../toast";
 import { Modal } from "../components/Modal";
 import { useConfirm } from "../components/ConfirmModal";
-import { BillPreview, type BillOrder } from "../components/BillPreview";
+import { SearchField, matchesSearch } from "../components/SearchField";
+import { ThermalPreview } from "../components/ThermalPreview";
 import { Pagination, paginate } from "../components/Pagination";
 import { useSocketEvent } from "../socket";
 import { serverOrigin } from "../server";
 import { applyAccent, THEME_PRESETS, useBrand } from "../brand";
-import { useT, type MessageKey } from "../i18n";
+import { useT } from "../i18n";
 
 const PAGE_SIZE = 15;
-
-const SAMPLE_BILL: BillOrder = {
-  orderNo: 206,
-  billNo: 206,
-  tableNo: "Roof Top · Table 4",
-  tableName: "Table 4",
-  partitionName: "Roof Top",
-  paymentStatus: "PAID",
-  total: 2785,
-  tipAmount: 0,
-  paidAmount: 2785,
-  createdAt: new Date().toISOString(),
-  cashier: "Cashier",
-  waiter: "Ali",
-  orderedBy: { name: "Ali", roleName: "Waiter" },
-  servedByName: "Hassan",
-  items: [
-    { name: "Beef Karahi Black Pepper (Full)", quantity: 0.75, sellUnit: "KG", ratePerUnit: 2500, amount: 1875 },
-    { name: "Quetta Sangat Special Kheer", quantity: 1, sellUnit: "PCS", ratePerUnit: 150, amount: 150 },
-    { name: "Per Head", quantity: 3, sellUnit: "PCS", ratePerUnit: 120, amount: 360 },
-    { name: "Gur Chaye", quantity: 3, sellUnit: "PCS", ratePerUnit: 100, amount: 300 },
-    { name: "Raita Glass Extra", quantity: 1, sellUnit: "PCS", ratePerUnit: 100, amount: 100 },
-  ],
-};
 
 type ServerInfo = {
   serverId: string;
@@ -68,6 +45,7 @@ type Printer = {
   paperWidth: number;
   printsKot: boolean;
   printsBill: boolean;
+  printsOther: boolean;
   station: string;
   categories: string;
   active: boolean;
@@ -83,6 +61,24 @@ type Printer = {
 
 type SystemPrinter = { name: string; driver: string; port: string; status: string; isDefault: boolean };
 
+type UsbDeviceRow = {
+  name: string;
+  className: string;
+  status: string;
+  instanceId: string;
+  problem: boolean;
+};
+
+type PrintAgentRow = {
+  id: string;
+  hostname: string;
+  displayName: string;
+  lastSeenAt: string;
+  online: boolean;
+  printers: { id: string; name: string; target: string; active: boolean; printsBill: boolean; printsKot: boolean }[];
+  devices?: UsbDeviceRow[];
+};
+
 type Job = {
   id: string;
   type: string;
@@ -95,26 +91,6 @@ type Job = {
   createdAt: string;
 };
 
-type Partition = { id: string; name: string; sortOrder: number; active?: boolean };
-type Table = {
-  id: string;
-  name: string;
-  area: string | null;
-  seats: number;
-  sortOrder: number;
-  active: boolean;
-  partitionId?: string;
-  partition?: { id: string; name: string } | null;
-};
-type Backup = { file: string; size: number; createdAt: string; auto: boolean; kind?: "daily" | "monthly" | "manual" | "safety" };
-
-const BACKUP_KIND_KEY: Record<string, MessageKey> = {
-  daily: "settings.kindDaily",
-  monthly: "settings.kindMonthly",
-  manual: "settings.kindManual",
-  safety: "settings.kindBefore",
-};
-
 const EMPTY_PRINTER: Omit<Printer, "id"> = {
   name: "",
   kind: "NETWORK",
@@ -122,6 +98,7 @@ const EMPTY_PRINTER: Omit<Printer, "id"> = {
   paperWidth: 80,
   printsKot: false,
   printsBill: true,
+  printsOther: false,
   station: "",
   categories: "",
   active: true,
@@ -143,15 +120,404 @@ export function SettingsPage() {
         </div>
       </div>
       <ServerSection canEdit={can("system.manage")} />
-      {can("system.manage") && <BillDesignSection />}
+      {/* Tax UI hidden for now — backend tax still works if settings exist
+      {can("system.manage") && <TaxBillingSection />}
+      */}
       {can("system.manage") && <TipPrintSection />}
+      {can("system.manage") && <BillDesignPreviewSection />}
       {can("printers.manage") && <PrintersSection />}
       {can("printers.manage") && <JobsSection />}
-      {can("tables.manage") && <TablesSection />}
-      {can("system.manage") && <BackupSection />}
+      {can("system.manage") && (
+        <div className="panel panel-pad settings-block">
+          <h2 className="settings-h" style={{ margin: 0 }}>{t("dev.title")}</h2>
+          <p className="tiny muted" style={{ margin: "0.35rem 0 0.75rem" }}>{t("dev.settingsLinkHint")}</p>
+          <p className="tiny muted" style={{ margin: "0 0 0.75rem" }}>{t("dev.tabShortcut")}</p>
+        </div>
+      )}
     </div>
   );
 }
+
+/** Saved bill layout preview — always visible in Settings (builder stays in Developer). */
+function BillDesignPreviewSection() {
+  const toast = useToast();
+  const t = useT();
+  const { logoSrc } = useBrand();
+  const [title, setTitle] = useState("Customer Bill");
+  const [footer, setFooter] = useState("Thanks for your Visit..");
+  const [showLogo, setShowLogo] = useState(true);
+  const [showName, setShowName] = useState(true);
+  const [showTagline, setShowTagline] = useState(true);
+  const [showAddress, setShowAddress] = useState(true);
+  const [showPhone, setShowPhone] = useState(true);
+  const [showOrderBy, setShowOrderBy] = useState(true);
+  const [showServedBy, setShowServedBy] = useState(true);
+  const [showCashier, setShowCashier] = useState(true);
+  const [showTip, setShowTip] = useState(true);
+  const [showPaidStamp, setShowPaidStamp] = useState(true);
+  const [paperWidth, setPaperWidth] = useState<58 | 72 | 80 | 112>(80);
+  const [busy, setBusy] = useState(false);
+  const [previewErr, setPreviewErr] = useState(false);
+  const [preview, setPreview] = useState<{
+    text: string;
+    paperWidth: number;
+    logoUrl?: string | null;
+    paidStampUrl?: string | null;
+    unpaidStampUrl?: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    api<{
+      print: {
+        bill: {
+          title?: string;
+          footer?: string;
+          template?: string;
+          showLogo?: boolean;
+          showName?: boolean;
+          showTagline?: boolean;
+          showAddress?: boolean;
+          showPhone?: boolean;
+          showOrderBy?: boolean;
+          showServedBy?: boolean;
+          showCashier?: boolean;
+          showTip?: boolean;
+          showPaidStamp?: boolean;
+        };
+      };
+    }>("/system/settings")
+      .then((s) => {
+        const b = s.print?.bill;
+        if (!b) return;
+        setTitle(b.title || "Customer Bill");
+        setFooter(b.footer ?? "Thanks for your Visit..");
+        setShowLogo(b.showLogo !== false);
+        setShowName(b.showName !== false);
+        setShowTagline(b.showTagline !== false);
+        setShowAddress(b.showAddress !== false);
+        setShowPhone(b.showPhone !== false);
+        setShowOrderBy(b.showOrderBy !== false);
+        setShowServedBy(b.showServedBy !== false);
+        setShowCashier(b.showCashier !== false);
+        setShowTip(b.showTip !== false);
+        setShowPaidStamp(b.showPaidStamp !== false);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      setPreviewErr(false);
+      api<{
+        text: string;
+        paperWidth: number;
+        logoUrl?: string | null;
+        paidStampUrl?: string | null;
+        unpaidStampUrl?: string | null;
+      }>("/system/bill-preview", {
+        method: "POST",
+        body: JSON.stringify({
+          // Always use server saved/default template (code layout) — not a stale grapes dump
+          title,
+          footer,
+          paperWidth,
+          showLogo: showLogo ? "1" : "0",
+          showName: showName ? "1" : "0",
+          showTagline: showTagline ? "1" : "0",
+          showAddress: showAddress ? "1" : "0",
+          showPhone: showPhone ? "1" : "0",
+          showOrderBy: showOrderBy ? "1" : "0",
+          showServedBy: showServedBy ? "1" : "0",
+          showCashier: showCashier ? "1" : "0",
+          showTip: showTip ? "1" : "0",
+          showPaidStamp: showPaidStamp ? "1" : "0",
+        }),
+      })
+        .then((r) => {
+          setPreview(r);
+          setPreviewErr(false);
+        })
+        .catch(() => {
+          setPreview(null);
+          setPreviewErr(true);
+        });
+    }, 280);
+    return () => window.clearTimeout(handle);
+  }, [
+    title,
+    footer,
+    paperWidth,
+    showLogo,
+    showName,
+    showTagline,
+    showAddress,
+    showPhone,
+    showOrderBy,
+    showServedBy,
+    showCashier,
+    showTip,
+    showPaidStamp,
+    logoSrc,
+  ]);
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api("/system/settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          billTitle: title.trim() || "Customer Bill",
+          billFooter: footer,
+          billShowLogo: showLogo ? "1" : "0",
+          billShowName: showName ? "1" : "0",
+          billShowTagline: showTagline ? "1" : "0",
+          billShowAddress: showAddress ? "1" : "0",
+          billShowPhone: showPhone ? "1" : "0",
+          billShowOrderBy: showOrderBy ? "1" : "0",
+          billShowServedBy: showServedBy ? "1" : "0",
+          billShowCashier: showCashier ? "1" : "0",
+          billShowTip: showTip ? "1" : "0",
+          billShowPaidStamp: showPaidStamp ? "1" : "0",
+        }),
+      });
+      toast.push(t("settings.saved"), "ok");
+    } catch (err) {
+      toast.push(errMsg(err, t("settings.saveFailed")), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="panel panel-pad settings-block" onSubmit={save}>
+      <h2 className="settings-h" style={{ margin: 0 }}>
+        {t("settings.billDesign")}
+      </h2>
+      <p className="muted" style={{ margin: "0.35rem 0 1rem" }}>
+        {t("settings.billDesignHint")}
+      </p>
+
+      <div className="bill-settings-grid">
+        <div className="bill-settings-controls">
+          <div className="field">
+            <label>{t("settings.paperWidth")}</label>
+            <div className="paper-size-tabs" role="tablist">
+              {([58, 72, 80, 112] as const).map((mm) => (
+                <button
+                  key={mm}
+                  type="button"
+                  className={paperWidth === mm ? "active" : undefined}
+                  onClick={() => setPaperWidth(mm)}
+                >
+                  {mm} mm
+                </button>
+              ))}
+            </div>
+            <p className="tiny muted">{t("settings.paperSizesHint")}</p>
+          </div>
+
+          <div className="field">
+            <label htmlFor="bill-title-settings">{t("settings.billTitle")}</label>
+            <input
+              id="bill-title-settings"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              maxLength={40}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="bill-footer-settings">{t("settings.billFooter")}</label>
+            <input
+              id="bill-footer-settings"
+              value={footer}
+              onChange={(e) => setFooter(e.target.value)}
+              maxLength={120}
+            />
+          </div>
+
+          <h3 className="settings-h" style={{ fontSize: "0.95rem", marginTop: "0.5rem" }}>
+            {t("settings.billHeader")}
+          </h3>
+          <label className="switch-row">
+            <input type="checkbox" checked={showLogo} onChange={(e) => setShowLogo(e.target.checked)} />
+            <span>{t("settings.showLogo")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={showName} onChange={(e) => setShowName(e.target.checked)} />
+            <span>{t("settings.showRestaurantName")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={showTagline} onChange={(e) => setShowTagline(e.target.checked)} />
+            <span>{t("settings.showTagline")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={showAddress} onChange={(e) => setShowAddress(e.target.checked)} />
+            <span>{t("settings.showAddress")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={showPhone} onChange={(e) => setShowPhone(e.target.checked)} />
+            <span>{t("settings.showPhone")}</span>
+          </label>
+
+          <div className="bill-staff-block">
+            <h3 className="settings-h" style={{ fontSize: "0.95rem", margin: 0 }}>
+              {t("settings.billFields")}
+            </h3>
+            <p className="tiny muted" style={{ margin: "0.25rem 0 0.5rem" }}>
+              {t("settings.billStaffBlockHint")}
+            </p>
+            <label className="switch-row">
+              <input type="checkbox" checked={showCashier} onChange={(e) => setShowCashier(e.target.checked)} />
+              <span>{t("settings.showCashier")}</span>
+            </label>
+            <label className="switch-row">
+              <input type="checkbox" checked={showOrderBy} onChange={(e) => setShowOrderBy(e.target.checked)} />
+              <span>{t("settings.showOrderBy")}</span>
+            </label>
+            <label className="switch-row">
+              <input type="checkbox" checked={showServedBy} onChange={(e) => setShowServedBy(e.target.checked)} />
+              <span>{t("settings.showServedBy")}</span>
+            </label>
+          </div>
+
+          <label className="switch-row">
+            <input type="checkbox" checked={showTip} onChange={(e) => setShowTip(e.target.checked)} />
+            <span>{t("settings.showTip")}</span>
+          </label>
+          <label className="switch-row">
+            <input type="checkbox" checked={showPaidStamp} onChange={(e) => setShowPaidStamp(e.target.checked)} />
+            <span>{t("settings.showPaidStamp")}</span>
+          </label>
+          <p className="tiny muted">{t("settings.paidStampGraphicHint")}</p>
+
+          <div className="row" style={{ marginTop: "1rem", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button className="btn" type="submit" disabled={busy}>
+              {busy ? t("common.saving") : t("common.save")}
+            </button>
+          </div>
+        </div>
+
+        <div className="bill-settings-preview">
+          <h3 className="settings-h" style={{ fontSize: "0.95rem", margin: "0 0 0.5rem" }}>
+            {t("settings.billPreview")}
+          </h3>
+          <p className="tiny muted" style={{ margin: "0 0 0.75rem" }}>
+            {t("settings.billDesignPreviewNote")}
+          </p>
+          <div
+            className="bill-design-preview-frame"
+            style={{ ["--preview-mm" as string]: `${paperWidth}mm` }}
+          >
+            {preview?.text ? (
+              <ThermalPreview
+                text={preview.text}
+                paperWidth={preview.paperWidth || paperWidth}
+                logoUrl={logoSrc || preview.logoUrl}
+                paidStampUrl={preview.paidStampUrl}
+                unpaidStampUrl={preview.unpaidStampUrl}
+              />
+            ) : previewErr ? (
+              <p className="tiny" style={{ color: "var(--danger)" }}>
+                {t("settings.billPreviewFailed")}
+              </p>
+            ) : (
+              <p className="tiny muted">{t("settings.billPreviewLoading")}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </form>
+  );
+}
+
+/* Tax & legal settings panel — restore when needed in UI
+function TaxBillingSection() {
+  const toast = useToast();
+  const t = useT();
+  const [taxEnabled, setTaxEnabled] = useState(false);
+  const [taxPercent, setTaxPercent] = useState("0");
+  const [ntn, setNtn] = useState("");
+  const [strn, setStrn] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api<{
+      billing?: { taxEnabled?: boolean; taxPercent?: number };
+      legal?: { ntn?: string; strn?: string };
+    }>("/system/settings")
+      .then((s) => {
+        setTaxEnabled(!!s.billing?.taxEnabled);
+        setTaxPercent(String(s.billing?.taxPercent ?? 0));
+        setNtn(s.legal?.ntn || "");
+        setStrn(s.legal?.strn || "");
+      })
+      .catch(() => undefined);
+  }, []);
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const pct = Math.max(0, Number(taxPercent) || 0);
+      await api("/system/settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          taxEnabled: taxEnabled ? "1" : "0",
+          taxPercent: pct,
+          ntn: ntn.trim(),
+          strn: strn.trim(),
+        }),
+      });
+      toast.push(t("settings.saved"), "ok");
+    } catch (err) {
+      toast.push(errMsg(err, t("settings.saveFailed")), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="panel panel-pad" onSubmit={save} id="tax-billing">
+      <h2 className="settings-h">{t("settings.taxBilling")}</h2>
+      <p className="tiny muted" style={{ marginTop: 0 }}>
+        {t("settings.taxBillingHint")}
+      </p>
+      <label className="switch-row">
+        <input type="checkbox" checked={taxEnabled} onChange={(e) => setTaxEnabled(e.target.checked)} />
+        <span>{t("settings.taxEnabled")}</span>
+      </label>
+      <div className="grid-2">
+        <div className="field">
+          <label htmlFor="tax-percent">{t("settings.taxPercent")}</label>
+          <input
+            id="tax-percent"
+            type="number"
+            min={0}
+            step="any"
+            value={taxPercent}
+            onChange={(e) => setTaxPercent(e.target.value)}
+            disabled={!taxEnabled}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="ntn">{t("settings.ntn")}</label>
+          <input id="ntn" value={ntn} onChange={(e) => setNtn(e.target.value)} maxLength={40} />
+        </div>
+      </div>
+      <div className="field">
+        <label htmlFor="strn">{t("settings.strn")}</label>
+        <input id="strn" value={strn} onChange={(e) => setStrn(e.target.value)} maxLength={40} />
+      </div>
+      <div className="form-actions">
+        <button type="submit" className="btn" disabled={busy}>
+          {busy ? t("common.saving") : t("common.save")}
+        </button>
+      </div>
+    </form>
+  );
+}
+*/
 
 function ServerSection({ canEdit }: { canEdit: boolean }) {
   const toast = useToast();
@@ -380,295 +746,16 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
   );
 }
 
-type BillDesignState = {
-  showLogo: boolean;
-  showName: boolean;
-  showTagline: boolean;
-  showAddress: boolean;
-  showPhone: boolean;
-  title: string;
-  showOrderBy: boolean;
-  showServedBy: boolean;
-  showCashier: boolean;
-  showTip: boolean;
-  showPaidStamp: boolean;
-  paidStampText: string;
-  paidStampBig: boolean;
-  footer: string;
+type PerHeadPkgRow = {
+  menuItemId: string;
+  qty: string;
+  /** Order-taker sets qty when adding per head on the bill. */
+  variable: boolean;
+  name?: string;
+  sellUnit?: string;
 };
 
-const DEFAULT_BILL_DESIGN: BillDesignState = {
-  showLogo: true,
-  showName: true,
-  showTagline: true,
-  showAddress: true,
-  showPhone: true,
-  title: "Customer Bill",
-  showOrderBy: true,
-  showServedBy: true,
-  showCashier: true,
-  showTip: true,
-  showPaidStamp: true,
-  paidStampText: "*** PAID ***",
-  paidStampBig: true,
-  footer: "Thanks for your Visit..",
-};
-
-function BillDesignSection() {
-  const toast = useToast();
-  const t = useT();
-  const { logoSrc } = useBrand();
-  const [d, setD] = useState<BillDesignState>(DEFAULT_BILL_DESIGN);
-  const [paperWidth, setPaperWidth] = useState<58 | 72 | 80 | 112>(80);
-  const [busy, setBusy] = useState(false);
-  const [preview, setPreview] = useState<{
-    text: string;
-    paperWidth: number;
-    logoUrl?: string | null;
-    paidStampUrl?: string | null;
-    unpaidStampUrl?: string | null;
-  } | null>(null);
-
-  useEffect(() => {
-    api<{
-      print: { bill: Partial<BillDesignState> };
-    }>("/system/settings")
-      .then((s) => {
-        const b = s.print?.bill || {};
-        setD({
-          showLogo: b.showLogo !== false,
-          showName: b.showName !== false,
-          showTagline: b.showTagline !== false,
-          showAddress: b.showAddress !== false,
-          showPhone: b.showPhone !== false,
-          title: b.title || "Customer Bill",
-          showOrderBy: b.showOrderBy !== false,
-          showServedBy: b.showServedBy !== false,
-          showCashier: b.showCashier !== false,
-          showTip: b.showTip !== false,
-          showPaidStamp: b.showPaidStamp !== false,
-          paidStampText: b.paidStampText || "*** PAID ***",
-          paidStampBig: b.paidStampBig !== false,
-          footer: b.footer || "Thanks for your Visit..",
-        });
-      })
-      .catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
-    const handle = window.setTimeout(() => {
-      api<{
-        text: string;
-        paperWidth: number;
-        logoUrl?: string | null;
-        paidStampUrl?: string | null;
-        unpaidStampUrl?: string | null;
-      }>("/system/bill-preview", {
-        method: "POST",
-        body: JSON.stringify({
-          showLogo: d.showLogo ? "1" : "0",
-          showName: d.showName ? "1" : "0",
-          showTagline: d.showTagline ? "1" : "0",
-          showAddress: d.showAddress ? "1" : "0",
-          showPhone: d.showPhone ? "1" : "0",
-          title: d.title,
-          showOrderBy: d.showOrderBy ? "1" : "0",
-          showServedBy: d.showServedBy ? "1" : "0",
-          showCashier: d.showCashier ? "1" : "0",
-          showTip: d.showTip ? "1" : "0",
-          showPaidStamp: d.showPaidStamp ? "1" : "0",
-          paidStampText: d.paidStampText,
-          paidStampBig: d.paidStampBig ? "1" : "0",
-          footer: d.footer,
-          paperWidth,
-        }),
-      })
-        .then(setPreview)
-        .catch(() => undefined);
-    }, 200);
-    return () => window.clearTimeout(handle);
-  }, [d, paperWidth]);
-
-  function patch(p: Partial<BillDesignState>) {
-    setD((prev) => ({ ...prev, ...p }));
-  }
-
-  async function save(e: FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      await api("/system/settings", {
-        method: "PATCH",
-        body: JSON.stringify({
-          billShowLogo: d.showLogo ? "1" : "0",
-          billShowName: d.showName ? "1" : "0",
-          billShowTagline: d.showTagline ? "1" : "0",
-          billShowAddress: d.showAddress ? "1" : "0",
-          billShowPhone: d.showPhone ? "1" : "0",
-          billTitle: d.title.trim() || "Customer Bill",
-          billShowOrderBy: d.showOrderBy ? "1" : "0",
-          billShowServedBy: d.showServedBy ? "1" : "0",
-          billShowCashier: d.showCashier ? "1" : "0",
-          billShowTip: d.showTip ? "1" : "0",
-          billShowPaidStamp: d.showPaidStamp ? "1" : "0",
-          billPaidStampText: d.paidStampText.trim() || "*** PAID ***",
-          billPaidStampBig: d.paidStampBig ? "1" : "0",
-          billFooter: d.footer,
-        }),
-      });
-      toast.push(t("settings.saved"), "ok");
-    } catch (err) {
-      toast.push(errMsg(err, t("settings.saveFailed")), "err");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form className="panel panel-pad bill-design" onSubmit={save} style={{ marginBottom: "1rem" }}>
-      <h2 className="settings-h">{t("settings.billDesign")}</h2>
-      <p className="muted" style={{ marginTop: 0 }}>
-        {t("settings.billDesignHint")}
-      </p>
-
-      <div className="bill-design-grid">
-        <div>
-          <h3 className="settings-h" style={{ fontSize: "1rem" }}>
-            {t("settings.billHeader")}
-          </h3>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showLogo} onChange={(e) => patch({ showLogo: e.target.checked })} />
-            <span>
-              {t("settings.showLogo")}
-              {!logoSrc ? <small className="muted"> — {t("settings.uploadLogoFirst")}</small> : null}
-            </span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showName} onChange={(e) => patch({ showName: e.target.checked })} />
-            <span>{t("settings.showRestaurantName")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showTagline} onChange={(e) => patch({ showTagline: e.target.checked })} />
-            <span>{t("settings.showTagline")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showAddress} onChange={(e) => patch({ showAddress: e.target.checked })} />
-            <span>{t("settings.showAddress")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showPhone} onChange={(e) => patch({ showPhone: e.target.checked })} />
-            <span>{t("settings.showPhone")}</span>
-          </label>
-
-          <div className="field">
-            <label>{t("settings.billTitle")}</label>
-            <input value={d.title} onChange={(e) => patch({ title: e.target.value })} maxLength={40} />
-          </div>
-
-          <h3 className="settings-h" style={{ fontSize: "1rem" }}>
-            {t("settings.billFields")}
-          </h3>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showOrderBy} onChange={(e) => patch({ showOrderBy: e.target.checked })} />
-            <span>{t("settings.showOrderBy")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showServedBy} onChange={(e) => patch({ showServedBy: e.target.checked })} />
-            <span>{t("settings.showServedBy")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showCashier} onChange={(e) => patch({ showCashier: e.target.checked })} />
-            <span>{t("settings.showCashier")}</span>
-          </label>
-          <label className="switch-row">
-            <input type="checkbox" checked={d.showTip} onChange={(e) => patch({ showTip: e.target.checked })} />
-            <span>{t("settings.showTip")}</span>
-          </label>
-
-          <h3 className="settings-h" style={{ fontSize: "1rem" }}>
-            {t("settings.paidStamp")}
-          </h3>
-          <label className="switch-row">
-            <input
-              type="checkbox"
-              checked={d.showPaidStamp}
-              onChange={(e) => patch({ showPaidStamp: e.target.checked })}
-            />
-            <span>{t("settings.showPaidStamp")}</span>
-          </label>
-          {d.showPaidStamp ? (
-            <div className="paid-stamp-sample" aria-hidden>
-              <img src={brandingUrl("/branding/paid-stamp.png?v=2")} alt="" />
-              <img src={brandingUrl("/branding/unpaid-stamp.png?v=2")} alt="" />
-              <span className="tiny muted">{t("settings.paidStampGraphicHint")}</span>
-            </div>
-          ) : null}
-
-          <div className="field">
-            <label>{t("settings.billFooter")}</label>
-            <input value={d.footer} onChange={(e) => patch({ footer: e.target.value })} maxLength={120} />
-          </div>
-
-          <p className="tiny muted">{t("settings.billLogoHint")}</p>
-
-          <div className="form-footer">
-            <button className="btn" type="submit" disabled={busy}>
-              {busy ? t("common.saving") : t("common.save")}
-            </button>
-          </div>
-        </div>
-
-        <div>
-          <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem", gap: "0.5rem", flexWrap: "wrap" }}>
-            <h3 className="settings-h" style={{ fontSize: "1rem", margin: 0 }}>
-              {t("settings.billPreview")}
-            </h3>
-            <div className="paper-size-tabs" role="tablist" aria-label={t("settings.paperWidth")}>
-              {(
-                [
-                  [58, "settings.paper58Narrow"],
-                  [72, "settings.paper72"],
-                  [80, "settings.paper80Standard"],
-                  [112, "settings.paper112"],
-                ] as const
-              ).map(([mm, key]) => (
-                <button
-                  key={mm}
-                  type="button"
-                  className={paperWidth === mm ? "active" : undefined}
-                  onClick={() => setPaperWidth(mm)}
-                >
-                  {t(key)}
-                </button>
-              ))}
-            </div>
-          </div>
-          <p className="tiny muted" style={{ marginTop: 0 }}>
-            {t("settings.paperSizesHint")}
-          </p>
-          <div className="bill-design-preview-frame" style={{ ["--preview-mm" as string]: `${paperWidth}mm` }}>
-            {preview?.text ? (
-              <ThermalPreview
-                text={preview.text}
-                paperWidth={preview.paperWidth || paperWidth}
-                logoUrl={preview.logoUrl}
-                paidStampUrl={preview.paidStampUrl}
-                unpaidStampUrl={preview.unpaidStampUrl}
-              />
-            ) : (
-              <p className="tiny muted">{t("settings.billPreviewLoading")}</p>
-            )}
-          </div>
-        </div>
-      </div>
-    </form>
-  );
-}
-
-function brandingUrl(path: string) {
-  const origin = serverOrigin() || (typeof location !== "undefined" ? location.origin : "");
-  return `${origin}${path.startsWith("/") ? path : `/${path}`}`;
-}
+type MenuPick = { id: string; name: string; sellUnit: string; category?: string | null; kind?: string; active?: boolean };
 
 function TipPrintSection() {
   const toast = useToast();
@@ -679,12 +766,36 @@ function TipPrintSection() {
   const [perHeadEnabled, setPerHeadEnabled] = useState(true);
   const [perHeadAmount, setPerHeadAmount] = useState("100");
   const [perHeadLabel, setPerHeadLabel] = useState("Per head");
+  const [perHeadPackage, setPerHeadPackage] = useState<PerHeadPkgRow[]>([]);
+  const [menuItems, setMenuItems] = useState<MenuPick[]>([]);
+  const [pkgSearch, setPkgSearch] = useState("");
   const [busy, setBusy] = useState(false);
+
+  const usedPkgIds = useMemo(() => new Set(perHeadPackage.map((p) => p.menuItemId).filter(Boolean)), [perHeadPackage]);
+  const pkgSearchHits = useMemo(() => {
+    if (!perHeadEnabled || perHeadPackage.length >= 12) return [];
+    return menuItems
+      .filter((m) => !usedPkgIds.has(m.id) && matchesSearch(pkgSearch, m.name, m.category, m.sellUnit))
+      .slice(0, 12);
+  }, [menuItems, usedPkgIds, pkgSearch, perHeadEnabled, perHeadPackage.length]);
 
   useEffect(() => {
     api<{
       tip: { split: string };
-      billing?: { perHead?: { enabled: boolean; amount: number; label: string } };
+      billing?: {
+        perHead?: {
+          enabled: boolean;
+          amount: number;
+          label: string;
+          items?: {
+            menuItemId: string;
+            name: string;
+            sellUnit: string;
+            qty: number;
+            variable: boolean;
+          }[];
+        };
+      };
       print: {
         kot: { showOrderBy: boolean; footer: string };
       };
@@ -698,8 +809,20 @@ function TipPrintSection() {
           setPerHeadEnabled(ph.enabled !== false);
           setPerHeadAmount(String(ph.amount ?? 100));
           setPerHeadLabel(ph.label || "Per head");
+          setPerHeadPackage(
+            (ph.items ?? []).map((i) => ({
+              menuItemId: i.menuItemId,
+              qty: String(i.qty),
+              variable: !!i.variable,
+              name: i.name,
+              sellUnit: i.sellUnit,
+            }))
+          );
         }
       })
+      .catch(() => undefined);
+    api<MenuPick[]>("/menu")
+      .then((rows) => setMenuItems(rows.filter((m) => m.active !== false)))
       .catch(() => undefined);
   }, []);
 
@@ -708,6 +831,16 @@ function TipPrintSection() {
     setBusy(true);
     try {
       const amount = Math.max(0, Number(perHeadAmount) || 0);
+      const packagePayload = perHeadPackage
+        .filter((p) => p.menuItemId)
+        .map((p) => ({
+          menuItemId: p.menuItemId,
+          qty: Math.max(0.001, Number(p.qty) || 0),
+          variable: !!p.variable,
+        }));
+      if (packagePayload.filter((p) => p.variable).length > 1) {
+        throw new Error(t("settings.perHeadOneVariable"));
+      }
       await api("/system/settings", {
         method: "PATCH",
         body: JSON.stringify({
@@ -717,6 +850,7 @@ function TipPrintSection() {
           perHeadEnabled: perHeadEnabled ? "1" : "0",
           perHeadAmount: amount,
           perHeadLabel: perHeadLabel.trim() || "Per head",
+          perHeadPackage: packagePayload,
         }),
       });
       toast.push(t("settings.saved"), "ok");
@@ -780,6 +914,129 @@ function TipPrintSection() {
       </div>
 
       <h3 className="settings-h" style={{ fontSize: "1rem" }}>
+        {t("settings.perHeadPackage")}
+      </h3>
+      <p className="muted" style={{ marginTop: 0 }}>
+        {t("settings.perHeadPackageHint")}
+      </p>
+      <div style={{ display: "grid", gap: "0.5rem", marginBottom: "0.75rem" }}>
+        {perHeadPackage.map((row, idx) => {
+          const unit =
+            row.sellUnit ||
+            menuItems.find((m) => m.id === row.menuItemId)?.sellUnit ||
+            "PCS";
+          const name = row.name || menuItems.find((m) => m.id === row.menuItemId)?.name || "—";
+          return (
+            <div
+              key={row.menuItemId || `row-${idx}`}
+              className="row"
+              style={{ gap: "0.5rem", flexWrap: "wrap", alignItems: "flex-end" }}
+            >
+              <div className="field" style={{ flex: "1 1 12rem", margin: 0 }}>
+                <label>{t("settings.perHeadPickMenu")}</label>
+                <div className="field-ctrl" style={{ padding: "0.55rem 0.75rem", fontWeight: 600 }}>
+                  {name}
+                  <span className="tiny muted" style={{ marginLeft: "0.4rem", fontWeight: 500 }}>
+                    ({unitLabel(unit)})
+                  </span>
+                </div>
+              </div>
+              <div className="field" style={{ width: "7rem", margin: 0 }}>
+                <label>
+                  {t("settings.perHeadDefaultQty")} ({unitLabel(unit)})
+                </label>
+                <input
+                  type="number"
+                  min={0.001}
+                  step="any"
+                  value={row.qty}
+                  disabled={!perHeadEnabled}
+                  onChange={(e) =>
+                    setPerHeadPackage((prev) =>
+                      prev.map((p, i) => (i === idx ? { ...p, qty: e.target.value } : p))
+                    )
+                  }
+                />
+              </div>
+              <label className="switch-row" style={{ marginBottom: "0.35rem" }}>
+                <input
+                  type="checkbox"
+                  checked={row.variable}
+                  disabled={!perHeadEnabled}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setPerHeadPackage((prev) =>
+                      prev.map((p, i) => ({
+                        ...p,
+                        variable: i === idx ? on : on ? false : p.variable,
+                      }))
+                    );
+                  }}
+                />
+                <span className="tiny">{t("settings.perHeadVariable")}</span>
+              </label>
+              <button
+                type="button"
+                className="btn ghost"
+                disabled={!perHeadEnabled}
+                onClick={() => setPerHeadPackage((prev) => prev.filter((_, i) => i !== idx))}
+                aria-label={t("common.remove")}
+              >
+                ×
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      {perHeadEnabled && perHeadPackage.length < 12 ? (
+        <div style={{ marginBottom: "1rem" }}>
+          <SearchField
+            value={pkgSearch}
+            onChange={setPkgSearch}
+            placeholder={t("settings.perHeadSearchMenu")}
+          />
+          {pkgSearch.trim() ? (
+            <div className="waiter-menu" style={{ marginTop: "0.5rem", maxHeight: "14rem", overflow: "auto" }}>
+              {pkgSearchHits.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className="waiter-item"
+                  onClick={() => {
+                    setPerHeadPackage((prev) => [
+                      ...prev,
+                      {
+                        menuItemId: m.id,
+                        qty: "1",
+                        variable: false,
+                        name: m.name,
+                        sellUnit: m.sellUnit,
+                      },
+                    ]);
+                    setPkgSearch("");
+                  }}
+                >
+                  <strong>{m.name}</strong>
+                  <span className="tiny muted">
+                    {unitLabel(m.sellUnit)}
+                    {m.kind && m.kind !== "NORMAL" ? ` · ${m.kind}` : ""}
+                    {m.category ? ` · ${m.category}` : ""}
+                  </span>
+                </button>
+              ))}
+              {!pkgSearchHits.length ? (
+                <div className="empty">{t("settings.perHeadNoMenuMatch")}</div>
+              ) : null}
+            </div>
+          ) : (
+            <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
+              {t("settings.perHeadSearchHint")}
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      <h3 className="settings-h" style={{ fontSize: "1rem" }}>
         {t("settings.kotFields")}
       </h3>
       <label className="switch-row">
@@ -800,18 +1057,74 @@ function TipPrintSection() {
   );
 }
 
+function UsbDevicesList({
+  devices,
+  emptyLabel,
+}: {
+  devices: UsbDeviceRow[];
+  emptyLabel?: string;
+}) {
+  const t = useT();
+  if (!devices.length) {
+    return <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>{emptyLabel || t("settings.noUsbDevices")}</p>;
+  }
+  const problems = devices.filter((d) => d.problem).length;
+  return (
+    <div style={{ marginTop: "0.35rem" }}>
+      <p className="tiny" style={{ margin: "0 0 0.25rem" }}>
+        <strong>{t("settings.usbDevices")}: </strong>
+        {devices.length}
+        {problems > 0 ? (
+          <span className="unpaid" style={{ marginLeft: "0.35rem" }}>
+            · {t("settings.usbNeedDriver", { n: problems })}
+          </span>
+        ) : null}
+      </p>
+      <ul className="tiny" style={{ margin: 0, paddingLeft: "1.1rem" }}>
+        {devices.map((d) => (
+          <li key={`${d.instanceId || d.name}-${d.status}`} style={{ marginBottom: "0.15rem" }}>
+            <span className={d.problem ? "unpaid" : undefined} style={{ fontWeight: d.problem ? 600 : undefined }}>
+              {d.name}
+            </span>
+            {d.className ? ` · ${d.className}` : ""}
+            {d.status ? ` · ${d.status}` : ""}
+            {d.problem ? ` — ${t("settings.usbUnknownHint")}` : ""}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function PrintersSection() {
   const toast = useToast();
   const t = useT();
   const ask = useConfirm();
   const [printers, setPrinters] = useState<Printer[]>([]);
+  const [agents, setAgents] = useState<PrintAgentRow[]>([]);
+  const [agentLabels, setAgentLabels] = useState<Record<string, string>>({});
   const [page, setPage] = useState(1);
   const [system, setSystem] = useState<SystemPrinter[]>([]);
+  const [serverDevices, setServerDevices] = useState<UsbDeviceRow[]>([]);
   const [edit, setEdit] = useState<(Omit<Printer, "id"> & { id?: string }) | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setPrinters(await api<Printer[]>("/printers"));
+      const [p, a, devices] = await Promise.all([
+        api<Printer[]>("/printers"),
+        api<PrintAgentRow[]>("/print-agents").catch(() => [] as PrintAgentRow[]),
+        api<UsbDeviceRow[]>("/printers/devices").catch(() => [] as UsbDeviceRow[]),
+      ]);
+      setPrinters(p);
+      setAgents(a);
+      setServerDevices(devices);
+      setAgentLabels((prev) => {
+        const next: Record<string, string> = {};
+        for (const row of a) {
+          next[row.id] = prev[row.id] ?? (row.displayName || row.hostname);
+        }
+        return next;
+      });
     } catch (e) {
       toast.push(errMsg(e, t("settings.printersLoadFailed")), "err");
     }
@@ -825,7 +1138,7 @@ function PrintersSection() {
   }, [load]);
 
   async function openEditor(p?: Printer) {
-    setEdit(p ? { ...p } : { ...EMPTY_PRINTER });
+    setEdit(p ? { ...p, printsOther: !!p.printsOther } : { ...EMPTY_PRINTER });
     if (p?.kind === "AGENT") {
       setSystem([]);
       return;
@@ -865,6 +1178,7 @@ function PrintersSection() {
     if (!(await ask({ title: t("settings.removePrinter"), body: t("settings.removePrinterConfirm", { name: p.name }), danger: true }))) return;
     try {
       await api(`/printers/${p.id}`, { method: "DELETE" });
+      toast.push(t("settings.printerDeactivated"), "ok");
       void load();
     } catch (err) {
       toast.push(errMsg(err, t("common.failed")), "err");
@@ -877,6 +1191,24 @@ function PrintersSection() {
       void load();
     } catch (err) {
       toast.push(errMsg(err, t("common.failed")), "err");
+    }
+  }
+
+  async function saveAgentLabel(agentId: string) {
+    const displayName = (agentLabels[agentId] || "").trim();
+    if (!displayName) {
+      toast.push(t("settings.agentLabelRequired"), "err");
+      return;
+    }
+    try {
+      await api(`/print-agents/${agentId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ displayName }),
+      });
+      toast.push(t("settings.agentLabelSaved"), "ok");
+      void load();
+    } catch (err) {
+      toast.push(errMsg(err, t("settings.saveFailed")), "err");
     }
   }
 
@@ -905,6 +1237,69 @@ function PrintersSection() {
           {t("settings.addPrinter")}
         </button>
       </div>
+      <div style={{ marginTop: "0.75rem" }}>
+        <h3 className="settings-h" style={{ margin: 0, fontSize: "1rem" }}>
+          {t("settings.cashierPcs")}
+        </h3>
+        <p className="tiny muted" style={{ margin: "0.25rem 0 0.5rem" }}>
+          {t("settings.cashierPcsHint")}
+        </p>
+        {!agents.length ? (
+          <p className="tiny muted">{t("settings.noAgents")}</p>
+        ) : (
+          <div style={{ display: "grid", gap: "0.65rem" }}>
+            {agents.map((a) => (
+              <div
+                key={a.id}
+                style={{
+                  border: "1px solid var(--border, #2a3544)",
+                  borderRadius: 8,
+                  padding: "0.65rem 0.75rem",
+                }}
+              >
+                <div className="row" style={{ flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+                  <span className={a.online ? "paid" : "muted"} style={{ fontWeight: 600 }}>
+                    {a.online ? t("settings.agentOnline") : t("settings.agentOffline")}
+                  </span>
+                  <span className="tiny muted">{a.hostname}</span>
+                </div>
+                <div className="row" style={{ marginTop: "0.45rem", flexWrap: "wrap", gap: "0.4rem", alignItems: "flex-end" }}>
+                  <div className="field" style={{ margin: 0, flex: "1 1 180px", minWidth: 160 }}>
+                    <label className="tiny">{t("settings.agentLabel")}</label>
+                    <input
+                      value={agentLabels[a.id] ?? a.displayName}
+                      onChange={(e) => setAgentLabels((prev) => ({ ...prev, [a.id]: e.target.value }))}
+                      placeholder={t("settings.agentLabelPh")}
+                    />
+                  </div>
+                  <button type="button" className="btn sm" onClick={() => void saveAgentLabel(a.id)}>
+                    {t("settings.saveAgentLabel")}
+                  </button>
+                </div>
+                <p className="tiny muted" style={{ margin: "0.4rem 0 0" }}>
+                  <strong>{t("settings.agentPrinters")}: </strong>
+                  {a.printers.filter((p) => p.active).length
+                    ? a.printers
+                        .filter((p) => p.active)
+                        .map((p) => `${p.name}${p.printsBill ? ` (${t("settings.bill")})` : ""}`)
+                        .join(" · ")
+                    : t("settings.agentNoUsb")}
+                </p>
+                <UsbDevicesList devices={a.devices || []} />
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ marginTop: "0.85rem" }}>
+          <h3 className="settings-h" style={{ margin: 0, fontSize: "0.95rem" }}>
+            {t("settings.serverUsbDevices")}
+          </h3>
+          <p className="tiny muted" style={{ margin: "0.25rem 0 0.4rem" }}>
+            {t("settings.serverUsbDevicesHint")}
+          </p>
+          <UsbDevicesList devices={serverDevices} emptyLabel={t("settings.noUsbDevices")} />
+        </div>
+      </div>
       <div className="table-wrap wide" style={{ marginTop: "0.75rem" }}>
       <table>
         <thead>
@@ -915,19 +1310,23 @@ function PrintersSection() {
             <th>{t("settings.target")}</th>
             <th>{t("settings.kitchenSlip")}</th>
             <th>{t("settings.bill")}</th>
+            <th>{t("settings.otherPrint")}</th>
             <th>{t("common.active")}</th>
             <th />
           </tr>
         </thead>
         <tbody>
           {pageRows.map((p) => (
-            <tr key={p.id}>
+            <tr key={p.id} style={p.active ? undefined : { opacity: 0.55 }}>
               <td>
                 {p.name}
+                {!p.active && <div className="tiny muted">{t("settings.printerDeactivated")}</div>}
                 {p.categories && <div className="tiny muted">{t("settings.only")} {p.categories}</div>}
                 {p.kind === "AGENT" && p.agent && (
                   <div className="tiny muted">
                     {p.agent.online ? t("settings.agentOnline") : t("settings.agentOffline")} · {p.agent.displayName}
+                    {" · "}
+                    {p.agent.hostname}
                   </div>
                 )}
               </td>
@@ -943,6 +1342,15 @@ function PrintersSection() {
               </td>
               <td>
                 <input type="checkbox" checked={p.printsBill} onChange={(e) => void toggle(p, { printsBill: e.target.checked })} />
+              </td>
+              <td>
+                <input
+                  type="checkbox"
+                  checked={!!p.printsOther}
+                  disabled={p.kind !== "WINDOWS"}
+                  title={p.kind !== "WINDOWS" ? t("settings.otherPrintWindowsOnly") : undefined}
+                  onChange={(e) => void toggle(p, { printsOther: e.target.checked })}
+                />
               </td>
               <td>
                 <input type="checkbox" checked={p.active} onChange={(e) => void toggle(p, { active: e.target.checked })} />
@@ -962,7 +1370,7 @@ function PrintersSection() {
           ))}
           {!printers.length && (
             <tr>
-              <td colSpan={8} className="empty">
+              <td colSpan={9} className="empty">
                 {t("settings.noPrinters")}
               </td>
             </tr>
@@ -1004,7 +1412,18 @@ function PrintersSection() {
                   )}
                 </>
               ) : (
-                <select value={edit.kind} onChange={(e) => setEdit({ ...edit, kind: e.target.value as Printer["kind"], target: "" })}>
+                <select
+                  value={edit.kind}
+                  onChange={(e) => {
+                    const kind = e.target.value as Printer["kind"];
+                    setEdit({
+                      ...edit,
+                      kind,
+                      target: "",
+                      printsOther: kind === "WINDOWS" ? edit.printsOther : false,
+                    });
+                  }}
+                >
                   <option value="NETWORK">{t("settings.lan")}</option>
                   <option value="WINDOWS">{t("settings.usbServer")}</option>
                   <option value="FILE">{t("settings.previewFile")}</option>
@@ -1055,7 +1474,7 @@ function PrintersSection() {
                 <option value={112}>{t("settings.paper112")}</option>
               </select>
             </div>
-            <div className="row">
+            <div className="row" style={{ flexWrap: "wrap", gap: "0.75rem" }}>
               <label className="check">
                 <input type="checkbox" checked={edit.printsKot} onChange={(e) => setEdit({ ...edit, printsKot: e.target.checked })} /> {t("settings.kitchenSlip")}
               </label>
@@ -1063,9 +1482,21 @@ function PrintersSection() {
                 <input type="checkbox" checked={edit.printsBill} onChange={(e) => setEdit({ ...edit, printsBill: e.target.checked })} /> {t("settings.bill")}
               </label>
               <label className="check">
+                <input
+                  type="checkbox"
+                  checked={!!edit.printsOther}
+                  disabled={edit.kind !== "WINDOWS"}
+                  onChange={(e) => setEdit({ ...edit, printsOther: e.target.checked })}
+                />{" "}
+                {t("settings.otherPrint")}
+              </label>
+              <label className="check">
                 <input type="checkbox" checked={edit.active} onChange={(e) => setEdit({ ...edit, active: e.target.checked })} /> {t("common.active")}
               </label>
             </div>
+            {edit.kind === "WINDOWS" && (
+              <p className="tiny muted">{t("settings.otherPrintHint")}</p>
+            )}
             <div className="field">
               <label>{t("settings.categoriesHint")}</label>
               <input
@@ -1095,7 +1526,14 @@ function JobsSection() {
   const t = useT();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [page, setPage] = useState(1);
-  const [preview, setPreview] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{
+    text: string;
+    paperWidth?: number;
+    logoUrl?: string | null;
+    paidStampUrl?: string | null;
+    unpaidStampUrl?: string | null;
+    cancelledStampUrl?: string | null;
+  } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -1126,8 +1564,15 @@ function JobsSection() {
 
   async function show(id: string) {
     try {
-      const r = await api<{ text: string }>(`/print/jobs/${id}/preview`);
-      setPreview(r.text);
+      const r = await api<{
+        text: string;
+        paperWidth?: number;
+        logoUrl?: string | null;
+        paidStampUrl?: string | null;
+        unpaidStampUrl?: string | null;
+        cancelledStampUrl?: string | null;
+      }>(`/print/jobs/${id}/preview`);
+      setPreview(r);
     } catch (e) {
       toast.push(errMsg(e, t("kot.previewFailed")), "err");
     }
@@ -1201,266 +1646,20 @@ function JobsSection() {
       <Pagination page={page} pageSize={PAGE_SIZE} total={jobs.length} onChange={setPage} />
       <Modal open={preview != null} title={t("settings.printPreview")} onClose={() => setPreview(null)}>
         <div className="modal-scroll">
-          <pre className="print-preview">{preview}</pre>
+          {preview ? (
+            <div className="bill-design-preview-frame" style={{ ["--preview-mm" as string]: `${preview.paperWidth || 80}mm` }}>
+              <ThermalPreview
+                text={preview.text}
+                paperWidth={preview.paperWidth || 80}
+                logoUrl={preview.logoUrl}
+                paidStampUrl={preview.paidStampUrl}
+                unpaidStampUrl={preview.unpaidStampUrl}
+                cancelledStampUrl={preview.cancelledStampUrl}
+              />
+            </div>
+          ) : null}
         </div>
       </Modal>
-    </div>
-  );
-}
-
-function TablesSection() {
-  const toast = useToast();
-  const t = useT();
-  const [tables, setTables] = useState<Table[]>([]);
-  const [partitions, setPartitions] = useState<Partition[]>([]);
-  const [name, setName] = useState("");
-  const [partitionId, setPartitionId] = useState("");
-  const [partName, setPartName] = useState("");
-
-  const load = useCallback(async () => {
-    try {
-      const [all, parts] = await Promise.all([
-        api<Table[]>("/tables/all"),
-        api<Partition[]>("/tables/partitions"),
-      ]);
-      setTables(all);
-      setPartitions(parts);
-      setPartitionId((prev) => prev || parts[0]?.id || "");
-    } catch (e) {
-      toast.push(errMsg(e, t("settings.printersLoadFailed")), "err");
-    }
-  }, [toast, t]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  async function addPartition(e: FormEvent) {
-    e.preventDefault();
-    if (!partName.trim()) return;
-    try {
-      const p = await api<Partition>("/tables/partitions", {
-        method: "POST",
-        body: JSON.stringify({ name: partName.trim(), sortOrder: partitions.length }),
-      });
-      setPartName("");
-      setPartitionId(p.id);
-      void load();
-    } catch (err) {
-      toast.push(errMsg(err, t("common.failed")), "err");
-    }
-  }
-
-  async function setPartitionActive(p: Partition, active: boolean) {
-    try {
-      await api(`/tables/partitions/${p.id}`, { method: "PATCH", body: JSON.stringify({ active }) });
-      void load();
-    } catch (err) {
-      toast.push(errMsg(err, t("common.failed")), "err");
-    }
-  }
-
-  async function add(e: FormEvent) {
-    e.preventDefault();
-    if (!name.trim()) return;
-    if (!partitionId) {
-      toast.push(t("settings.pickPartition"), "err");
-      return;
-    }
-    try {
-      await api("/tables", {
-        method: "POST",
-        body: JSON.stringify({ name: name.trim(), partitionId, sortOrder: tables.length + 1 }),
-      });
-      setName("");
-      void load();
-    } catch (err) {
-      toast.push(errMsg(err, t("common.failed")), "err");
-    }
-  }
-
-  async function setActive(tbl: Table, active: boolean) {
-    try {
-      await api(`/tables/${tbl.id}`, { method: "PATCH", body: JSON.stringify({ active }) });
-      void load();
-    } catch (err) {
-      toast.push(errMsg(err, t("common.failed")), "err");
-    }
-  }
-
-  return (
-    <div className="panel panel-pad settings-block">
-      <h2 className="settings-h">{t("settings.tables")}</h2>
-
-      <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.95rem" }}>{t("settings.partitions")}</h3>
-      <form className="row tables-add" onSubmit={addPartition}>
-        <div className="field" style={{ margin: 0, flex: "1 1 180px" }}>
-          <input
-            value={partName}
-            onChange={(e) => setPartName(e.target.value)}
-            placeholder={t("settings.partitionNamePh")}
-          />
-        </div>
-        <button className="btn ghost" type="submit" style={{ minHeight: "2.6rem" }}>
-          {t("settings.addPartition")}
-        </button>
-      </form>
-      <div className="chips" style={{ marginTop: "0.6rem", marginBottom: "1rem" }}>
-        {partitions.map((p) => (
-          <span key={p.id} className={`chip ${p.active !== false ? "active" : ""}`}>
-            {p.name}
-            <button
-              type="button"
-              className="chip-x"
-              title={p.active !== false ? t("settings.hideTitles") : t("settings.showTitles")}
-              onClick={() => void setPartitionActive(p, p.active === false)}
-            >
-              {p.active !== false ? "×" : "+"}
-            </button>
-          </span>
-        ))}
-      </div>
-
-      <form className="row tables-add" onSubmit={add}>
-        <div className="field" style={{ margin: 0, flex: "1 1 140px" }}>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("settings.tableNamePh")} />
-        </div>
-        <div className="field" style={{ margin: 0, flex: "1 1 160px" }}>
-          <select value={partitionId} onChange={(e) => setPartitionId(e.target.value)} required>
-            <option value="">{t("settings.pickPartition")}</option>
-            {partitions.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <button className="btn" type="submit" style={{ minHeight: "2.6rem" }} disabled={!partitionId}>
-          {t("settings.addTable")}
-        </button>
-      </form>
-      <div className="chips" style={{ marginTop: "0.75rem" }}>
-        {tables.map((tbl) => (
-          <span key={tbl.id} className={`chip ${tbl.active ? "active" : ""}`}>
-            {tbl.partition?.name ? `${tbl.partition.name} · ` : ""}
-            {tbl.name}
-            <button
-              type="button"
-              className="chip-x"
-              title={tbl.active ? t("settings.hideTitles") : t("settings.showTitles")}
-              onClick={() => void setActive(tbl, !tbl.active)}
-            >
-              {tbl.active ? "×" : "+"}
-            </button>
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function BackupSection() {
-  const toast = useToast();
-  const t = useT();
-  const ask = useConfirm();
-  const [dir, setDir] = useState("");
-  const [files, setFiles] = useState<Backup[]>([]);
-  const [page, setPage] = useState(1);
-  const [busy, setBusy] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      const r = await api<{ dir: string; files: Backup[] }>("/system/backups");
-      setDir(r.dir);
-      setFiles(r.files);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  async function backupNow() {
-    setBusy(true);
-    try {
-      await api("/system/backups", { method: "POST", body: "{}" });
-      toast.push(t("settings.backupCreated"), "ok");
-      void load();
-    } catch (e) {
-      toast.push(errMsg(e, t("common.failed")), "err");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function restore(b: Backup) {
-    if (!(await ask({ title: t("settings.restoreTitle"), body: t("settings.restoreConfirm", { file: b.file }), danger: true, confirmLabel: t("settings.restore") }))) return;
-    setBusy(true);
-    try {
-      await api(`/system/backups/${encodeURIComponent(b.file)}/restore`, { method: "POST", body: "{}" });
-      toast.push(t("settings.restoreOk"), "ok");
-      setTimeout(() => location.reload(), 1500);
-    } catch (e) {
-      toast.push(errMsg(e, t("common.failed")), "err");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="panel panel-pad settings-block">
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <div>
-          <h2 className="settings-h" style={{ margin: 0 }}>{t("settings.backup")}</h2>
-          <p className="tiny muted" style={{ margin: "0.2rem 0 0" }}>
-            {t("settings.backupHint")} <code>{dir}</code>
-          </p>
-        </div>
-        <button type="button" className="btn sm" disabled={busy} onClick={() => void backupNow()}>
-          {busy ? t("settings.working") : t("settings.backupNow")}
-        </button>
-      </div>
-      <div className="table-wrap" style={{ marginTop: "0.75rem" }}>
-      <table>
-        <thead>
-          <tr>
-            <th>{t("settings.file")}</th>
-            <th>{t("settings.size")}</th>
-            <th>{t("settings.date")}</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {paginate(files, page, PAGE_SIZE).map((b) => (
-            <tr key={b.file}>
-              <td className="tiny">
-                {b.file}{" "}
-                <span className={`badge ${b.kind === "monthly" ? "paid" : "ready"}`}>
-                  {t(BACKUP_KIND_KEY[b.kind || (b.auto ? "daily" : "manual")] ?? "settings.kindManual")}
-                </span>
-              </td>
-              <td>{(b.size / 1024).toFixed(0)} KB</td>
-              <td className="tiny">{new Date(b.createdAt).toLocaleString("en-PK")}</td>
-              <td>
-                <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void restore(b)}>
-                  {t("settings.restore")}
-                </button>
-              </td>
-            </tr>
-          ))}
-          {!files.length && (
-            <tr>
-              <td colSpan={4} className="empty">
-                {t("settings.noBackups")}
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-      </div>
-      <Pagination page={page} pageSize={PAGE_SIZE} total={files.length} onChange={setPage} />
     </div>
   );
 }

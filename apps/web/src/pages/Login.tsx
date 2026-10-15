@@ -36,8 +36,22 @@ function initials(name: string) {
 export function LoginPage() {
   const { user } = useAuth();
   const t = useT();
+  const toast = useToast();
   const [staff, setStaff] = useState<Staff[] | null>(null);
   const [mode, setMode] = useState<"pin" | "password">("pin");
+  const [offlineNotice, setOfflineNotice] = useState(false);
+
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem("hotel:reloginReason") === "offline") {
+        sessionStorage.removeItem("hotel:reloginReason");
+        setOfflineNotice(true);
+        toast.push(t("login.reloginOffline"), "err");
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [t, toast]);
 
   useEffect(() => {
     const load = () =>
@@ -105,6 +119,11 @@ export function LoginPage() {
             <span className="login-panel-kicker">{t("login.secureAccess")}</span>
             <h2>{t("login.signInWorkspace")}</h2>
             <p>{mode === "pin" ? t("login.pinHint") : t("login.passwordHint")}</p>
+            {offlineNotice ? (
+              <p className="tiny" style={{ color: "var(--danger)", marginTop: "0.5rem" }}>
+                {t("login.reloginOffline")}
+              </p>
+            ) : null}
           </header>
 
           {!!staff?.length && (

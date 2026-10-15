@@ -7,23 +7,39 @@ import { Pagination, paginate } from "./Pagination";
 
 const PAGE_SIZE = 15;
 
+export type PayMethod = "CASH" | "CARD" | "WALLET" | "BANK";
+
 export type PaymentRow = {
   id: string;
   amount: number;
   tipAmount?: number;
+  cashTotal?: number;
+  method?: PayMethod;
   createdAt: string;
   confirmedAt: string | null;
   orderId: string;
   orderNo: number;
   tableNo: string | null;
   orderTotal: number;
+  orderDue?: number;
+  orderTax?: number;
+  orderDiscount?: number;
   orderTip?: number;
   orderedBy?: string | null;
   orderedByRole?: string | null;
   servedBy?: string | null;
+  isCredit?: boolean;
+  creditCustomerName?: string | null;
   collectedBy: { id: string; name: string; roleName: string };
   handedTo: { id: string; name: string } | null;
 };
+
+/** Physical cash for drawer / handover (food amount + tip on CASH only). */
+export function cashOf(p: PaymentRow) {
+  if ((p.method || "CASH") !== "CASH") return 0;
+  if (typeof p.cashTotal === "number") return p.cashTotal;
+  return Math.round((p.amount + (p.tipAmount ?? 0)) * 100) / 100;
+}
 
 const time = (iso: string) =>
   new Date(iso).toLocaleTimeString("en-PK", { hour: "2-digit", minute: "2-digit" });
@@ -48,9 +64,10 @@ export function CashHandovers() {
 
   async function confirm(p: PaymentRow) {
     setBusy(p.id);
+    const cash = cashOf(p);
     try {
       await api(`/payments/${p.id}/confirm`, { method: "POST", body: "{}" });
-      toast.push(t("cash.receivedToast", { amount: money(p.amount), name: p.collectedBy.name }), "ok");
+      toast.push(t("cash.receivedToast", { amount: money(cash), name: p.collectedBy.name }), "ok");
       load();
     } catch (e) {
       toast.push(e instanceof Error ? e.message : t("cash.confirmFailed"), "err");
@@ -60,7 +77,7 @@ export function CashHandovers() {
   }
 
   if (!rows.length) return null;
-  const total = rows.reduce((s, p) => s + p.amount, 0);
+  const total = rows.reduce((s, p) => s + cashOf(p), 0);
   const pageRows = paginate(rows, page, PAGE_SIZE);
 
   return (
@@ -76,6 +93,8 @@ export function CashHandovers() {
             <th>{t("common.table")}</th>
             <th>{t("cash.from")}</th>
             <th>{t("common.amount")}</th>
+            <th>{t("payments.tip")}</th>
+            <th>{t("cash.cashTotal")}</th>
             <th />
           </tr>
         </thead>
@@ -91,6 +110,10 @@ export function CashHandovers() {
               </td>
               <td>
                 <strong>{money(p.amount)}</strong>
+              </td>
+              <td>{(p.tipAmount ?? 0) > 0 ? money(p.tipAmount ?? 0) : "—"}</td>
+              <td>
+                <strong>{money(cashOf(p))}</strong>
               </td>
               <td>
                 <button type="button" className="btn ok sm" disabled={busy === p.id} onClick={() => void confirm(p)}>

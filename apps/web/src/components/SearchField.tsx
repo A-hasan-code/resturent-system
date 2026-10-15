@@ -17,12 +17,15 @@ export function SearchField({ value, onChange, placeholder }: Props) {
         </svg>
       </span>
       <input
-        type="search"
+        type="text"
+        inputMode="search"
+        enterKeyHint="search"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder || t("common.search")}
         aria-label={t("common.search")}
         autoComplete="off"
+        spellCheck={false}
       />
       {value ? (
         <button

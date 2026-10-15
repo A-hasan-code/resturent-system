@@ -11,6 +11,18 @@ import { Pagination, paginate } from "../components/Pagination";
 const UNITS = ["KG", "G", "L", "ML", "PCS"] as const;
 const PAGE_SIZE = 5;
 
+function unitFamily(u: string): "solid" | "liquid" | "count" {
+  if (u === "KG" || u === "G") return "solid";
+  if (u === "L" || u === "ML") return "liquid";
+  return "count";
+}
+
+function unitsForStore(storeUnit: string | undefined) {
+  if (!storeUnit) return [...UNITS];
+  const fam = unitFamily(storeUnit);
+  return UNITS.filter((u) => unitFamily(u) === fam);
+}
+
 type StoreItem = {
   id: string;
   name: string;
@@ -27,18 +39,22 @@ type Recipe = {
   category: string;
   baseUnit: string;
   baseQty: number;
+  prepMinutes?: number;
   costPerBase: number;
+  totalForBase?: number;
   ingredients: {
     storeItemId: string;
     name: string;
     category: string;
     quantity: number;
     unit: string;
+    storeUnit?: string;
     ratePerUnit: number;
+    storeActive?: boolean;
   }[];
 };
 
-type IngForm = { storeItemId: string; quantity: string; unit: string };
+type IngForm = { storeItemId: string; itemQ: string; quantity: string; unit: string };
 
 export function RecipesPage() {
   const { can } = useAuth();
@@ -56,23 +72,28 @@ export function RecipesPage() {
   const [catOpen, setCatOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [newCatName, setNewCatName] = useState("");
+  const [enforceStock, setEnforceStock] = useState(true);
+  const [enforceBusy, setEnforceBusy] = useState(false);
 
   const [name, setName] = useState("");
   const [category, setCategory] = useState("Karahi");
   const [baseUnit, setBaseUnit] = useState("KG");
   const [baseQty, setBaseQty] = useState("1");
+  const [prepMinutes, setPrepMinutes] = useState("15");
   const [ings, setIngs] = useState<IngForm[]>([
-    { storeItemId: "", quantity: "", unit: "KG" },
+    { storeItemId: "", itemQ: "", quantity: "", unit: "KG" },
   ]);
 
   async function load() {
     try {
-      const [recipes, cats] = await Promise.all([
+      const [recipes, cats, stock] = await Promise.all([
         api<Recipe[]>("/recipes"),
         api<RecipeCat[]>("/recipes/categories"),
+        api<{ enforceRecipeStock: boolean }>("/recipes/stock-enforce"),
       ]);
       setRows(recipes);
       setRecipeCats(cats);
+      setEnforceStock(stock.enforceRecipeStock !== false);
       if (cats[0] && !cats.find((c) => c.name === category)) {
         setCategory(cats[0].name);
       }
@@ -96,6 +117,31 @@ export function RecipesPage() {
       }
     } catch (e) {
       toast.push(e instanceof Error ? e.message : t("recipes.loadFailed"), "err");
+    }
+  }
+
+  async function toggleStockEnforce(next: boolean) {
+    if (!can("recipe.manage") || enforceBusy) return;
+    setEnforceBusy(true);
+    const prev = enforceStock;
+    setEnforceStock(next);
+    try {
+      const res = await api<{ enforceRecipeStock: boolean }>("/recipes/stock-enforce", {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: next }),
+      });
+      setEnforceStock(res.enforceRecipeStock !== false);
+      toast.push(
+        res.enforceRecipeStock !== false
+          ? t("recipes.stockEnforceOn")
+          : t("recipes.stockEnforceOff"),
+        "ok"
+      );
+    } catch (err) {
+      setEnforceStock(prev);
+      toast.push(err instanceof Error ? err.message : t("recipes.stockEnforceFailed"), "err");
+    } finally {
+      setEnforceBusy(false);
     }
   }
 
@@ -136,7 +182,8 @@ export function RecipesPage() {
     setCategory(recipeCats[0]?.name || "General");
     setBaseUnit("KG");
     setBaseQty("1");
-    setIngs([{ storeItemId: "", quantity: "", unit: "KG" }]);
+    setPrepMinutes("15");
+    setIngs([{ storeItemId: "", itemQ: "", quantity: "", unit: "KG" }]);
     setEditId(null);
   }
 
@@ -151,16 +198,51 @@ export function RecipesPage() {
     setCategory(r.category);
     setBaseUnit(r.baseUnit);
     setBaseQty(String(r.baseQty));
+    setPrepMinutes(String(r.prepMinutes ?? 15));
     setIngs(
       r.ingredients.length
         ? r.ingredients.map((i) => ({
             storeItemId: i.storeItemId,
+            itemQ: `${i.category} · ${i.name}`,
             quantity: String(i.quantity),
             unit: i.unit,
           }))
-        : [{ storeItemId: "", quantity: "", unit: "KG" }]
+        : [{ storeItemId: "", itemQ: "", quantity: "", unit: "KG" }]
     );
     setOpen(true);
+  }
+
+  function pickStoreItem(idx: number, it: StoreItem) {
+    setIngs((prev) =>
+      prev.map((p, i) =>
+        i === idx
+          ? {
+              ...p,
+              storeItemId: it.id,
+              itemQ: `${it.category} · ${it.name}`,
+              unit: it.unit,
+            }
+          : p
+      )
+    );
+  }
+
+  function clearStoreItem(idx: number) {
+    setIngs((prev) =>
+      prev.map((p, i) =>
+        i === idx ? { ...p, storeItemId: "", itemQ: "", unit: "KG" } : p
+      )
+    );
+  }
+
+  function storeHitsFor(idx: number, q: string) {
+    const taken = new Set(
+      ings.map((x, i) => (i !== idx && x.storeItemId ? x.storeItemId : "")).filter(Boolean)
+    );
+    const list = items.filter(
+      (it) => !taken.has(it.id) && matchesSearch(q, it.name, it.category)
+    );
+    return list.slice(0, 10);
   }
 
   async function submit(e: FormEvent) {
@@ -183,6 +265,7 @@ export function RecipesPage() {
         category,
         baseUnit,
         baseQty: Number(baseQty) || 1,
+        prepMinutes: Math.max(1, Math.round(Number(prepMinutes) || 15)),
         ingredients,
       };
       if (editId) {
@@ -260,6 +343,21 @@ export function RecipesPage() {
         )}
       </div>
 
+      <div className="panel panel-pad" style={{ marginBottom: "0.85rem" }}>
+        <label className="switch-row" style={{ margin: 0 }}>
+          <input
+            type="checkbox"
+            checked={enforceStock}
+            disabled={!can("recipe.manage") || enforceBusy}
+            onChange={(e) => toggleStockEnforce(e.target.checked)}
+          />
+          <span>
+            {t("recipes.stockEnforce")}
+            <small>{t("recipes.stockEnforceHint")}</small>
+          </span>
+        </label>
+      </div>
+
       <div className="chips">
         {filterChips.map((c) => (
           <button
@@ -291,15 +389,25 @@ export function RecipesPage() {
               <div>
                 <h2 style={{ margin: 0, fontSize: "1.15rem" }}>{r.name}</h2>
                 <span className="badge">{r.category}</span>
+                <span className="badge pending" style={{ marginLeft: "0.35rem" }}>
+                  {r.prepMinutes ?? 15}m
+                </span>
               </div>
               <div className="row" style={{ alignItems: "flex-start", gap: "0.5rem" }}>
                 <div style={{ textAlign: "right" }}>
                   <div className="muted tiny">
-                    {t("recipes.cost")} / {r.baseQty} {unitLabel(r.baseUnit)}
+                    {t("recipes.costPerUnit", { unit: unitLabel(r.baseUnit) })}
                   </div>
-                  <strong style={{ fontSize: "1.2rem" }}>
-                    {money(r.costPerBase)}
-                  </strong>
+                  <strong style={{ fontSize: "1.2rem" }}>{money(r.costPerBase)}</strong>
+                  {r.baseQty !== 1 && r.totalForBase != null && (
+                    <div className="muted tiny">
+                      {t("recipes.costBatch", {
+                        qty: String(r.baseQty),
+                        unit: unitLabel(r.baseUnit),
+                        amount: money(r.totalForBase),
+                      })}
+                    </div>
+                  )}
                 </div>
                 {can("recipe.manage") && (
                   <div className="row" style={{ gap: "0.35rem" }}>
@@ -335,13 +443,20 @@ export function RecipesPage() {
               <tbody>
                 {r.ingredients.map((i, idx) => (
                   <tr key={idx}>
-                    <td>{i.name}</td>
+                    <td>
+                      {i.name}
+                      {i.storeActive === false && (
+                        <span className="badge" style={{ marginLeft: 6 }}>
+                          {t("recipes.inactiveItem")}
+                        </span>
+                      )}
+                    </td>
                     <td>{i.category}</td>
                     <td>
                       {i.quantity} {unitLabel(i.unit)}
                     </td>
                     <td>
-                      {money(i.ratePerUnit)} / {unitLabel(i.unit)}
+                      {money(i.ratePerUnit)} / {unitLabel(i.storeUnit || i.unit)}
                     </td>
                   </tr>
                 ))}
@@ -424,6 +539,20 @@ export function RecipesPage() {
               />
             </div>
           </div>
+          <div className="field">
+            <label>{t("recipes.prepMinutes")}</label>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={prepMinutes}
+              onChange={(e) => setPrepMinutes(e.target.value)}
+              required
+            />
+            <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
+              {t("recipes.prepMinutesHint")}
+            </p>
+          </div>
 
           <h3 style={{ margin: "0.5rem 0" }}>{t("recipes.ingredients")}</h3>
           <div className="ing-table">
@@ -433,36 +562,69 @@ export function RecipesPage() {
               <span>{t("common.unit")}</span>
               <span />
             </div>
-            {ings.map((ing, idx) => (
+            {ings.map((ing, idx) => {
+              const storeItem = items.find((x) => x.id === ing.storeItemId);
+              const unitOpts = unitsForStore(storeItem?.unit);
+              const hits = !ing.storeItemId ? storeHitsFor(idx, ing.itemQ) : [];
+              return (
               <div className="ing-row" key={idx}>
-                <select
-                  value={ing.storeItemId}
-                  onChange={(e) => {
-                    const id = e.target.value;
-                    const item = items.find((x) => x.id === id);
-                    setIngs((prev) =>
-                      prev.map((p, i) =>
-                        i === idx
-                          ? {
-                              ...p,
-                              storeItemId: id,
-                              unit: item?.unit || p.unit,
-                            }
-                          : p
-                      )
-                    );
-                  }}
-                  required
-                  aria-label={t("recipes.storeItem")}
-                >
-                  <option value="">{t("recipes.select")}</option>
-                  {items.map((it) => (
-                    <option key={it.id} value={it.id}>
-                      {it.category} · {it.name} ({money(it.ratePerUnit)}/
-                      {unitLabel(it.unit)})
-                    </option>
-                  ))}
-                </select>
+                <div className="ing-pick">
+                  {storeItem && ing.storeItemId ? (
+                    <div className="row" style={{ gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
+                      <span className="badge">
+                        {storeItem.category} · {storeItem.name}
+                      </span>
+                      <span className="tiny muted">
+                        {money(storeItem.ratePerUnit)}/{unitLabel(storeItem.unit)}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn ghost sm"
+                        onClick={() => clearStoreItem(idx)}
+                      >
+                        {t("common.clear")}
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <input
+                        value={ing.itemQ}
+                        onChange={(e) =>
+                          setIngs((prev) =>
+                            prev.map((p, i) =>
+                              i === idx ? { ...p, itemQ: e.target.value, storeItemId: "" } : p
+                            )
+                          )
+                        }
+                        placeholder={t("recipes.itemSearchPh")}
+                        autoComplete="off"
+                        aria-label={t("recipes.storeItem")}
+                        required={!ing.storeItemId}
+                      />
+                      <div className="suggest-list">
+                        {hits.map((it) => (
+                          <button
+                            key={it.id}
+                            type="button"
+                            className="suggest-item"
+                            onClick={() => pickStoreItem(idx, it)}
+                          >
+                            <strong>{it.name}</strong>
+                            <span className="tiny muted">
+                              {" "}
+                              · {it.category} · {money(it.ratePerUnit)}/{unitLabel(it.unit)}
+                            </span>
+                          </button>
+                        ))}
+                        {ing.itemQ.trim() && !hits.length ? (
+                          <div className="tiny muted" style={{ padding: "0.5rem 0.65rem" }}>
+                            {t("recipes.noItemMatch")}
+                          </div>
+                        ) : null}
+                      </div>
+                    </>
+                  )}
+                </div>
                 <input
                   value={ing.quantity}
                   onChange={(e) =>
@@ -486,7 +648,7 @@ export function RecipesPage() {
                   }
                   aria-label={t("common.unit")}
                 >
-                  {UNITS.map((u) => (
+                  {unitOpts.map((u) => (
                     <option key={u} value={u}>
                       {unitLabel(u)}
                     </option>
@@ -503,7 +665,8 @@ export function RecipesPage() {
                   {t("recipes.removeIng")}
                 </button>
               </div>
-            ))}
+              );
+            })}
           </div>
 
           <button
@@ -512,7 +675,7 @@ export function RecipesPage() {
             onClick={() =>
               setIngs((prev) => [
                 ...prev,
-                { storeItemId: "", quantity: "", unit: "KG" },
+                { storeItemId: "", itemQ: "", quantity: "", unit: "KG" },
               ])
             }
           >

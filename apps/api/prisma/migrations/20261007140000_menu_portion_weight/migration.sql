@@ -1,0 +1,2 @@
+-- Placeholder: directory existed without SQL and blocked migrate deploy.
+-- No schema changes.

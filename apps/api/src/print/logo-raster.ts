@@ -1,21 +1,47 @@
 import { inflateSync } from "zlib";
 import { existsSync, readFileSync } from "fs";
+import { decode as decodeJpeg } from "jpeg-js";
 
 export type RasterImage = { widthBytes: number; height: number; data: Buffer };
 
-/** Build an ESC/POS GS v 0 raster from a PNG logo (other formats return null). */
+export type LogoRasterOpts = {
+  centerOnPaperDots?: number;
+  /** Draw a black box around the logo (receipt header). */
+  frame?: boolean;
+  maxHeight?: number;
+  /**
+   * logo = dithered photo/brand art for thermal.
+   * stamp = solid black ink (fills speckles / converts colored stamps).
+   */
+  mode?: "logo" | "stamp";
+};
+
+/** Build an ESC/POS GS v 0 raster from a PNG/JPEG for thermal printers. */
 export function logoRasterFromFile(
   path: string | null | undefined,
   maxDots: number,
-  opts?: { centerOnPaperDots?: number; frame?: boolean; maxHeight?: number }
+  opts?: LogoRasterOpts
 ): RasterImage | null {
   if (!path || !existsSync(path)) return null;
-  if (!path.toLowerCase().endsWith(".png")) return null;
+  if (!/\.(png|jpe?g)$/i.test(path)) return null;
   try {
-    const png = decodePng(readFileSync(path));
+    const png = loadRgba(path);
     if (!png) return null;
+    const mode = opts?.mode ?? "logo";
     const max = Math.max(96, Math.min(maxDots, 576));
-    let raster = toRaster(trimContent(png), max, opts?.maxHeight ?? 180);
+    const maxH = opts?.maxHeight ?? (mode === "stamp" ? max : Math.round(max * 0.95));
+    let prepared = trimContent(png);
+    if (mode === "stamp") {
+      prepared = solidifyInk(prepared);
+    } else {
+      // Maroon/gold seals → black ink on white paper (otherwise the whole circle prints black).
+      prepared = normalizeBrandLogo(prepared);
+    }
+    let raster =
+      mode === "stamp" || isNearMono(prepared)
+        ? toSolidRaster(prepared, max, maxH)
+        : toDitheredRaster(prepared, max, maxH);
+    // Square frames look wrong on circular restaurant seals — only when asked.
     if (opts?.frame) raster = frameRaster(raster);
     if (opts?.centerOnPaperDots) return centerRaster(raster, opts.centerOnPaperDots);
     return raster;
@@ -38,6 +64,17 @@ export function centerRaster(img: RasterImage, paperDots: number): RasterImage {
 }
 
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function loadRgba(path: string): { width: number; height: number; rgba: Buffer } | null {
+  const buf = readFileSync(path);
+  if (path.toLowerCase().endsWith(".png")) return decodePng(buf);
+  if (/\.jpe?g$/i.test(path)) {
+    const decoded = decodeJpeg(buf, { useTArray: true });
+    if (!(decoded.width > 0 && decoded.height > 0)) return null;
+    return { width: decoded.width, height: decoded.height, rgba: Buffer.from(decoded.data) };
+  }
+  return null;
+}
 
 function decodePng(buf: Buffer): { width: number; height: number; rgba: Buffer } | null {
   // Do not use "ascii": Node strips the high bit, so byte 0x89 never matches.
@@ -173,8 +210,101 @@ function trimContent(img: { width: number; height: number; rgba: Buffer }) {
   return { width: w, height: h, rgba };
 }
 
+/**
+ * Force stamp ink to pure black on white and close tiny holes from grunge textures
+ * so 203dpi thermal heads print a solid mark instead of speckles.
+ */
+function solidifyInk(img: { width: number; height: number; rgba: Buffer }) {
+  const { width: w, height: h } = img;
+  const mask = Buffer.alloc(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const o = i * 4;
+    const a = img.rgba[o + 3];
+    if (a < 20) {
+      mask[i] = 0;
+      continue;
+    }
+    const r = img.rgba[o];
+    const g = img.rgba[o + 1];
+    const b = img.rgba[o + 2];
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    // Any saturated color (red stamps) or dark gray counts as ink.
+    const sat = Math.max(r, g, b) - Math.min(r, g, b);
+    mask[i] = lum < 200 || sat > 40 ? 1 : 0;
+  }
+  // 1px morphological close: fill single-pixel white holes inside ink.
+  const closed = Buffer.from(mask);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      if (mask[i]) continue;
+      let n = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          if (mask[(y + dy) * w + (x + dx)]) n++;
+        }
+      }
+      if (n >= 5) closed[i] = 1;
+    }
+  }
+  const rgba = Buffer.alloc(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const o = i * 4;
+    const v = closed[i] ? 0 : 255;
+    rgba[o] = rgba[o + 1] = rgba[o + 2] = v;
+    rgba[o + 3] = 255;
+  }
+  return { width: w, height: h, rgba };
+}
+
+/** Dark maroon/gold seals print as a black blob unless inverted to black-on-white. */
+function normalizeBrandLogo(img: { width: number; height: number; rgba: Buffer }) {
+  const { width: w, height: h, rgba } = img;
+  let sum = 0;
+  let n = 0;
+  const x0 = Math.floor(w * 0.2);
+  const x1 = Math.floor(w * 0.8);
+  const y0 = Math.floor(h * 0.2);
+  const y1 = Math.floor(h * 0.8);
+  for (let y = y0; y < y1; y += 3) {
+    for (let x = x0; x < x1; x += 3) {
+      const o = (y * w + x) * 4;
+      if (rgba[o + 3] < 20) continue;
+      sum += 0.299 * rgba[o] + 0.587 * rgba[o + 1] + 0.114 * rgba[o + 2];
+      n++;
+    }
+  }
+  const avg = n ? sum / n : 255;
+  const invert = avg < 110;
+  const out = Buffer.alloc(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const o = i * 4;
+    const a = rgba[o + 3];
+    let lum = 0.299 * rgba[o] + 0.587 * rgba[o + 1] + 0.114 * rgba[o + 2];
+    if (a < 20) lum = 255;
+    else if (invert) lum = 255 - lum;
+    const v = lum < 145 ? 0 : 255;
+    out[o] = out[o + 1] = out[o + 2] = v;
+    out[o + 3] = 255;
+  }
+  return { width: w, height: h, rgba: out };
+}
+
+function isNearMono(img: { width: number; height: number; rgba: Buffer }) {
+  let mid = 0;
+  const step = Math.max(1, Math.floor((img.width * img.height) / 4000));
+  for (let i = 0; i < img.width * img.height; i += step) {
+    const o = i * 4;
+    const lum = 0.299 * img.rgba[o] + 0.587 * img.rgba[o + 1] + 0.114 * img.rgba[o + 2];
+    if (lum > 40 && lum < 220) mid++;
+  }
+  const samples = Math.ceil((img.width * img.height) / step);
+  return mid / samples < 0.12;
+}
+
 /** Black rectangle around a logo so the paper matches the boxed logo on screen. */
-function frameRaster(img: RasterImage, pad = 6, thick = 2): RasterImage {
+function frameRaster(img: RasterImage, pad = 4, thick = 2): RasterImage {
   const srcDots = img.widthBytes * 8;
   const extra = (pad + thick) * 2;
   const widthDots = srcDots + extra;
@@ -212,20 +342,56 @@ function frameRaster(img: RasterImage, pad = 6, thick = 2): RasterImage {
   return { widthBytes, height, data };
 }
 
-function toRaster(img: { width: number; height: number; rgba: Buffer }, maxDots: number, maxHeight = 180): RasterImage {
+function sampleSize(img: { width: number; height: number }, maxDots: number, maxHeight: number) {
   const scale = Math.min(1, maxDots / img.width, maxHeight / img.height);
   const w = Math.max(1, Math.round(img.width * scale));
   const h = Math.max(1, Math.round(img.height * scale));
+  return { scale, w, h };
+}
+
+function sampleLum(img: { width: number; height: number; rgba: Buffer }, x: number, y: number, scale: number) {
+  const sx = Math.min(img.width - 1, Math.floor((x + 0.5) / scale));
+  const sy = Math.min(img.height - 1, Math.floor((y + 0.5) / scale));
+  const i = (sy * img.width + sx) * 4;
+  const a = img.rgba[i + 3] / 255;
+  return (0.299 * img.rgba[i] + 0.587 * img.rgba[i + 1] + 0.114 * img.rgba[i + 2]) * a + 255 * (1 - a);
+}
+
+/** Hard threshold — best for stamps and line art. */
+function toSolidRaster(img: { width: number; height: number; rgba: Buffer }, maxDots: number, maxHeight: number): RasterImage {
+  const { scale, w, h } = sampleSize(img, maxDots, maxHeight);
   const widthBytes = Math.ceil(w / 8);
   const data = Buffer.alloc(widthBytes * h);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      const sx = Math.min(img.width - 1, Math.floor((x + 0.5) / scale));
-      const sy = Math.min(img.height - 1, Math.floor((y + 0.5) / scale));
-      const i = (sy * img.width + sx) * 4;
-      const a = img.rgba[i + 3] / 255;
-      const lum = (0.299 * img.rgba[i] + 0.587 * img.rgba[i + 1] + 0.114 * img.rgba[i + 2]) * a + 255 * (1 - a);
-      if (lum < 160) data[y * widthBytes + (x >> 3)] |= 0x80 >> (x & 7);
+      if (sampleLum(img, x, y, scale) < 170) data[y * widthBytes + (x >> 3)] |= 0x80 >> (x & 7);
+    }
+  }
+  return { widthBytes, height: h, data };
+}
+
+/** Floyd–Steinberg dithering so restaurant logos keep shape on 1-bit thermal heads. */
+function toDitheredRaster(img: { width: number; height: number; rgba: Buffer }, maxDots: number, maxHeight: number): RasterImage {
+  const { scale, w, h } = sampleSize(img, maxDots, maxHeight);
+  const widthBytes = Math.ceil(w / 8);
+  const data = Buffer.alloc(widthBytes * h);
+  const gray = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) gray[y * w + x] = sampleLum(img, x, y, scale);
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const old = gray[i];
+      const val = old < 160 ? 0 : 255;
+      const err = old - val;
+      if (val === 0) data[y * widthBytes + (x >> 3)] |= 0x80 >> (x & 7);
+      if (x + 1 < w) gray[i + 1] += (err * 7) / 16;
+      if (y + 1 < h) {
+        if (x > 0) gray[i + w - 1] += (err * 3) / 16;
+        gray[i + w] += (err * 5) / 16;
+        if (x + 1 < w) gray[i + w + 1] += (err * 1) / 16;
+      }
     }
   }
   return { widthBytes, height: h, data };

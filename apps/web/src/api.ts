@@ -10,9 +10,13 @@ export type User = {
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status = 400) {
+  code?: string;
+  details?: Record<string, unknown>;
+  constructor(message: string, status = 400, extras?: { code?: string; details?: Record<string, unknown> }) {
     super(message);
     this.status = status;
+    this.code = extras?.code;
+    this.details = extras?.details;
   }
 }
 
@@ -57,12 +61,26 @@ export async function api<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    const msg =
-      body.error ||
-      (Array.isArray(body.message) ? body.message.join(", ") : body.message) ||
-      res.statusText ||
-      "Request failed";
-    throw new ApiError(String(msg), res.status);
+    const raw = body.message;
+    let msg: string;
+    let code: string | undefined;
+    let details: Record<string, unknown> | undefined;
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      msg = String((raw as { message?: string }).message || body.error || "Request failed");
+      code = (raw as { code?: string }).code || body.code;
+      details = raw as Record<string, unknown>;
+    } else {
+      msg =
+        body.error ||
+        (Array.isArray(raw) ? raw.join(", ") : raw) ||
+        res.statusText ||
+        "Request failed";
+      code = typeof body.code === "string" ? body.code : undefined;
+      if (body.message && typeof body.message === "object") {
+        details = body.message as Record<string, unknown>;
+      }
+    }
+    throw new ApiError(String(msg), res.status, { code, details });
   }
 
   if (res.status === 204) return undefined as T;
@@ -123,6 +141,24 @@ export function money(n: number) {
   })}`;
 }
 
+/** Finished pot weight is stored as grams in the API — show as kg in UI. */
+export function gramsToKg(grams: number) {
+  const g = Number(grams) || 0;
+  return Math.round((g / 1000) * 1000) / 1000;
+}
+
+export function kgToGrams(kg: number) {
+  const k = Number(kg) || 0;
+  return Math.round(k * 1000 * 1000) / 1000;
+}
+
+/** e.g. 5 → "5 kg", 0.4 → "0.4 kg" */
+export function formatKg(grams: number) {
+  const kg = gramsToKg(grams);
+  const text = Number.isInteger(kg) ? String(kg) : String(kg);
+  return `${text} kg`;
+}
+
 export function unitLabel(u: string) {
   const map: Record<string, string> = {
     KG: "kg",
@@ -132,4 +168,60 @@ export function unitLabel(u: string) {
     PCS: "pcs",
   };
   return map[u] || u.toLowerCase();
+}
+
+export const PACK_UNITS = [
+  "NONE",
+  "BOX",
+  "PACKET",
+  "TRAY",
+  "CRATE",
+  "CARTON",
+  "DOZEN",
+  "BUNDLE",
+  "SACK",
+  "TIN",
+  "BAG",
+] as const;
+
+export type PackUnitCode = (typeof PACK_UNITS)[number];
+
+export function packUnitLabel(u: string | null | undefined) {
+  const map: Record<string, string> = {
+    NONE: "—",
+    BOX: "box",
+    PACKET: "packet",
+    TRAY: "tray",
+    CRATE: "crate",
+    CARTON: "carton",
+    DOZEN: "dozen",
+    BUNDLE: "bundle",
+    SACK: "sack",
+    TIN: "tin",
+    BAG: "bag",
+  };
+  if (!u) return map.NONE;
+  return map[u] || u.toLowerCase();
+}
+
+export function hasPack(packUnit: string | null | undefined, unitsPerPack: number | null | undefined) {
+  return Boolean(packUnit && packUnit !== "NONE" && Number(unitsPerPack) > 1.0000001);
+}
+
+/** Show on-hand as packs + leftover stock units when pack size is set. */
+export function formatStockQty(
+  qty: number,
+  unit: string,
+  packUnit?: string | null,
+  unitsPerPack?: number | null
+) {
+  const stock = `${qty} ${unitLabel(unit)}`;
+  const per = Number(unitsPerPack) || 0;
+  if (!hasPack(packUnit, per)) return stock;
+  const packs = Math.floor(qty / per + 1e-9);
+  const rem = Number((qty - packs * per).toFixed(3));
+  const packLbl = packUnitLabel(packUnit);
+  if (packs <= 0) return stock;
+  if (rem > 0.0001) return `${packs} ${packLbl} + ${rem} ${unitLabel(unit)}`;
+  return `${packs} ${packLbl} (${stock})`;
 }

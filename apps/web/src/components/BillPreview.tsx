@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { api, unitLabel } from "../api";
 import { useBrand } from "../brand";
 import { PoweredBy } from "./PoweredBy";
-import { useI18n, useT } from "../i18n";
-import { serverOrigin } from "../server";
+import { useT } from "../i18n";
+import { apiBase, serverOrigin } from "../server";
 
 export type BillOrder = {
   id?: string;
@@ -15,6 +15,8 @@ export type BillOrder = {
   paymentStatus: string;
   total: number;
   discountAmount?: number;
+  taxAmount?: number;
+  taxPercent?: number;
   tipAmount?: number;
   paidAmount?: number;
   tenderedAmount?: number;
@@ -24,8 +26,19 @@ export type BillOrder = {
   orderedBy?: { id?: string; name: string; roleCode?: string; roleName: string } | null;
   servedBy?: string | null;
   servedByName?: string | null;
-  creditCustomer?: { name?: string } | null;
+  creditCustomer?: { name?: string; phone?: string; address?: string } | null;
   creditName?: string | null;
+  payments?: Array<{
+    id?: string;
+    method?: "CASH" | "CARD" | "WALLET" | "BANK";
+    amount: number;
+    tipAmount?: number;
+    tenderedAmount?: number;
+    collectedBy?: string;
+    handedTo?: string | null;
+    confirmedAt?: string | Date | null;
+    createdAt?: string | Date;
+  }>;
   items: {
     id?: string;
     name: string;
@@ -64,7 +77,7 @@ const DEFAULT_DESIGN: BillDesign = {
   showCashier: true,
   showTip: true,
   showPaidStamp: true,
-  footer: "Thanks for your Visit..",
+  footer: "Thank you for your visit",
 };
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -84,7 +97,10 @@ function splitPlace(order: BillOrder) {
 }
 
 function brandingUrl(path: string) {
-  const origin = serverOrigin() || (typeof location !== "undefined" ? location.origin : "");
+  const origin =
+    apiBase().replace(/\/api\/?$/, "") ||
+    serverOrigin() ||
+    (typeof location !== "undefined" ? location.origin : "");
   return `${origin}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
@@ -134,18 +150,29 @@ export function BillPreview({
   };
 }) {
   const t = useT();
-  const { ts } = useI18n();
   const { brand, logoSrc } = useBrand();
   const [saved, setSaved] = useState<BillDesign>(DEFAULT_DESIGN);
+  const [legal, setLegal] = useState<{ ntn: string; strn: string }>({ ntn: "", strn: "" });
+  const [taxCfg, setTaxCfg] = useState<{ enabled: boolean; percent: number }>({ enabled: false, percent: 0 });
   const design: BillDesign = { ...saved, ...designOverride };
   const when = order.createdAt ? new Date(order.createdAt) : new Date();
   const tip = order.tipAmount ?? 0;
   const showTipAmt = design.showTip !== false ? tip : 0;
   const discount = Math.max(0, order.discountAmount ?? 0);
+  const storedTax = Math.max(0, order.taxAmount ?? 0);
+  const storedPct = Math.max(0, order.taxPercent ?? 0);
   const net = Math.max(0, order.total - discount);
+  // Unpaid preview: mirror PayModal / thermal unpaid print with live settings tax.
+  const liveTax =
+    order.paymentStatus !== "PAID" && !(storedTax > 0) && taxCfg.enabled && taxCfg.percent > 0
+      ? Math.round((net * taxCfg.percent) / 100 * 100) / 100
+      : 0;
+  const tax = storedTax > 0 ? storedTax : liveTax;
+  const taxPercent = storedTax > 0 ? storedPct : liveTax > 0 ? taxCfg.percent : 0;
+  const dueBase = net + tax;
   const foodPaid =
-    (order.paidAmount ?? 0) > 0 ? order.paidAmount! : order.paymentStatus === "PAID" ? net : 0;
-  const grand = net + showTipAmt;
+    (order.paidAmount ?? 0) > 0 ? order.paidAmount! : order.paymentStatus === "PAID" ? dueBase : 0;
+  const grand = dueBase + showTipAmt;
   const billNo = order.billNo ?? order.orderNo;
   const { partition, table } = splitPlace(order);
   const orderedLabel = order.orderedBy
@@ -154,9 +181,9 @@ export function BillPreview({
       : order.orderedBy.name
     : order.waiter || null;
   const servedLabel = (order.servedByName || order.servedBy || "").trim() || null;
-  const stampSrc = brandingUrl(
-    order.paymentStatus === "PAID" ? "/branding/paid-stamp.png?v=2" : "/branding/unpaid-stamp.png?v=2",
-  );
+  const isPaid = order.paymentStatus === "PAID";
+  const isCredit = !!(order.creditName || order.creditCustomer?.name);
+  const stampSrc = brandingUrl(isPaid ? "/branding/paid-stamp.png?v=4" : "/branding/unpaid-stamp.png?v=4");
   const sizeClass =
     paperWidth <= 58
       ? "receipt--mm58"
@@ -167,37 +194,97 @@ export function BillPreview({
           : "receipt--mm112";
   const narrow = paperWidth <= 58;
   const tableBadge = [partition, table || order.tableNo].filter(Boolean).join(" ") || "Walk-in";
-  const party =
-    order.creditName || order.creditCustomer?.name || t("bill.partyGeneral");
-  const cash =
-    (order.tenderedAmount ?? 0) > 0
-      ? order.tenderedAmount!
-      : foodPaid > 0
-        ? foodPaid + showTipAmt
-        : order.paymentStatus === "PAID"
-          ? grand
-          : 0;
-  const change = Math.max(0, cash - foodPaid - showTipAmt);
+  const customerPhone = order.creditCustomer?.phone || "";
+  const customerAddr = (order.creditCustomer?.address || "").trim();
+  const amountPaid = foodPaid + (foodPaid > 0 ? showTipAmt : 0);
+  const payRows = order.payments || [];
+  const methodTotals = (() => {
+    const m = new Map<string, number>();
+    for (const p of payRows) {
+      const method = p.method || "CASH";
+      m.set(method, Math.round(((m.get(method) || 0) + p.amount) * 100) / 100);
+    }
+    if (!payRows.length && amountPaid > 0 && !isCredit) {
+      m.set("CASH", foodPaid);
+    }
+    return [...m.entries()].map(([method, amount]) => ({
+      label:
+        method === "CARD"
+          ? "Card Received"
+          : method === "WALLET"
+            ? "Wallet Received"
+            : method === "BANK"
+              ? "Bank Received"
+              : "Cash Received",
+      amount,
+      method,
+    }));
+  })();
+  const cashTender = payRows
+    .filter((p) => (p.method || "CASH") === "CASH")
+    .reduce((s, p) => {
+      const tender =
+        (p.tenderedAmount ?? 0) > 0 ? p.tenderedAmount! : p.amount + (p.tipAmount ?? 0);
+      return s + tender;
+    }, 0);
+  const legacyCash =
+    !payRows.length && amountPaid > 0 && !isCredit
+      ? (order.tenderedAmount ?? 0) > 0
+        ? order.tenderedAmount!
+        : amountPaid
+      : 0;
+  const cashReceived = cashTender || legacyCash;
+  const cashDue = payRows
+    .filter((p) => (p.method || "CASH") === "CASH")
+    .reduce((s, p) => s + p.amount + (showTipAmt > 0 ? p.tipAmount ?? 0 : 0), 0);
+  const change = Math.max(0, cashReceived - (cashDue || (!payRows.length ? amountPaid : 0)));
+  const balance = Math.max(0, grand - amountPaid);
+  const orderType = order.tableNo || order.tableName ? "DINE IN" : "WALK IN";
+  const paymentMode = isCredit
+    ? isPaid
+      ? "Credit settled"
+      : "Credit / On account"
+    : methodTotals.length === 1
+      ? methodTotals[0]!.label.replace(" Received", "")
+      : methodTotals.length > 1
+        ? methodTotals.map((x) => x.label.replace(" Received", "")).join(" + ")
+        : isPaid
+          ? "Cash"
+          : order.paymentStatus === "PARTIAL"
+            ? "Partial"
+            : "Unpaid";
 
   useEffect(() => {
-    api<{ print?: { bill?: Partial<BillDesign> } }>("/system/settings")
+    api<{
+      print?: { bill?: Partial<BillDesign> };
+      restaurant?: { ntn?: string; strn?: string };
+      billing?: { taxEnabled?: boolean; taxPercent?: number };
+    }>("/system/settings")
       .then((s) => {
         const b = s.print?.bill;
-        if (!b) return;
-        setSaved({
-          showLogo: b.showLogo !== false,
-          showName: b.showName !== false,
-          showTagline: b.showTagline !== false,
-          showAddress: b.showAddress !== false,
-          showPhone: b.showPhone !== false,
-          title: b.title || "Customer Bill",
-          showOrderBy: b.showOrderBy !== false,
-          showServedBy: b.showServedBy !== false,
-          showCashier: b.showCashier !== false,
-          showTip: b.showTip !== false,
-          showPaidStamp: b.showPaidStamp !== false,
-          footer: b.footer || "Thanks for your Visit..",
+        if (b) {
+          setSaved({
+            showLogo: b.showLogo !== false,
+            showName: b.showName !== false,
+            showTagline: b.showTagline !== false,
+            showAddress: b.showAddress !== false,
+            showPhone: b.showPhone !== false,
+            title: b.title || "Customer Bill",
+            showOrderBy: b.showOrderBy !== false,
+            showServedBy: b.showServedBy !== false,
+            showCashier: b.showCashier !== false,
+            showTip: b.showTip !== false,
+            showPaidStamp: b.showPaidStamp !== false,
+            footer: b.footer || "Thank you for your visit",
+          });
+        }
+        setLegal({
+          ntn: (s.restaurant?.ntn || "").trim(),
+          strn: (s.restaurant?.strn || "").trim(),
         });
+        const pct = Number(s.billing?.taxPercent) || 0;
+        const enabled = s.billing?.taxEnabled !== false && pct > 0;
+        setTaxCfg({ enabled, percent: enabled ? pct : 0 });
       })
       .catch(() => undefined);
   }, []);
@@ -306,9 +393,15 @@ export function BillPreview({
     );
   }
 
+  const phoneLine = customerPhone;
+  const partyName = (order.creditName || order.creditCustomer?.name || "General").trim() || "General";
+
   return (
     <div className="receipt-wrap">
-      <div className={`receipt receipt-sample ${sizeClass}`} id="bill-print-area">
+      <div
+        className={`receipt receipt-sample receipt-ref ${sizeClass} ${narrow ? "receipt-ref--narrow" : "receipt-ref--wide"}`}
+        id="bill-print-area"
+      >
         <div className="receipt-head">
           {design.showLogo && logoSrc && (
             <div className="receipt-logo-frame">
@@ -316,134 +409,148 @@ export function BillPreview({
             </div>
           )}
           {design.showName && <div className="receipt-hotel">{brand.name}</div>}
-          {design.showPhone && brand.phone && <div className="receipt-sub">{brand.phone}</div>}
-          {design.showAddress && brand.address && <div className="receipt-sub">{brand.address}</div>}
-          {design.showTagline && brand.tagline && <div className="receipt-sub">{brand.tagline}</div>}
+          {design.showPhone && brand.phone ? <div className="receipt-sub">{brand.phone}</div> : null}
+          {design.showAddress && brand.address ? <div className="receipt-sub">{brand.address}</div> : null}
+          {legal.ntn ? <div className="receipt-sub">NTN: {legal.ntn}</div> : null}
+          {legal.strn ? <div className="receipt-sub">STRN: {legal.strn}</div> : null}
+          {design.showTagline && brand.tagline ? <div className="receipt-sub">{brand.tagline}</div> : null}
+          <div className="receipt-title">{design.title || "Customer Bill"}</div>
         </div>
-
-        <div className="receipt-title">{design.title || t("bill.customerBill")}</div>
 
         <div className="receipt-datetime">
           <span>
-            {t("bill.date")}: {formatDate(when)}
+            Date: {formatDate(when)}
           </span>
           <span>
-            {t("bill.time")}: {formatTime(when)}
+            Time: {formatTime(when)}
           </span>
         </div>
-
         <div className="receipt-meta-grid">
-          <span>
-            {t("bill.orderNo")}
-            {order.orderNo}
-          </span>
-          <span>
-            {t("bill.billNo")} {billNo}
-          </span>
+          <span>Order #{order.orderNo}</span>
+          <span>Bill # {billNo}</span>
         </div>
+        <div className="receipt-token">Token No: {billNo}</div>
+        {partition ? <div className="receipt-serving">Partition: {partition}</div> : null}
+        {(table || order.tableNo) ? (
+          <div className="receipt-serving">Table: {table || order.tableNo}</div>
+        ) : null}
+        <div className="receipt-table-badge">Table No. {tableBadge}</div>
+        <div className="receipt-party">Order type: {orderType}</div>
+        <div className="receipt-party">Payment mode: {paymentMode}</div>
+        <div className="receipt-party">Party Name: {partyName}</div>
+        {phoneLine ? <div className="receipt-party">Phone: {phoneLine}</div> : null}
+        {customerAddr ? <div className="receipt-party">Address: {customerAddr}</div> : null}
+        {design.showCashier && order.cashier ? (
+          <div className="receipt-party">Cashier: {order.cashier}</div>
+        ) : null}
+        {design.showOrderBy && orderedLabel ? (
+          <div className="receipt-party">Order by: {orderedLabel}</div>
+        ) : null}
+        {design.showServedBy && servedLabel ? (
+          <div className="receipt-party">Served by: {servedLabel}</div>
+        ) : null}
 
-        <div className="receipt-token">{t("bill.tokenNo")}: {billNo}</div>
+        <div className="receipt-rule dashed" />
 
-        {partition && (
-          <div className="receipt-serving">
-            {t("bill.partition")}: {partition}
+        {narrow ? (
+          <div className="receipt-cols-3">
+            <span>Product</span>
+            <span>Qty</span>
+            <span>Amt</span>
+          </div>
+        ) : (
+          <div className="receipt-cols-4">
+            <span>Product</span>
+            <span>Qty</span>
+            <span>Rate</span>
+            <span>Amount</span>
           </div>
         )}
-        {(table || order.tableNo) && (
-          <div className="receipt-serving">
-            {t("bill.table")}: {table || order.tableNo}
-          </div>
+        <div className="receipt-rule dashed" />
+
+        {order.items.map((i, idx) =>
+          narrow ? (
+            <div key={idx}>
+              <div className="receipt-row-3">
+                <span className="receipt-item-name">{i.name}</span>
+                <span>{qtyPlain(i.quantity)}</span>
+                <span>{amtPlain(i.amount)}</span>
+              </div>
+              <div className="receipt-rate-line">@{amtPlain(i.ratePerUnit ?? 0)}</div>
+            </div>
+          ) : (
+            <div key={idx} className="receipt-row-4">
+              <span className="receipt-item-name">{i.name}</span>
+              <span>{qtyPlain(i.quantity)}</span>
+              <span>{amtPlain(i.ratePerUnit ?? 0)}</span>
+              <span>{amtPlain(i.amount)}</span>
+            </div>
+          ),
         )}
 
-        <div className="receipt-table-badge">
-          {t("bill.tableNo")} {tableBadge}
-        </div>
-
-        <div className="receipt-party">
-          {t("bill.partyName")}: {party}
-        </div>
-
-        {design.showCashier && order.cashier && (
-          <div className="receipt-party">
-            {t("bill.cashier")}: {order.cashier}
-          </div>
-        )}
-        {design.showOrderBy && orderedLabel && (
-          <div className="receipt-party">
-            {t("bill.orderedBy")}: {orderedLabel}
-          </div>
-        )}
-        {design.showServedBy && servedLabel && (
-          <div className="receipt-party">
-            {t("bill.servedBy")}: {servedLabel}
-          </div>
-        )}
-
-        <div className="receipt-rule" />
-        <div className={`receipt-cols-4 ${narrow ? "narrow" : ""}`}>
-          <span>{t("bill.product")}</span>
-          <span>{t("bill.qty")}</span>
-          <span>{t("bill.rate")}</span>
-          <span>{t("bill.amt")}</span>
-        </div>
-        <div className="receipt-rule" />
-
-        {order.items.map((i, idx) => (
-          <div key={idx} className={`receipt-row-4 ${narrow ? "narrow" : ""}`}>
-            <span className="receipt-item-name">{i.name}</span>
-            <span>{qtyPlain(i.quantity)}</span>
-            <span>{amtPlain(i.ratePerUnit ?? 0)}</span>
-            <span>{amtPlain(i.amount)}</span>
-          </div>
-        ))}
-
-        <div className="receipt-rule" />
+        <div className="receipt-rule dashed" />
 
         <div className="receipt-total">
-          <span>{t("bill.grossTotal")}</span>
+          <span>Gross Total:</span>
           <strong>{Math.round(order.total).toLocaleString("en-US")}</strong>
         </div>
         {discount > 0 && (
-          <div className="receipt-total">
-            <span>{t("bill.discount")}</span>
-            <strong>{Math.round(discount).toLocaleString("en-US")}</strong>
-          </div>
+          <>
+            <div className="receipt-total">
+              <span>Discount:</span>
+              <strong>{Math.round(discount).toLocaleString("en-US")}</strong>
+            </div>
+            <div className="receipt-total">
+              <span>Net Total:</span>
+              <strong>{Math.round(net).toLocaleString("en-US")}</strong>
+            </div>
+          </>
         )}
-        {discount > 0 && (
+        {tax > 0 && (
           <div className="receipt-total">
-            <span>{t("bill.netTotal")}</span>
-            <strong>{Math.round(net).toLocaleString("en-US")}</strong>
+            <span>Tax{taxPercent > 0 ? ` (${taxPercent}%)` : ""}:</span>
+            <strong>{Math.round(tax).toLocaleString("en-US")}</strong>
           </div>
         )}
         {design.showTip && showTipAmt > 0 && (
           <div className="receipt-total">
-            <span>{t("bill.tip")}</span>
+            <span>Tip:</span>
             <strong>{Math.round(showTipAmt).toLocaleString("en-US")}</strong>
           </div>
         )}
-
-        {cash > 0 ? (
-          <>
-            <div className="receipt-cash-box">
-              <span>{t("bill.cashReceived")}</span>
-              <strong>{Math.round(cash).toLocaleString("en-US")}</strong>
-            </div>
-            {change > 0 && (
-              <div className="receipt-total">
-                <span>{t("bill.change")}</span>
-                <strong>{Math.round(change).toLocaleString("en-US")}</strong>
+        <div className="receipt-total">
+          <span>Grand Total:</span>
+          <strong>{Math.round(grand).toLocaleString("en-US")}</strong>
+        </div>
+        {methodTotals.length > 0
+          ? methodTotals.map((line) => (
+              <div key={line.label} className="receipt-cash-box">
+                {line.label} : {Math.round(line.amount).toLocaleString("en-US")}
               </div>
-            )}
-          </>
-        ) : (
-          <div className="receipt-pay">
-            {t("bill.payment")} {ts(order.paymentStatus)}
+            ))
+          : null}
+        {!methodTotals.length && isCredit && !isPaid ? (
+          <div className="receipt-party">Payment: Credit / On account</div>
+        ) : null}
+        {!methodTotals.length && !isCredit && !isPaid ? (
+          <div className="receipt-party">Payment: {order.paymentStatus}</div>
+        ) : null}
+        {change > 0 && (
+          <div className="receipt-total">
+            <span>Change:</span>
+            <strong>{Math.round(change).toLocaleString("en-US")}</strong>
+          </div>
+        )}
+        {balance > 0 && (
+          <div className="receipt-total">
+            <span>Balance:</span>
+            <strong>{Math.round(balance).toLocaleString("en-US")}</strong>
           </div>
         )}
 
         {design.showPaidStamp && (
-          <div className="receipt-paid-stamp">
-            <img src={stampSrc} alt={order.paymentStatus === "PAID" ? ts("PAID") : ts("UNPAID")} />
+          <div className="receipt-paid-stamp receipt-paid-stamp--footer" aria-hidden>
+            <img src={stampSrc} alt="" />
           </div>
         )}
 

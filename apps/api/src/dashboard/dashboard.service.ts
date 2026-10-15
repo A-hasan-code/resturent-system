@@ -1,10 +1,13 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { CostingService } from "../common/costing.service";
+import { businessDateOf, businessQueryWindow, isoDay } from "../common/business-day";
 import { toNumber } from "../common/units";
 import { AuthUser } from "../common/decorators";
 import { TipService } from "../system/tip.service";
+import { SettingsService } from "../system/settings.service";
 import { ExpensesService } from "../expenses/expenses.service";
+import { OPEN_UNPAID_CASH } from "../orders/order-scopes";
 
 const STALE_MINUTES = 10;
 
@@ -15,16 +18,16 @@ type DashOrder = {
   status: string;
   paymentStatus: string;
   total: number;
+  paidAmount: number;
+  due: number;
   createdAt: Date;
   waitMinutes: number;
   stale: boolean;
   items: { name: string; quantity: number; sellUnit: string }[];
+  cancelReason?: string | null;
+  cancelledAt?: Date | null;
+  cancelledBy?: string | null;
 };
-
-function isoDay(d: Date) {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
 
 @Injectable()
 export class DashboardService {
@@ -32,16 +35,21 @@ export class DashboardService {
     private readonly prisma: PrismaService,
     private readonly costing: CostingService,
     private readonly tips: TipService,
-    private readonly expenses: ExpensesService
+    private readonly expenses: ExpensesService,
+    private readonly settings: SettingsService
   ) {}
 
   private async netProfitWindows() {
+    const day = await this.settings.dayStart();
     const now = new Date();
-    const today = isoDay(now);
-    const monthFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-    const monthTo = isoDay(new Date(now.getFullYear(), now.getMonth() + 1, 0));
-    const yearFrom = `${now.getFullYear()}-01-01`;
-    const yearTo = `${now.getFullYear()}-12-31`;
+    // Must use restaurant business date (not calendar midnight) — mornings before dayStart
+    // still belong to yesterday; calendar "today" totals were empty until dayStart.
+    const today = businessDateOf(now, day.h, day.m);
+    const [by, bm] = today.split("-").map(Number);
+    const monthFrom = `${String(by).padStart(4, "0")}-${String(bm).padStart(2, "0")}-01`;
+    const monthTo = isoDay(new Date(by, bm, 0));
+    const yearFrom = `${by}-01-01`;
+    const yearTo = `${by}-12-31`;
     const [daily, monthly, yearly] = await Promise.all([
       this.expenses.periodTotals(today, today),
       this.expenses.periodTotals(monthFrom, monthTo),
@@ -80,8 +88,12 @@ export class DashboardService {
 
   async stats(user: AuthUser) {
     const role = (user.roleCode || "UNKNOWN").toUpperCase();
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
+    const day = await this.settings.dayStart();
+    const now = new Date();
+    const bizDate = businessDateOf(now, day.h, day.m);
+    // Same TZ pad as Bills — without it, installed Windows servers show empty today stats.
+    const win = businessQueryWindow(bizDate, day.h, day.m);
+    const inBizDay = { gte: win.gte, lt: win.lt };
     const staleBefore = new Date(Date.now() - STALE_MINUTES * 60 * 1000);
 
     // Older/demo orders often saved costTotal=0 — fill from recipes first
@@ -91,16 +103,20 @@ export class DashboardService {
       pendingKitchen,
       preparing,
       ready,
+      served,
       completed,
       unpaidCount,
       unpaidAgg,
       paidCount,
-      revenueTodayAgg,
+      paidTodayCount,
+      cashCollectedTodayAgg,
+      paidOrdersTodayAgg,
       revenueAllAgg,
       ordersTodayAgg,
       ordersToday,
       totalOrdersAll,
       kitchenActive,
+      staleCount,
       staleOrdersRaw,
       unpaidList,
       lowRaw,
@@ -115,46 +131,79 @@ export class DashboardService {
       waiterOrderCounts,
       creditOpenAgg,
       creditPaidTodayAgg,
+      cancelledToday,
+      cancelledCount,
+      cancelledList,
     ] = await Promise.all([
-      this.prisma.order.count({ where: { status: "PENDING" } }),
-      this.prisma.order.count({ where: { status: "PREPARING" } }),
-      this.prisma.order.count({ where: { status: "READY" } }),
-      this.prisma.order.count({ where: { status: "COMPLETED" } }),
+      this.prisma.order.count({ where: { status: "PENDING", tableId: { not: null } } }),
+      this.prisma.order.count({ where: { status: "PREPARING", tableId: { not: null } } }),
+      this.prisma.order.count({ where: { status: "READY", tableId: { not: null } } }),
+      this.prisma.order.count({ where: { status: "SERVED", tableId: { not: null } } }),
       this.prisma.order.count({
-        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] }, creditCustomerId: null },
+        where: { status: "COMPLETED", updatedAt: inBizDay },
+      }),
+      this.prisma.order.count({ where: OPEN_UNPAID_CASH }),
+      this.prisma.order.aggregate({
+        where: OPEN_UNPAID_CASH,
+        _sum: { total: true, discountAmount: true, paidAmount: true, taxAmount: true },
+      }),
+      this.prisma.order.count({
+        where: { paymentStatus: "PAID", status: { not: "CANCELLED" } },
+      }),
+      this.prisma.order.count({
+        where: {
+          creditCustomerId: null,
+          status: { not: "CANCELLED" },
+          payments: { some: { createdAt: inBizDay } },
+        },
+      }),
+      this.prisma.payment.aggregate({
+        where: {
+          createdAt: inBizDay,
+          order: { creditCustomerId: null, status: { not: "CANCELLED" } },
+        },
+        _sum: { amount: true, tipAmount: true },
       }),
       this.prisma.order.aggregate({
-        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] }, creditCustomerId: null },
-        _sum: { total: true, discountAmount: true, paidAmount: true },
+        where: {
+          paymentStatus: "PAID",
+          status: { not: "CANCELLED" },
+          creditCustomerId: null,
+          updatedAt: inBizDay,
+        },
+        _sum: { costTotal: true },
       }),
-      this.prisma.order.count({ where: { paymentStatus: "PAID" } }),
       this.prisma.order.aggregate({
-        where: { paymentStatus: "PAID", updatedAt: { gte: start } },
-        _sum: { total: true, discountAmount: true, costTotal: true, tipAmount: true },
-      }),
-      this.prisma.order.aggregate({
-        where: { paymentStatus: "PAID" },
+        where: { paymentStatus: "PAID", status: { not: "CANCELLED" } },
         _sum: { total: true, discountAmount: true, costTotal: true },
       }),
       this.prisma.order.aggregate({
-        where: { createdAt: { gte: start }, status: { not: "CANCELLED" } },
+        where: { createdAt: inBizDay, status: { not: "CANCELLED" } },
         _sum: { total: true, discountAmount: true, costTotal: true },
       }),
       this.prisma.order.count({
-        where: { createdAt: { gte: start }, status: { not: "CANCELLED" } },
+        where: { createdAt: inBizDay, status: { not: "CANCELLED" } },
       }),
       this.prisma.order.count({
         where: { status: { not: "CANCELLED" } },
       }),
       this.prisma.order.findMany({
-        where: { status: { in: ["PENDING", "PREPARING", "READY"] } },
+        where: { status: { in: ["PENDING", "PREPARING", "READY"] }, tableId: { not: null } },
         include: { items: true },
         orderBy: { createdAt: "asc" },
         take: 25,
       }),
+      this.prisma.order.count({
+        where: {
+          status: { in: ["PENDING", "PREPARING"] },
+          tableId: { not: null },
+          createdAt: { lte: staleBefore },
+        },
+      }),
       this.prisma.order.findMany({
         where: {
           status: { in: ["PENDING", "PREPARING"] },
+          tableId: { not: null },
           createdAt: { lte: staleBefore },
         },
         include: { items: true },
@@ -162,7 +211,7 @@ export class DashboardService {
         take: 15,
       }),
       this.prisma.order.findMany({
-        where: { paymentStatus: { in: ["UNPAID", "PARTIAL"] }, creditCustomerId: null },
+        where: OPEN_UNPAID_CASH,
         include: { items: true },
         orderBy: { createdAt: "asc" },
         take: 12,
@@ -183,25 +232,25 @@ export class DashboardService {
         take: 12,
       }),
       this.prisma.stockMovement.findMany({
-        where: { type: "SALE", createdAt: { gte: start } },
+        where: { type: "SALE", createdAt: inBizDay },
         select: { quantity: true, ratePerUnit: true },
       }),
-      this.tips.tipsTodayTotal(start),
-      this.tips.tipsTodayForUser(user.id, start),
-      this.tips.tipBoard(start),
+      this.tips.tipsTodayTotal(win.gte, win.lt),
+      this.tips.tipsTodayForUser(user.id, win.gte, win.lt),
+      this.tips.tipBoard(win.gte, win.lt),
       this.prisma.order.count({
-        where: { waiterId: user.id, createdAt: { gte: start }, status: { not: "CANCELLED" } },
+        where: { waiterId: user.id, createdAt: inBizDay, status: { not: "CANCELLED" } },
       }),
       this.prisma.order.count({
         where: {
-          servedByName: { equals: user.name, mode: "insensitive" },
-          createdAt: { gte: start },
-          status: { not: "CANCELLED" },
+          waiterId: user.id,
+          status: { in: ["SERVED", "COMPLETED"] },
+          updatedAt: inBizDay,
         },
       }),
       this.prisma.order.groupBy({
         by: ["waiterId"],
-        where: { createdAt: { gte: start }, status: { not: "CANCELLED" }, waiterId: { not: null } },
+        where: { createdAt: inBizDay, status: { not: "CANCELLED" }, waiterId: { not: null } },
         _count: true,
         _sum: { total: true },
       }),
@@ -211,31 +260,63 @@ export class DashboardService {
           status: { not: "CANCELLED" },
           paymentStatus: { in: ["UNPAID", "PARTIAL"] },
         },
-        _sum: { total: true, discountAmount: true, paidAmount: true },
+        _sum: { total: true, discountAmount: true, paidAmount: true, taxAmount: true },
         _count: true,
       }),
       this.prisma.payment.aggregate({
         where: {
-          createdAt: { gte: start },
+          createdAt: inBizDay,
           order: { creditCustomerId: { not: null } },
         },
         _sum: { amount: true },
         _count: true,
       }),
+      this.prisma.order.count({
+        where: {
+          status: "CANCELLED",
+          OR: [{ cancelledAt: inBizDay }, { AND: [{ cancelledAt: null }, { updatedAt: inBizDay }] }],
+        },
+      }),
+      this.prisma.order.count({ where: { status: "CANCELLED" } }),
+      this.prisma.order.findMany({
+        where: {
+          status: "CANCELLED",
+          OR: [{ cancelledAt: inBizDay }, { AND: [{ cancelledAt: null }, { updatedAt: inBizDay }] }],
+        },
+        include: {
+          items: true,
+          cancelledBy: { select: { name: true } },
+        },
+        orderBy: [{ cancelledAt: "desc" }, { updatedAt: "desc" }],
+        take: 12,
+      }),
     ]);
 
-    const mapOrder = (o: (typeof kitchenActive)[0]): DashOrder => {
+    const mapOrder = (
+      o: (typeof kitchenActive)[0] & {
+        cancelReason?: string | null;
+        cancelledAt?: Date | null;
+        cancelledBy?: { name: string } | null;
+      },
+    ): DashOrder => {
       const waitMinutes = Math.max(
         0,
         Math.floor((Date.now() - new Date(o.createdAt).getTime()) / 60000)
       );
+      const total = toNumber(o.total);
+      const discount = toNumber(o.discountAmount);
+      const tax = toNumber(o.taxAmount);
+      const paidAmount = toNumber(o.paidAmount);
+      const due = Math.max(0, Math.round((total - discount + tax - paidAmount) * 100) / 100);
       return {
         id: o.id,
         orderNo: o.orderNo,
         tableNo: o.tableNo,
         status: o.status,
         paymentStatus: o.paymentStatus,
-        total: toNumber(o.total),
+        total,
+        paidAmount,
+        due,
         createdAt: o.createdAt,
         waitMinutes,
         stale:
@@ -246,6 +327,9 @@ export class DashboardService {
           quantity: toNumber(i.quantity),
           sellUnit: i.sellUnit,
         })),
+        cancelReason: o.cancelReason ?? null,
+        cancelledAt: o.cancelledAt ?? null,
+        cancelledBy: o.cancelledBy?.name ?? null,
       };
     };
 
@@ -253,6 +337,7 @@ export class DashboardService {
     const newOrders = kitchenQueue.filter((o) => o.status === "PENDING");
     const staleOrders = staleOrdersRaw.map(mapOrder);
     const unpaidOrders = unpaidList.map(mapOrder);
+    const cancelledOrders = cancelledList.map(mapOrder);
 
     const lowStock = lowRaw
       .filter((i) => toNumber(i.quantityOnHand) <= toNumber(i.reorderLevel))
@@ -294,12 +379,9 @@ export class DashboardService {
     }
 
     const profitToday = salesToday - costToday;
-    const paidRevenueToday = Math.max(
-      0,
-      toNumber(revenueTodayAgg._sum.total ?? 0) - toNumber(revenueTodayAgg._sum.discountAmount ?? 0),
-    );
-    const paidCostToday = toNumber(revenueTodayAgg._sum.costTotal ?? 0);
-    const tipsCollectedToday = toNumber(revenueTodayAgg._sum.tipAmount ?? 0);
+    const paidRevenueToday = Math.max(0, toNumber(cashCollectedTodayAgg._sum.amount ?? 0));
+    const paidCostToday = toNumber(paidOrdersTodayAgg._sum.costTotal ?? 0);
+    const tipsCollectedToday = toNumber(cashCollectedTodayAgg._sum.tipAmount ?? 0);
     const revenueAll = Math.max(
       0,
       toNumber(revenueAllAgg._sum.total ?? 0) - toNumber(revenueAllAgg._sum.discountAmount ?? 0),
@@ -308,13 +390,15 @@ export class DashboardService {
     const unpaidAmount = Math.max(
       0,
       toNumber(unpaidAgg._sum.total ?? 0) -
-        toNumber(unpaidAgg._sum.discountAmount ?? 0) -
+        toNumber(unpaidAgg._sum.discountAmount ?? 0) +
+        toNumber(unpaidAgg._sum.taxAmount ?? 0) -
         toNumber(unpaidAgg._sum.paidAmount ?? 0),
     );
     const creditOutstanding = Math.max(
       0,
       toNumber(creditOpenAgg._sum.total ?? 0) -
-        toNumber(creditOpenAgg._sum.discountAmount ?? 0) -
+        toNumber(creditOpenAgg._sum.discountAmount ?? 0) +
+        toNumber(creditOpenAgg._sum.taxAmount ?? 0) -
         toNumber(creditOpenAgg._sum.paidAmount ?? 0),
     );
     const creditOutstandingCount = creditOpenAgg._count;
@@ -371,15 +455,21 @@ export class DashboardService {
       pendingKitchen,
       preparing,
       ready,
+      served,
       completed,
+      staleCount,
       totalOrders: totalOrdersAll,
       unpaidCount,
       unpaidAmount,
+      cancelledToday: cancelledToday ?? 0,
+      cancelledCount: cancelledCount ?? 0,
+      cancelledOrders,
       creditOutstanding,
       creditOutstandingCount,
       creditPaidToday,
       creditPaidTodayCount,
       paidCount,
+      paidTodayCount: paidTodayCount ?? 0,
       ordersToday,
       orderAmountToday: salesToday,
       salesToday,
@@ -477,7 +567,9 @@ export class DashboardService {
         pendingKitchen: 0,
         preparing: 0,
         ready: 0,
+        served: 0,
         completed: 0,
+        staleCount: 0,
         totalOrders: 0,
         unpaidCount: 0,
         unpaidAmount: 0,
@@ -509,7 +601,7 @@ export class DashboardService {
       };
     }
 
-    if (role === "MANAGER") {
+    if (role === "SUPERVISOR" || role === "MANAGER") {
       return {
         ...common,
         revenueToday: 0,

@@ -1,17 +1,19 @@
 {
   "name": "@hotel/web",
-  "version": "1.0.0",
+  "version": "1.4.12",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "hotel:dev": "pnpm -w run hotel:dev"
   },
   "dependencies": {
     "@capacitor/core": "^8.5.2",
     "@fontsource/outfit": "^5.3.0",
     "@fontsource/source-serif-4": "^5.3.0",
+    "grapesjs": "^0.23.6",
     "qrcode.react": "^4.2.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

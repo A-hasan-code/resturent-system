@@ -4,17 +4,27 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { createHash, randomBytes } from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { PrintService } from "./print.service";
 
 const ONLINE_MS = 45_000;
+const MAX_DEVICES = 80;
 
 export type AgentPrinterIn = {
   name: string;
   driver?: string;
   port?: string;
   isDefault?: boolean;
+};
+
+export type AgentDeviceIn = {
+  name: string;
+  className?: string;
+  status?: string;
+  instanceId?: string;
+  problem?: boolean;
 };
 
 @Injectable()
@@ -31,27 +41,57 @@ export class PrintAgentsService {
     hostname: string;
     displayName?: string;
     printers: AgentPrinterIn[];
+    devices?: AgentDeviceIn[];
   }) {
-    const machineKey = body.machineKey.trim();
+    let machineKey = body.machineKey.trim();
     const hostname = (body.hostname || "PC").trim().slice(0, 80) || "PC";
-    const displayName = (body.displayName || hostname).trim().slice(0, 80);
+    const incomingLabel = (body.displayName || hostname).trim().slice(0, 80);
+    const devicesJson = toDevicesJson(body.devices);
 
     let agent = await this.prisma.printAgent.findUnique({ where: { machineKey } });
+    // Cloned Windows images can share the same key — split by hostname so each counter PC stays separate.
+    if (agent && agent.hostname.toLowerCase() !== hostname.toLowerCase()) {
+      const splitKey = createHash("sha256")
+        .update(`${machineKey}|${hostname.toLowerCase()}`)
+        .digest("hex")
+        .slice(0, 48);
+      this.log.warn(
+        `Print agent key collision (${machineKey.slice(0, 8)}…) — registering ${hostname} as ${splitKey.slice(0, 8)}…`,
+      );
+      machineKey = splitKey;
+      agent = await this.prisma.printAgent.findUnique({ where: { machineKey } });
+    }
     const token = agent?.token || newToken();
 
     if (agent) {
+      // Keep admin counter label (Lawn / Main / Rooftop); never overwrite with hostname on re-register.
+      const keepLabel = (agent.displayName || "").trim();
       agent = await this.prisma.printAgent.update({
         where: { id: agent.id },
-        data: { hostname, displayName, lastSeenAt: new Date(), token },
+        data: {
+          hostname,
+          displayName: keepLabel || incomingLabel || hostname,
+          lastSeenAt: new Date(),
+          token,
+          devices: devicesJson,
+        },
       });
     } else {
       agent = await this.prisma.printAgent.create({
-        data: { machineKey, hostname, displayName, token, lastSeenAt: new Date() },
+        data: {
+          machineKey,
+          hostname,
+          displayName: incomingLabel || hostname,
+          token,
+          lastSeenAt: new Date(),
+          devices: devicesJson,
+        },
       });
       this.log.log(`Registered print agent ${hostname} (${machineKey.slice(0, 8)}…)`);
     }
 
-    await this.syncPrinters(agent.id, hostname, body.printers || []);
+    const label = (agent.displayName || agent.hostname).trim() || hostname;
+    await this.syncPrinters(agent.id, label, body.printers || []);
     const printers = await this.prisma.printer.findMany({
       where: { agentId: agent.id },
       orderBy: { name: "asc" },
@@ -61,6 +101,7 @@ export class PrintAgentsService {
       agentId: agent.id,
       token: agent.token,
       hostname: agent.hostname,
+      displayName: agent.displayName || agent.hostname,
       printers: printers.map((p) => ({
         id: p.id,
         name: p.name,
@@ -72,14 +113,59 @@ export class PrintAgentsService {
     };
   }
 
-  async heartbeat(agentId: string, printers?: AgentPrinterIn[]) {
+  /** Admin: set counter label (e.g. Lawn Cashier) and retitle auto-named USB printers. */
+  async rename(id: string, displayName: string) {
+    const agent = await this.prisma.printAgent.findUnique({ where: { id } });
+    if (!agent) throw new NotFoundException("Print agent not found");
+
+    const oldLabel = (agent.displayName || agent.hostname).trim() || agent.hostname;
+    const label = displayName.trim().slice(0, 80) || agent.hostname;
+
+    const updated = await this.prisma.printAgent.update({
+      where: { id: agent.id },
+      data: { displayName: label },
+    });
+
+    const printers = await this.prisma.printer.findMany({ where: { agentId: agent.id } });
+    for (const p of printers) {
+      const autoOld = autoPrinterName(oldLabel, p.target);
+      const autoHost = autoPrinterName(agent.hostname, p.target);
+      const autoNew = autoPrinterName(label, p.target);
+      const shouldRetitle =
+        p.name === autoOld ||
+        p.name === autoHost ||
+        p.station === oldLabel ||
+        p.station === agent.hostname ||
+        !p.station;
+      await this.prisma.printer.update({
+        where: { id: p.id },
+        data: {
+          station: label.slice(0, 60),
+          ...(shouldRetitle ? { name: autoNew } : {}),
+        },
+      });
+    }
+
+    this.log.log(`Renamed print agent ${agent.hostname} → ${label}`);
+    return {
+      id: updated.id,
+      hostname: updated.hostname,
+      displayName: updated.displayName || updated.hostname,
+    };
+  }
+
+  async heartbeat(agentId: string, printers?: AgentPrinterIn[], devices?: AgentDeviceIn[]) {
     const agent = await this.prisma.printAgent.findUnique({ where: { id: agentId } });
     if (!agent) throw new NotFoundException("Print agent not found");
     await this.prisma.printAgent.update({
       where: { id: agent.id },
-      data: { lastSeenAt: new Date() },
+      data: {
+        lastSeenAt: new Date(),
+        ...(devices ? { devices: toDevicesJson(devices) } : {}),
+      },
     });
-    if (printers) await this.syncPrinters(agent.id, agent.hostname, printers);
+    const label = (agent.displayName || agent.hostname).trim() || agent.hostname;
+    if (printers) await this.syncPrinters(agent.id, label, printers);
     return { ok: true, lastSeenAt: new Date().toISOString() };
   }
 
@@ -120,12 +206,14 @@ export class PrintAgentsService {
         lastSeenAt: a.lastSeenAt,
         online: Date.now() - a.lastSeenAt.getTime() < ONLINE_MS,
         printers: a.printers,
+        devices: parseDevices(a.devices),
       })),
     );
   }
 
-  private async syncPrinters(agentId: string, hostname: string, printers: AgentPrinterIn[]) {
+  private async syncPrinters(agentId: string, label: string, printers: AgentPrinterIn[]) {
     const seen = new Set<string>();
+    const station = label.slice(0, 60);
     for (const p of printers) {
       const target = (p.name || "").trim();
       if (!target || target.length > 200) continue;
@@ -134,26 +222,36 @@ export class PrintAgentsService {
         where: { agentId_target: { agentId, target } },
       });
       if (existing) {
+        const roles = guessAgentPrinterRoles(target);
+        const healKitchen =
+          roles.printsKot && (!existing.printsKot || existing.printsBill);
         await this.prisma.printer.update({
           where: { id: existing.id },
-          data: { active: true, kind: "AGENT" },
+          data: {
+            active: true,
+            kind: "AGENT",
+            ...(!existing.station?.trim() ? { station } : {}),
+            ...(healKitchen ? { printsKot: true, printsBill: false } : {}),
+          },
         });
       } else {
-        const station = hostname.slice(0, 60);
+        const roles = guessAgentPrinterRoles(target);
         await this.prisma.printer.create({
           data: {
-            name: `${hostname} · ${target}`.slice(0, 60),
+            name: autoPrinterName(label, target),
             kind: "AGENT",
             target,
             agentId,
             station,
             paperWidth: 80,
-            printsKot: false,
-            printsBill: true,
+            printsKot: roles.printsKot,
+            printsBill: roles.printsBill,
             active: true,
           },
         });
-        this.log.log(`Synced agent printer: ${hostname} / ${target}`);
+        this.log.log(
+          `Synced agent printer: ${label} / ${target} (kot=${roles.printsKot} bill=${roles.printsBill})`,
+        );
       }
     }
 
@@ -166,6 +264,45 @@ export class PrintAgentsService {
       await this.prisma.printer.update({ where: { id: g.id }, data: { active: false } });
     }
   }
+}
+
+function autoPrinterName(label: string, target: string) {
+  return `${label} · ${target}`.slice(0, 60);
+}
+
+/** Heuristic roles for newly synced USB printers (admin can change later in Settings). */
+export function guessAgentPrinterRoles(target: string): { printsKot: boolean; printsBill: boolean } {
+  const n = target.trim().toLowerCase();
+  if (/kitchen|kot|cook|grill|tandoor|bbq|bar|beverage|drink/.test(n)) {
+    return { printsKot: true, printsBill: false };
+  }
+  if (/cashier|bill|receipt|counter|laser|office/.test(n)) {
+    return { printsKot: false, printsBill: true };
+  }
+  return { printsKot: false, printsBill: true };
+}
+
+function toDevicesJson(devices?: AgentDeviceIn[]): Prisma.InputJsonValue {
+  return parseDevices(devices ?? []) as unknown as Prisma.InputJsonValue;
+}
+
+function parseDevices(raw: unknown): AgentDeviceIn[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AgentDeviceIn[] = [];
+  for (const d of raw.slice(0, MAX_DEVICES)) {
+    if (!d || typeof d !== "object") continue;
+    const row = d as Record<string, unknown>;
+    const name = String(row.name || "").trim().slice(0, 200);
+    if (!name) continue;
+    out.push({
+      name,
+      className: String(row.className || "").slice(0, 80),
+      status: String(row.status || "").slice(0, 40),
+      instanceId: String(row.instanceId || "").slice(0, 260),
+      problem: !!row.problem,
+    });
+  }
+  return out;
 }
 
 function newToken() {

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, downloadApi, money } from "../api";
+import { useBusinessDay } from "../hotel-gate";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 import { DateField } from "../components/DateField";
 import { MonthField } from "../components/MonthField";
+import { OtherPrintButton } from "../components/OtherPrintButton";
 
 type Day = {
   date: string;
@@ -14,7 +16,10 @@ type Day = {
   paymentsIn: number;
   purchasesOut: number;
   sales: number;
+  discounts?: number;
+  tax?: number;
   tips: number;
+  profit?: number;
 };
 
 type ChartBucket = {
@@ -69,14 +74,20 @@ type Report = {
     salesToday: number;
     salesMonth: number;
     salesYear: number;
+    discountsTotal: number;
+    taxTotal: number;
     tipsTotal: number;
     paymentsIn: number;
     paymentCount: number;
+    byMethod: { CASH: number; CARD: number; WALLET: number; BANK: number };
+    creditSales: number;
+    creditCount: number;
     purchasesOut: number;
     purchaseCount: number;
     foodCost: number;
     unpaidAmount: number;
     unpaidCount: number;
+    profit: number;
   };
   days: Day[];
   byStaff: { name: string; role: string; amount: number; count: number }[];
@@ -86,11 +97,15 @@ type Report = {
     orderNo: number;
     tableNo: string | null;
     total: number;
+    discountAmount: number;
+    taxAmount: number;
     tipAmount: number;
     orderedBy: string | null;
     servedBy: string | null;
     cashier: string | null;
     paymentStatus: string;
+    isCredit: boolean;
+    creditName: string | null;
   }[];
   payments: {
     time: string;
@@ -98,6 +113,7 @@ type Report = {
     tableNo: string | null;
     amount: number;
     tipAmount: number;
+    method: string;
     collectedBy: string;
     role: string;
     handedTo: string | null;
@@ -111,13 +127,12 @@ function isoDay(d: Date) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-function monthBounds(ym: string) {
+function monthBounds(ym: string, businessToday = isoDay(new Date())) {
   const [y, m] = ym.split("-").map(Number);
   const last = new Date(y, m, 0);
-  const today = isoDay(new Date());
   const from = `${ym}-01`;
   let to = isoDay(last);
-  if (to > today) to = today;
+  if (to > businessToday) to = businessToday;
   return { from, to };
 }
 
@@ -207,9 +222,9 @@ function Bars({ days }: { days: Day[] }) {
 export function AuditPage() {
   const toast = useToast();
   const t = useT();
-  const today = isoDay(new Date());
+  const { businessDate: today } = useBusinessDay();
   const thisMonth = today.slice(0, 7);
-  const initial = monthBounds(thisMonth);
+  const initial = monthBounds(thisMonth, today);
 
   const [from, setFrom] = useState(initial.from);
   const [to, setTo] = useState(initial.to);
@@ -299,7 +314,7 @@ export function AuditPage() {
   }
 
   function pickMonth(ym: string) {
-    const b = monthBounds(ym);
+    const b = monthBounds(ym, today);
     commit({ from: b.from, to: b.to, staff });
   }
 
@@ -307,7 +322,7 @@ export function AuditPage() {
     const now = new Date();
     if (kind === "today") return commit({ from: today, to: today, staff });
     if (kind === "month") {
-      const b = monthBounds(thisMonth);
+      const b = monthBounds(thisMonth, today);
       return commit({ from: b.from, to: b.to, staff });
     }
     if (kind === "year") return commit({ from: `${now.getFullYear()}-01-01`, to: today, staff });
@@ -319,10 +334,11 @@ export function AuditPage() {
     commit({ from, to, staff });
   }
 
+  const monthPreset = monthBounds(thisMonth, today);
   const activePreset =
     applied.from === today && applied.to === today
       ? "today"
-      : applied.from === monthBounds(thisMonth).from && applied.to === monthBounds(thisMonth).to
+      : applied.from === monthPreset.from && applied.to === monthPreset.to
         ? "month"
         : applied.from === `${new Date().getFullYear()}-01-01` && applied.to === today
           ? "year"
@@ -357,7 +373,17 @@ export function AuditPage() {
   const salesRows = useMemo(
     () =>
       (report?.sales ?? []).filter((o) =>
-        matchesSearch(q, o.orderNo, o.tableNo, o.orderedBy, o.servedBy, o.cashier, o.paymentStatus)
+        matchesSearch(
+          q,
+          o.orderNo,
+          o.tableNo,
+          o.orderedBy,
+          o.servedBy,
+          o.cashier,
+          o.paymentStatus,
+          o.creditName,
+          o.isCredit ? "CREDIT" : ""
+        )
       ),
     [report, q]
   );
@@ -372,9 +398,20 @@ export function AuditPage() {
             {firstSale ? ` · ${t("audit.since", { date: firstSale })}` : ""}
           </p>
         </div>
-        <button type="button" className="btn" disabled={busy || loading} onClick={() => void downloadPdf()}>
-          {busy ? t("common.loading") : t("audit.pdf")}
-        </button>
+        <div className="row page-head-actions" style={{ gap: "0.5rem", flexWrap: "wrap" }}>
+          <button type="button" className="btn" disabled={busy || loading} onClick={() => void downloadPdf()}>
+            {busy ? t("common.loading") : t("audit.pdf")}
+          </button>
+          <OtherPrintButton
+            path={`/audit/export/print?${new URLSearchParams({
+              from: applied.from,
+              to: applied.to,
+              ...(applied.staff.trim() ? { staff: applied.staff.trim() } : {}),
+            }).toString()}`}
+            className="btn ghost"
+            disabled={busy || loading}
+          />
+        </div>
       </div>
 
       <form className="panel panel-pad audit-filters" style={{ marginBottom: "1rem" }} onSubmit={applyFilters}>
@@ -475,8 +512,50 @@ export function AuditPage() {
 
       <div className="stats">
         <div className="panel stat">
+          <span>{t("audit.discounts")}</span>
+          <strong>{s ? money(s.discountsTotal) : "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("audit.tax")}</span>
+          <strong>{s ? money(s.taxTotal) : "—"}</strong>
+        </div>
+        <div className="panel stat">
           <span>{t("audit.tips")}</span>
           <strong>{s ? money(s.tipsTotal) : "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("audit.foodCost")}</span>
+          <strong>{s ? money(s.foodCost) : "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("audit.profit")}</span>
+          <strong style={{ color: s && s.profit < 0 ? "var(--danger)" : "var(--ok)" }}>
+            {s ? money(s.profit) : "—"}
+          </strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("audit.creditSales")}</span>
+          <strong>{s ? money(s.creditSales) : "—"}</strong>
+          <span className="tiny">{s ? t("audit.creditHint", { n: s.creditCount }) : ""}</span>
+        </div>
+      </div>
+
+      <div className="stats">
+        <div className="panel stat">
+          <span>{t("pay.method.CASH")}</span>
+          <strong>{s ? money(s.byMethod?.CASH ?? 0) : "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("pay.method.CARD")}</span>
+          <strong>{s ? money(s.byMethod?.CARD ?? 0) : "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("pay.method.WALLET")}</span>
+          <strong>{s ? money(s.byMethod?.WALLET ?? 0) : "—"}</strong>
+        </div>
+        <div className="panel stat">
+          <span>{t("pay.method.BANK")}</span>
+          <strong>{s ? money(s.byMethod?.BANK ?? 0) : "—"}</strong>
         </div>
         <div className="panel stat">
           <span>{t("audit.paymentsIn")}</span>
@@ -531,8 +610,11 @@ export function AuditPage() {
                 <tr>
                   <th>{t("common.date")}</th>
                   <th>{t("audit.sales")}</th>
+                  <th>{t("audit.discounts")}</th>
+                  <th>{t("audit.tax")}</th>
                   <th>{t("audit.tips")}</th>
                   <th>{t("audit.billsPaid")}</th>
+                  <th>{t("audit.paymentsIn")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -542,8 +624,11 @@ export function AuditPage() {
                       <td>
                         <strong>{money(d.sales)}</strong>
                       </td>
+                      <td>{money(d.discounts ?? 0)}</td>
+                      <td>{money(d.tax ?? 0)}</td>
                       <td>{money(d.tips)}</td>
                       <td>{d.billsPaid}</td>
+                      <td>{money(d.paymentsIn)}</td>
                     </tr>
                   ))}
               </tbody>
@@ -606,9 +691,12 @@ export function AuditPage() {
                   <th>{t("payments.bill")}</th>
                   <th>{t("common.table")}</th>
                   <th>{t("audit.sales")}</th>
+                  <th>{t("audit.discounts")}</th>
+                  <th>{t("audit.tax")}</th>
                   <th>{t("audit.tips")}</th>
                   <th>{t("payments.orderedBy")}</th>
                   <th>{t("payments.servedBy")}</th>
+                  <th>{t("bills.cashier")}</th>
                   <th>{t("common.status")}</th>
                 </tr>
               </thead>
@@ -621,13 +709,23 @@ export function AuditPage() {
                     <td>
                       <strong>{money(o.total)}</strong>
                     </td>
+                    <td>{o.discountAmount ? money(o.discountAmount) : "—"}</td>
+                    <td>{o.taxAmount ? money(o.taxAmount) : "—"}</td>
                     <td>{o.tipAmount ? money(o.tipAmount) : "—"}</td>
                     <td className="tiny">{o.orderedBy || "—"}</td>
                     <td className="tiny">{o.servedBy || "—"}</td>
+                    <td className="tiny">{o.cashier || "—"}</td>
                     <td>
-                      <span className={`badge ${o.paymentStatus === "PAID" ? "paid" : "unpaid"}`}>
-                        {o.paymentStatus}
-                      </span>
+                      {o.isCredit ? (
+                        <span className="badge credit" title={o.creditName || undefined}>
+                          {t("audit.credit")}
+                          {o.creditName ? ` · ${o.creditName}` : ""}
+                        </span>
+                      ) : (
+                        <span className={`badge ${o.paymentStatus === "PAID" ? "paid" : "unpaid"}`}>
+                          {o.paymentStatus}
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -686,6 +784,7 @@ export function AuditPage() {
                 <tr>
                   <th>{t("common.time")}</th>
                   <th>{t("payments.bill")}</th>
+                  <th>{t("pay.method")}</th>
                   <th>{t("common.amount")}</th>
                   <th>{t("payments.receivedBy")}</th>
                 </tr>
@@ -695,6 +794,20 @@ export function AuditPage() {
                   <tr key={`${p.orderNo}-${p.time}-${i}`}>
                     <td>{stamp(p.time)}</td>
                     <td>#{p.orderNo}</td>
+                    <td>
+                      {(() => {
+                        const m = (p.method || "CASH") as "CASH" | "CARD" | "WALLET" | "BANK";
+                        const key =
+                          m === "CARD"
+                            ? "pay.method.CARD"
+                            : m === "WALLET"
+                              ? "pay.method.WALLET"
+                              : m === "BANK"
+                                ? "pay.method.BANK"
+                                : "pay.method.CASH";
+                        return t(key);
+                      })()}
+                    </td>
                     <td>
                       <strong>{money(p.amount)}</strong>
                       {p.tipAmount > 0 && <span className="tiny muted"> +{money(p.tipAmount)}</span>}
