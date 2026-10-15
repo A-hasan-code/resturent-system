@@ -152,13 +152,14 @@ export class PrintersController {
     return this.prisma.printer.update({ where: { id }, data: dto });
   }
 
+  /** Soft-remove: keeps the row so Active can restore (hard-delete lost printers forever). */
   @Delete(":id")
   @RequirePerms("printers.manage")
   async remove(@Param("id") id: string) {
-    await this.prisma.printer.delete({ where: { id } }).catch(() => {
-      throw new NotFoundException("Printer not found");
-    });
-    return { ok: true };
+    const exists = await this.prisma.printer.findUnique({ where: { id } });
+    if (!exists) throw new NotFoundException("Printer not found");
+    await this.prisma.printer.update({ where: { id }, data: { active: false } });
+    return { ok: true, active: false };
   }
 
   @Post(":id/test")

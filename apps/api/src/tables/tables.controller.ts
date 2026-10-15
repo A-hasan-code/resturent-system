@@ -13,12 +13,17 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { IsBoolean, IsInt, IsOptional, IsString, MaxLength, Min } from "class-validator";
+import { Type } from "class-transformer";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
-import { RequirePerms } from "../common/decorators";
+import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { toNumber } from "../common/units";
+import { RealtimeModule } from "../realtime/realtime.module";
+import { RealtimeService } from "../realtime/realtime.service";
+import { SettingsService } from "../system/settings.service";
+import { SystemModule } from "../system/system.module";
 
 class PartitionDto {
   @IsString() @MaxLength(40) name!: string;
@@ -48,6 +53,65 @@ class UpdateTableDto {
   @IsOptional() @IsBoolean() active?: boolean;
 }
 
+class ReserveTableDto {
+  @IsString() @MaxLength(80) guestName!: string;
+  @IsOptional() @IsString() @MaxLength(30) phone?: string;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) partySize?: number;
+  /** Expected arrival (ISO datetime or local `YYYY-MM-DDTHH:mm`). */
+  @IsOptional() @IsString() reservedFor?: string;
+  @IsOptional() @IsString() @MaxLength(200) notes?: string;
+}
+
+export const CLEAR_TABLE_RESERVATION = {
+  reservedGuestName: null,
+  reservedPhone: null,
+  reservedPartySize: null,
+  reservedFor: null,
+  reservedNotes: null,
+  reservedById: null,
+  reservedAt: null,
+} as const;
+
+/** Supervisor / Cashier / Admin manage reservations — not Waiter. */
+export function canManageReservation(u: AuthUser) {
+  return (
+    ["SUPERVISOR", "CASHIER", "MAIN_CASHIER", "ADMIN", "SYSTEM_MANAGER", "MANAGER"].includes(
+      u.roleCode,
+    ) || u.permissions.includes("users.manage")
+  );
+}
+
+function parseReservedFor(raw?: string | null): Date | null {
+  if (!raw?.trim()) return null;
+  const s = raw.trim();
+  const d = new Date(s.length === 16 ? `${s}:00` : s);
+  if (Number.isNaN(d.getTime())) {
+    throw new BadRequestException("Invalid reservation time");
+  }
+  return d;
+}
+
+function reservationSummary(t: {
+  reservedGuestName: string | null;
+  reservedPhone: string | null;
+  reservedPartySize: number | null;
+  reservedFor: Date | null;
+  reservedNotes: string | null;
+  reservedById: string | null;
+  reservedAt: Date | null;
+}) {
+  if (!t.reservedGuestName?.trim()) return null;
+  return {
+    guestName: t.reservedGuestName.trim(),
+    phone: t.reservedPhone?.trim() || null,
+    partySize: t.reservedPartySize,
+    reservedFor: t.reservedFor,
+    notes: t.reservedNotes?.trim() || null,
+    reservedById: t.reservedById,
+    reservedAt: t.reservedAt,
+  };
+}
+
 /** Cash bills keep the table until paid (and kitchen done). Credit frees once guest has left (COMPLETED). */
 export const OPEN_ORDER_WHERE: Prisma.OrderWhereInput = {
   status: { not: "CANCELLED" },
@@ -71,7 +135,35 @@ export function tableLabel(partitionName: string | null | undefined, tableName: 
 
 @Injectable()
 export class TablesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly settings: SettingsService,
+    private readonly realtime: RealtimeService,
+  ) {}
+
+  private async assertAcceptingOrders() {
+    const gate = await this.settings.hotelStatus();
+    if (gate.acceptingOrders) return;
+    throw new BadRequestException({
+      code: "HOTEL_CLOSED",
+      message: gate.manuallyClosed
+        ? "Hotel is closed — shift ended. No new reservations."
+        : "Outside hotel hours. No new reservations.",
+    });
+  }
+
+  private pingBoard() {
+    this.realtime.orderChanged(
+      {
+        id: "tables",
+        orderNo: 0,
+        tableNo: null,
+        tableId: null,
+        status: "PENDING",
+      },
+      "reservation",
+    );
+  }
 
   async board() {
     const [partitions, tables, open] = await Promise.all([
@@ -109,6 +201,10 @@ export class TablesService {
         : null,
       since: o.createdAt,
       label: o.tableNo || "Takeaway",
+      guestName: o.guestName ?? null,
+      partySize: o.partySize ?? null,
+      reservedFor: o.reservedFor ?? null,
+      kitchenHold: o.kitchenHold ?? false,
     });
 
     const byTableId = new Map(open.filter((o) => o.tableId).map((o) => [o.tableId!, o]));
@@ -128,6 +224,8 @@ export class TablesService {
         partitionName: t.partition.name,
         seats: t.seats,
         order: o ? orderSummary(o) : null,
+        // Soft hold only matters when the table has no open sitting.
+        reservation: o ? null : reservationSummary(t),
       };
     });
 
@@ -145,6 +243,70 @@ export class TablesService {
       takeaway,
     };
   }
+
+  async reserve(user: AuthUser, id: string, dto: ReserveTableDto) {
+    if (!canManageReservation(user)) {
+      throw new BadRequestException("Only supervisor, cashier, or admin can reserve tables");
+    }
+    await this.assertAcceptingOrders();
+    const name = dto.guestName?.trim();
+    if (!name) throw new BadRequestException("Guest name required");
+    const table = await this.prisma.restaurantTable.findUnique({
+      where: { id },
+      include: { partition: { select: { name: true } } },
+    });
+    if (!table || !table.active) throw new NotFoundException("Table not found");
+
+    const open = await this.prisma.order.findFirst({
+      where: {
+        AND: [
+          OPEN_ORDER_WHERE,
+          {
+            OR: [
+              { tableId: table.id },
+              { tableNo: tableLabel(table.partition.name, table.name) },
+              { tableNo: table.name },
+            ],
+          },
+        ],
+      },
+    });
+    if (open) throw new BadRequestException("Table already has an open order");
+
+    const reservedFor = parseReservedFor(dto.reservedFor);
+    const updated = await this.prisma.restaurantTable.update({
+      where: { id },
+      data: {
+        reservedGuestName: name,
+        reservedPhone: dto.phone?.trim() || null,
+        reservedPartySize: dto.partySize ?? null,
+        reservedFor,
+        reservedNotes: dto.notes?.trim() || null,
+        reservedById: user.id,
+        reservedAt: new Date(),
+      },
+    });
+    this.pingBoard();
+    return {
+      id: updated.id,
+      reservation: reservationSummary(updated),
+    };
+  }
+
+  async clearReservation(user: AuthUser, id: string) {
+    if (!canManageReservation(user)) {
+      throw new BadRequestException("Only supervisor, cashier, or admin can cancel reservations");
+    }
+    const table = await this.prisma.restaurantTable.findUnique({ where: { id } });
+    if (!table) throw new NotFoundException("Table not found");
+    if (!table.reservedGuestName) return { ok: true, reservation: null };
+    const updated = await this.prisma.restaurantTable.update({
+      where: { id },
+      data: { ...CLEAR_TABLE_RESERVATION },
+    });
+    this.pingBoard();
+    return { ok: true, reservation: reservationSummary(updated) };
+  }
 }
 
 @Controller("tables")
@@ -159,6 +321,18 @@ export class TablesController {
   @RequirePerms("order.create", "bill.view", "tables.manage", "order.viewOwn", "order.addItems")
   board() {
     return this.tables.board();
+  }
+
+  @Post(":id/reserve")
+  @RequirePerms("order.create", "order.addItems", "tables.manage")
+  reserve(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: ReserveTableDto) {
+    return this.tables.reserve(user, id, dto);
+  }
+
+  @Delete(":id/reserve")
+  @RequirePerms("order.create", "order.addItems", "tables.manage")
+  clearReserve(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    return this.tables.clearReservation(user, id);
   }
 
   @Get("partitions")
@@ -276,6 +450,7 @@ export class TablesController {
 }
 
 @Module({
+  imports: [SystemModule, RealtimeModule],
   providers: [TablesService],
   controllers: [TablesController],
   exports: [TablesService],

@@ -211,6 +211,15 @@ model RestaurantTable {
   seats       Int            @default(4)
   sortOrder   Int            @default(0)
   active      Boolean        @default(true)
+  /// Soft hold for a guest arriving later (cleared when an order is placed or cancel).
+  reservedGuestName String?
+  reservedPhone     String?
+  reservedPartySize Int?
+  /// Expected arrival time.
+  reservedFor       DateTime?
+  reservedNotes     String?
+  reservedById      String?
+  reservedAt        DateTime?
   orders      Order[]
   createdAt   DateTime       @default(now())
 
@@ -807,6 +816,14 @@ model Order {
   status        OrderStatus     @default(PENDING)
   paymentStatus PaymentStatus   @default(UNPAID)
   notes         String?
+  /// Guest for reservation / advance (pre) order.
+  guestName     String?
+  guestPhone    String?
+  partySize     Int?
+  /// When the guest is expected (advance / reserved order).
+  reservedFor   DateTime?
+  /// Pre-order hold: hidden from kitchen + no timers until supervisor/cashier starts (guest arrived).
+  kitchenHold   Boolean         @default(false)
   subtotal      Decimal         @default(0) @db.Decimal(14, 2)
   total         Decimal         @default(0) @db.Decimal(14, 2)
   /// Discount taken off the food total (gross − discount = net food).

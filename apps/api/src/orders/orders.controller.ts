@@ -79,6 +79,13 @@ export class OrdersController {
     return this.orders.addItems(user, id, dto);
   }
 
+  /** Guest arrived — release kitchen hold, start timers, print KOT. */
+  @Post(":id/start-reserved")
+  @RequirePerms("order.create", "order.addItems", "order.edit")
+  startReserved(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    return this.orders.startReserved(user, id);
+  }
+
   @Post(":id/edit")
   @RequirePerms("order.edit")
   editItems(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: EditOrderDto) {

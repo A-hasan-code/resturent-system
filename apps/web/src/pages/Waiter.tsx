@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, formatKg, money, unitLabel } from "../api";
 import { useAuth } from "../auth";
 import { useToast } from "../toast";
@@ -41,6 +41,20 @@ type OrderSummary = {
   assignedCashier: { id: string; name: string; roleCode: string } | null;
   since: string;
   label?: string;
+  guestName?: string | null;
+  partySize?: number | null;
+  reservedFor?: string | null;
+  kitchenHold?: boolean;
+};
+
+type TableReservation = {
+  guestName: string;
+  phone: string | null;
+  partySize: number | null;
+  reservedFor: string | null;
+  notes: string | null;
+  reservedById: string | null;
+  reservedAt: string | null;
 };
 
 type TableCard = {
@@ -52,6 +66,7 @@ type TableCard = {
   partitionName: string;
   seats: number;
   order: OrderSummary | null;
+  reservation?: TableReservation | null;
 };
 
 type TakeawayCard = OrderSummary & { label: string };
@@ -162,6 +177,12 @@ type Order = {
   tipAmount?: number;
   kotRounds: number;
   billRequestedAt: string | null;
+  notes?: string | null;
+  guestName?: string | null;
+  guestPhone?: string | null;
+  partySize?: number | null;
+  reservedFor?: string | null;
+  kitchenHold?: boolean;
   waiter: string | null;
   waiterId?: string | null;
   servedByName?: string | null;
@@ -254,7 +275,24 @@ function orderCardState(o: OrderSummary | null | undefined) {
 }
 
 function tableState(t: TableCard) {
+  if (!t.order && t.reservation) return "reserved";
+  if (t.order?.kitchenHold) return "reserved";
   return orderCardState(t.order);
+}
+
+function toLocalInput(iso: string | null | undefined) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function fmtWhen(iso: string | null | undefined) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
 }
 
 export function WaiterPage() {
@@ -308,6 +346,25 @@ export function WaiterPage() {
   const [editStaff, setEditStaff] = useState<EditBillPerson[]>([]);
   const [savingEdit, setSavingEdit] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [reserveFor, setReserveFor] = useState<TableCard | null>(null);
+  /** hold = table only · open = then menu · send = create order from cart with kitchen hold */
+  const [reserveMode, setReserveMode] = useState<"hold" | "open" | "send">("hold");
+  const [reserveGuest, setReserveGuest] = useState("");
+  const [reservePhone, setReservePhone] = useState("");
+  const [reserveParty, setReserveParty] = useState("2");
+  const [reserveWhen, setReserveWhen] = useState("");
+  const [reserveNotes, setReserveNotes] = useState("");
+  const [reserving, setReserving] = useState(false);
+  const [startingGuest, setStartingGuest] = useState(false);
+  /** Next place-order should kitchen-hold (guest coming later). */
+  const sendAsReservedRef = useRef(false);
+  const pendingReserveGuestRef = useRef<{
+    guestName: string;
+    phone?: string;
+    partySize?: number;
+    reservedFor?: string;
+    notes?: string;
+  } | null>(null);
   const [perHead, setPerHead] = useState<PerHeadCfg | null>(null);
   const [perHeadWizard, setPerHeadWizard] = useState<
     | { step: "persons"; persons: string }
@@ -326,6 +383,11 @@ export function WaiterPage() {
         : selectedTable?.label || selectedTable?.name || "";
 
   const isCashierRole = ["CASHIER", "MAIN_CASHIER"].includes(user?.roleCode ?? "");
+  /** Supervisor / Cashier / Admin — not Waiter. */
+  const canReserve =
+    ["SUPERVISOR", "CASHIER", "MAIN_CASHIER", "ADMIN", "SYSTEM_MANAGER", "MANAGER"].includes(
+      user?.roleCode ?? "",
+    ) || can("users.manage");
   const isTakeawayView = selected === WALK_IN || isTwKey(selected);
   // Takeaway goes to Main Cashier automatically (API) — no cashier pick for walk-in.
   const needsCashierPick = !order && !can("cash.keep") && !isTakeawayView;
@@ -455,12 +517,155 @@ export function WaiterPage() {
       );
       return;
     }
+    if ((tbl.reservation || tbl.order?.kitchenHold) && !canReserve && !can("order.edit")) {
+      toast.push(t("waiter.reserveStaffOnly"), "err");
+      return;
+    }
     setSelected(tbl.id);
     setCart([]);
     setQtyDraft({});
     setQ("");
     setNoteFor(null);
     setEditing(false);
+  }
+
+  function defaultArriveInMinutes(mins: number) {
+    const d = new Date(Date.now() + mins * 60_000);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function openReserveModal(tbl: TableCard, mode: "hold" | "open" | "send" = "hold") {
+    if (!canReserve) {
+      toast.push(t("waiter.reserveStaffOnly"), "err");
+      return;
+    }
+    if (tbl.order?.kitchenHold) {
+      openTable(tbl);
+      return;
+    }
+    if (tbl.order && mode !== "send") return;
+    if (hotelClosed) return;
+    setReserveMode(mode);
+    setReserveFor(tbl);
+    setReserveGuest(tbl.reservation?.guestName ?? "");
+    setReservePhone(tbl.reservation?.phone ?? "");
+    setReserveParty(tbl.reservation?.partySize != null ? String(tbl.reservation.partySize) : "2");
+    setReserveWhen(toLocalInput(tbl.reservation?.reservedFor) || defaultArriveInMinutes(5));
+    setReserveNotes(tbl.reservation?.notes ?? "");
+  }
+
+  /** From order screen: cart ready → reserve + place order (kitchen waits). */
+  function openReserveWithCart() {
+    if (!canReserve || !selectedTable || hotelClosed) return;
+    if (!cart.length) {
+      openReserveModal(selectedTable, "open");
+      return;
+    }
+    if (cart.some((l) => lineQtyIssue(l) != null)) {
+      toast.push(t("waiter.qtyFixFirst"), "err");
+      return;
+    }
+    openReserveModal(selectedTable, "send");
+  }
+
+  function reservePayload() {
+    const guestName = reserveGuest.trim();
+    const party = Number(reserveParty);
+    return {
+      guestName,
+      ...(reservePhone.trim() ? { phone: reservePhone.trim() } : {}),
+      ...(Number.isFinite(party) && party >= 1 ? { partySize: Math.floor(party) } : {}),
+      ...(reserveWhen.trim() ? { reservedFor: reserveWhen.trim() } : {}),
+      ...(reserveNotes.trim() ? { notes: reserveNotes.trim() } : {}),
+    };
+  }
+
+  async function saveReservation(mode: "hold" | "open" | "send" = reserveMode) {
+    if (!reserveFor) return;
+    const guestName = reserveGuest.trim();
+    if (!guestName) {
+      toast.push(t("waiter.reserveNeedName"), "err");
+      return;
+    }
+    const payload = reservePayload();
+    const tableId = reserveFor.id;
+
+    // Cart already has items: place reserved order (kitchen hold) — no separate soft hold needed.
+    if (mode === "send") {
+      setReserveFor(null);
+      pendingReserveGuestRef.current = payload;
+      sendAsReservedRef.current = true;
+      setPickServer(true);
+      return;
+    }
+
+    setReserving(true);
+    try {
+      await api(`/tables/${tableId}/reserve`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      toast.push(t("waiter.reserveSaved", { name: guestName }), "ok");
+      setReserveFor(null);
+      await loadTables();
+      if (mode === "open") {
+        setSelected(tableId);
+        setCart([]);
+        setQtyDraft({});
+        setQ("");
+        setNoteFor(null);
+        setEditing(false);
+        setOrder(null);
+      }
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "HOTEL_CLOSED") {
+        toast.push(t("waiter.hotelClosed"), "err");
+        return;
+      }
+      toast.push(e instanceof Error ? e.message : t("waiter.reserveFailed"), "err");
+    } finally {
+      setReserving(false);
+    }
+  }
+
+  async function cancelReservation(tableId: string) {
+    if (!canReserve) {
+      toast.push(t("waiter.reserveStaffOnly"), "err");
+      return;
+    }
+    const ok = await ask({
+      title: t("waiter.reserveCancel"),
+      body: t("waiter.reserveCancelBody"),
+      confirmLabel: t("waiter.reserveCancel"),
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api(`/tables/${tableId}/reserve`, { method: "DELETE" });
+      toast.push(t("waiter.reserveCleared"), "ok");
+      void loadTables();
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("waiter.reserveFailed"), "err");
+    }
+  }
+
+  async function startGuestArrived() {
+    if (!order?.kitchenHold || !canReserve) return;
+    setStartingGuest(true);
+    try {
+      const res = await api<Order>(`/orders/${order.id}/start-reserved`, {
+        method: "POST",
+        body: "{}",
+      });
+      setOrder(res);
+      toast.push(t("waiter.guestStarted", { n: res.orderNo }), "ok");
+      void loadTables();
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("waiter.guestStartFailed"), "err");
+    } finally {
+      setStartingGuest(false);
+    }
   }
 
   function openTakeaway(tw: TakeawayCard) {
@@ -1002,6 +1207,8 @@ export function WaiterPage() {
       toast.push(t("waiter.qtyFixFirst"), "err");
       return;
     }
+    sendAsReservedRef.current = false;
+    pendingReserveGuestRef.current = null;
     setPickServer(true);
   }
 
@@ -1024,6 +1231,8 @@ export function WaiterPage() {
 
   async function sendOrder(serverName: string, assignedCashierId?: string) {
     setBusy(true);
+    const asReserved = sendAsReservedRef.current;
+    const pendingGuest = pendingReserveGuestRef.current;
     const packageLines = cart
       .filter((c) => c.fromPerHead && c.menuItemId)
       .map((c) => ({ menuItemId: c.menuItemId!, quantity: c.quantity }));
@@ -1058,11 +1267,20 @@ export function WaiterPage() {
         : selectedTable?.label || selectedTable?.name || "";
       const visitClosed = !!order?.creditCustomer && order.status === "COMPLETED";
       const openOrder = order && !visitClosed ? order : null;
+      const hold = selectedTable?.reservation;
+      const kitchenHold =
+        !isTakeaway && (asReserved || !!hold || !!openOrder?.kitchenHold);
+      // Held pre-order: never print KOT / preview until guest start.
       const body = {
         items,
-        printKot: !isTakeaway && hasMenu && !preview,
+        printKot: !kitchenHold && !isTakeaway && hasMenu && !preview,
         servedByName: serverName,
       };
+      const guestName = pendingGuest?.guestName || hold?.guestName;
+      const guestPhone = pendingGuest?.phone || hold?.phone || undefined;
+      const partySize = pendingGuest?.partySize ?? hold?.partySize ?? undefined;
+      const reservedFor = pendingGuest?.reservedFor || hold?.reservedFor || undefined;
+      const notes = pendingGuest?.notes || hold?.notes || undefined;
       const res = openOrder
         ? await api<Order>(`/orders/${openOrder.id}/items`, { method: "POST", body: JSON.stringify(body) })
         : await api<Order>("/orders", {
@@ -1072,9 +1290,17 @@ export function WaiterPage() {
               tableNo,
               ...(selectedTable && !isTakeaway ? { tableId: selectedTable.id } : {}),
               ...(assignedCashierId ? { assignedCashierId } : {}),
+              ...(guestName ? { guestName } : {}),
+              ...(guestPhone ? { guestPhone } : {}),
+              ...(partySize != null ? { partySize } : {}),
+              ...(reservedFor ? { reservedFor } : {}),
+              ...(notes ? { notes } : {}),
+              ...(kitchenHold ? { kitchenHold: true } : {}),
             }),
           });
-      if (!hasMenu) {
+      if (kitchenHold) {
+        toast.push(t("waiter.sentReserved", { n: res.orderNo }), "ok");
+      } else if (!hasMenu) {
         toast.push(t("waiter.sentBillOnly", { n: res.orderNo }), "ok");
       } else if (isTakeaway) {
         toast.push(t("waiter.sent", { n: res.orderNo }), "ok");
@@ -1087,6 +1313,8 @@ export function WaiterPage() {
       setCart([]);
       setQtyDraft({});
       setOrder(res);
+      sendAsReservedRef.current = false;
+      pendingReserveGuestRef.current = null;
       if (isTakeaway) setSelected(twKey(res.id));
       void loadTables();
       api<{ products: TodaySpecial[] }>("/specials/today")
@@ -1124,6 +1352,8 @@ export function WaiterPage() {
         }
       }
       toast.push(e instanceof Error ? e.message : t("waiter.sendFailed"), "err");
+      sendAsReservedRef.current = false;
+      pendingReserveGuestRef.current = null;
     } finally {
       setBusy(false);
     }
@@ -1290,11 +1520,18 @@ export function WaiterPage() {
     return (
       <>
         <span className="tiny">
-          #{o.orderNo} · {minutesSince(o.since, t)}
+          #{o.orderNo}
+          {o.kitchenHold ? ` · ${t("waiter.waitingGuest")}` : ` · ${minutesSince(o.since, t)}`}
         </span>
         <span className="tiny">
-          {o.billRequested ? t("waiter.billRequested") : ts(o.status)}
-          {o.waiter ? ` · ${o.waiter}` : ""}
+          {o.kitchenHold
+            ? o.guestName
+              ? t("waiter.reservedFor", { name: o.guestName })
+              : t("waiter.reserved")
+            : o.billRequested
+              ? t("waiter.billRequested")
+              : ts(o.status)}
+          {!o.kitchenHold && o.waiter ? ` · ${o.waiter}` : ""}
         </span>
         {o.assignedCashier && (
           <span className="tiny muted">
@@ -1307,17 +1544,42 @@ export function WaiterPage() {
   }
 
   function renderTableCard(tbl: TableCard) {
+    const state = tableState(tbl);
+    const showReserveBtn = canReserve && !tbl.order && !hotelClosed;
     return (
-      <button
-        key={tbl.id}
-        type="button"
-        className={`table-card ${tableState(tbl)}`}
-        onClick={() => openTable(tbl)}
-      >
-        <strong>{tbl.name}</strong>
-        <span className="tiny">{tbl.partitionName || tbl.area || ""}</span>
-        {tbl.order ? renderOrderBits(tbl.order) : <span className="tiny">{t("waiter.free")}</span>}
-      </button>
+      <div key={tbl.id} className={`table-card ${state}`}>
+        <button type="button" className="table-card-main" onClick={() => openTable(tbl)}>
+          <strong>{tbl.name}</strong>
+          <span className="tiny">{tbl.partitionName || tbl.area || ""}</span>
+          {tbl.order ? (
+            renderOrderBits(tbl.order)
+          ) : tbl.reservation ? (
+            <>
+              <span className="tiny">{t("waiter.reservedFor", { name: tbl.reservation.guestName })}</span>
+              {tbl.reservation.partySize != null && (
+                <span className="tiny">{t("waiter.reservedParty", { n: tbl.reservation.partySize })}</span>
+              )}
+              {tbl.reservation.reservedFor && (
+                <span className="tiny">{t("waiter.reservedAt", { when: fmtWhen(tbl.reservation.reservedFor) })}</span>
+              )}
+            </>
+          ) : (
+            <span className="tiny">{t("waiter.free")}</span>
+          )}
+        </button>
+        {showReserveBtn && (
+          <button
+            type="button"
+            className="btn sm table-reserve-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              openReserveModal(tbl, "hold");
+            }}
+          >
+            {t("waiter.reserve")}
+          </button>
+        )}
+      </div>
     );
   }
 
@@ -1342,7 +1604,11 @@ export function WaiterPage() {
         open={pickServer}
         initialName={order?.servedByName || order?.servedBy}
         orderTakenBy={order?.orderedBy?.name || order?.waiter || user?.name}
-        onClose={() => setPickServer(false)}
+        onClose={() => {
+          setPickServer(false);
+          sendAsReservedRef.current = false;
+          pendingReserveGuestRef.current = null;
+        }}
         onPick={(name) => afterServerPicked(name)}
       />
       <PickCashierModal
@@ -1350,11 +1616,112 @@ export function WaiterPage() {
         onClose={() => {
           setPickCashier(false);
           setPendingServer(null);
+          sendAsReservedRef.current = false;
+          pendingReserveGuestRef.current = null;
         }}
         onPick={(id) => afterCashierPicked(id)}
       />
       <KotPreviewModal target={kot} onClose={closeKot} />
       <PayModal order={paying ? order : null} onClose={() => setPaying(false)} onPaid={paid} />
+      <Modal
+        open={!!reserveFor}
+        title={reserveMode === "send" ? t("waiter.reserveOrderTitle") : t("waiter.reserveTitle")}
+        onClose={() => !reserving && setReserveFor(null)}
+        size="md"
+      >
+        {reserveFor && (
+          <div className="stack" style={{ gap: "0.75rem" }}>
+            <p className="muted tiny" style={{ margin: 0 }}>
+              {reserveFor.label}
+              {reserveMode === "send" ? ` · ${t("waiter.reserveOrderHint", { n: cart.length })}` : ""}
+            </p>
+            <label className="field">
+              <span>{t("waiter.reserveGuest")}</span>
+              <input
+                className="field-ctrl"
+                value={reserveGuest}
+                onChange={(e) => setReserveGuest(e.target.value)}
+                placeholder={t("waiter.reserveGuestPh")}
+                autoFocus
+              />
+            </label>
+            <div className="row" style={{ gap: "0.75rem" }}>
+              <label className="field" style={{ flex: 1 }}>
+                <span>{t("waiter.reservePhone")}</span>
+                <input
+                  className="field-ctrl"
+                  value={reservePhone}
+                  onChange={(e) => setReservePhone(e.target.value)}
+                  placeholder={t("waiter.reservePhonePh")}
+                  inputMode="tel"
+                />
+              </label>
+              <label className="field" style={{ width: "6.5rem" }}>
+                <span>{t("waiter.reserveParty")}</span>
+                <input
+                  className="field-ctrl"
+                  type="number"
+                  min={1}
+                  value={reserveParty}
+                  onChange={(e) => setReserveParty(e.target.value)}
+                />
+              </label>
+            </div>
+            <label className="field">
+              <span>{t("waiter.reserveWhen")}</span>
+              <input
+                className="field-ctrl"
+                type="datetime-local"
+                value={reserveWhen}
+                onChange={(e) => setReserveWhen(e.target.value)}
+              />
+            </label>
+            <div className="row" style={{ gap: "0.4rem", flexWrap: "wrap" }}>
+              {[5, 10, 15, 30].map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  className="chip"
+                  onClick={() => setReserveWhen(defaultArriveInMinutes(m))}
+                >
+                  {t("waiter.reserveInMin", { n: m })}
+                </button>
+              ))}
+            </div>
+            <label className="field">
+              <span>{t("waiter.reserveNotes")}</span>
+              <input
+                className="field-ctrl"
+                value={reserveNotes}
+                onChange={(e) => setReserveNotes(e.target.value)}
+                placeholder={t("waiter.reserveNotesPh")}
+              />
+            </label>
+            <p className="muted tiny" style={{ margin: 0 }}>
+              {reserveMode === "send" ? t("waiter.preOrderHint") : t("waiter.reserveHoldHint")}
+            </p>
+            <div className="row" style={{ gap: "0.5rem", justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button type="button" className="btn ghost" disabled={reserving} onClick={() => setReserveFor(null)}>
+                {t("common.cancel")}
+              </button>
+              {reserveMode === "send" ? (
+                <button type="button" className="btn" disabled={reserving} onClick={() => void saveReservation("send")}>
+                  {t("waiter.reserveSendOrder")}
+                </button>
+              ) : (
+                <>
+                  <button type="button" className="btn ghost" disabled={reserving} onClick={() => void saveReservation("hold")}>
+                    {reserving ? t("common.saving") : t("waiter.reserveSave")}
+                  </button>
+                  <button type="button" className="btn" disabled={reserving} onClick={() => void saveReservation("open")}>
+                    {reserving ? t("common.saving") : t("waiter.reserveAndOrder")}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </Modal>
     </>
   );
 
@@ -1363,7 +1730,12 @@ export function WaiterPage() {
     const visibleTables = partitionFilter
       ? tables.filter((tbl) => tbl.partitionId === partitionFilter)
       : tables;
-    const busyCount = visibleTables.filter((tbl) => tbl.order).length + takeaways.length;
+    const busyCount =
+      visibleTables.filter((tbl) => tbl.order && !tbl.order.kitchenHold).length + takeaways.length;
+    const reservedCount = visibleTables.filter(
+      (tbl) => (!tbl.order && tbl.reservation) || !!tbl.order?.kitchenHold,
+    ).length;
+    const freeCount = visibleTables.filter((x) => !x.order && !x.reservation).length;
     const sections =
       partitions.length > 0
         ? partitions
@@ -1380,9 +1752,11 @@ export function WaiterPage() {
           <div>
             <h1>{t("waiter.title")}</h1>
             <p>
-              {t("waiter.occupied", { n: busyCount })} ·{" "}
-              {t("waiter.freeCount", { n: visibleTables.length - visibleTables.filter((x) => x.order).length })} ·{" "}
-              {t("waiter.takeawayOpen", { n: takeaways.length })} · {t("waiter.hint")}
+              {t("waiter.occupied", { n: busyCount })} · {t("waiter.reservedCount", { n: reservedCount })} ·{" "}
+              {t("waiter.freeCount", { n: freeCount })} · {t("waiter.takeawayOpen", { n: takeaways.length })}
+            </p>
+            <p className="tiny muted" style={{ margin: "0.25rem 0 0" }}>
+              {canReserve ? t("waiter.hintReserve") : t("waiter.hint")}
             </p>
           </div>
           <button type="button" className="btn ghost sm" onClick={() => void loadTables()}>
@@ -1412,6 +1786,7 @@ export function WaiterPage() {
         )}
         <div className="table-legend tiny muted">
           <span className="dot free" /> {t("waiter.free")}{" "}
+          <span className="dot reserved" /> {t("waiter.reserved")}{" "}
           <span className="dot busy" /> {t("waiter.inProgress")}
           <span className="dot ready" /> {t("waiter.foodReady")}{" "}
           <span className="dot bill" /> {t("waiter.billRequested")}
@@ -1467,7 +1842,9 @@ export function WaiterPage() {
             <h1 style={{ margin: 0 }}>{selectedLabel}</h1>
             <p style={{ margin: 0 }}>
               {order
-                ? `${t("common.order")} #${order.orderNo} · ${ts(order.status)}${order.billRequestedAt ? ` · ${t("waiter.billRequested")}` : ""}`
+                ? order.kitchenHold
+                  ? `${t("common.order")} #${order.orderNo} · ${t("waiter.waitingGuest")}`
+                  : `${t("common.order")} #${order.orderNo} · ${ts(order.status)}${order.billRequestedAt ? ` · ${t("waiter.billRequested")}` : ""}`
                 : t("waiter.newOrder")}
               {order?.assignedCashier ? ` · ${t("waiter.cashier")}: ${order.assignedCashier.name}` : ""}
             </p>
@@ -1481,7 +1858,86 @@ export function WaiterPage() {
             placeholder={t("waiter.customerName")}
           />
         )}
+        {canReserve && selectedTable && !order && !hotelClosed && (
+          <button
+            type="button"
+            className="btn ghost sm"
+            onClick={() => openReserveModal(selectedTable, cart.length ? "send" : "hold")}
+          >
+            {t("waiter.reserve")}
+          </button>
+        )}
       </div>
+
+      {selectedTable && !order && selectedTable.reservation && (
+        <div className="reserve-banner panel panel-pad" style={{ marginBottom: "0.75rem" }}>
+          <div className="row" style={{ justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap" }}>
+            <div>
+              <strong>{t("waiter.reservedFor", { name: selectedTable.reservation.guestName })}</strong>
+              <p className="tiny muted" style={{ margin: "0.2rem 0 0" }}>
+                {[
+                  selectedTable.reservation.phone,
+                  selectedTable.reservation.partySize != null
+                    ? t("waiter.reservedParty", { n: selectedTable.reservation.partySize })
+                    : null,
+                  selectedTable.reservation.reservedFor
+                    ? t("waiter.reservedAt", { when: fmtWhen(selectedTable.reservation.reservedFor) })
+                    : null,
+                  selectedTable.reservation.notes,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+              <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
+                {t("waiter.preOrderHint")}
+              </p>
+            </div>
+            {canReserve && (
+              <button
+                type="button"
+                className="btn danger sm"
+                onClick={() => void cancelReservation(selectedTable.id)}
+              >
+                {t("waiter.reserveCancel")}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {order && (order.kitchenHold || order.guestName) && (
+        <div className="reserve-banner panel panel-pad" style={{ marginBottom: "0.75rem" }}>
+          <div className="row" style={{ justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap" }}>
+            <div>
+              <strong>
+                {order.guestName
+                  ? t("waiter.reservedFor", { name: order.guestName })
+                  : t("waiter.reserved")}
+              </strong>
+              <p className="tiny muted" style={{ margin: "0.2rem 0 0" }}>
+                {[
+                  order.guestPhone,
+                  order.partySize != null ? t("waiter.reservedParty", { n: order.partySize }) : null,
+                  order.reservedFor ? t("waiter.reservedAt", { when: fmtWhen(order.reservedFor) }) : null,
+                  order.kitchenHold ? t("waiter.waitingGuestHint") : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+            </div>
+            {order.kitchenHold && canReserve && (
+              <button
+                type="button"
+                className="btn"
+                disabled={startingGuest}
+                onClick={() => void startGuestArrived()}
+              >
+                {startingGuest ? t("common.saving") : t("waiter.guestArrived")}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="waiter-layout">
         <section className="panel panel-pad">
@@ -2011,6 +2467,22 @@ export function WaiterPage() {
                 ? t(isTakeawayView ? "waiter.sendCashier" : "waiter.sendKitchen", { n: cart.length })
                 : t("waiter.addToBill", { n: cart.length })}
           </button>
+          {canReserve &&
+            selectedTable &&
+            !isTakeawayView &&
+            !order?.kitchenHold &&
+            cart.length > 0 &&
+            !hotelClosed && (
+              <button
+                type="button"
+                className="btn ghost waiter-send"
+                style={{ marginTop: "0.45rem" }}
+                disabled={busy || cartQtyBlocked}
+                onClick={() => openReserveWithCart()}
+              >
+                {t("waiter.reserveWithOrder", { n: cart.length })}
+              </button>
+            )}
           {canReprintKot && cartHasMenu && (
             <label className="check tiny muted" style={{ marginTop: "0.5rem" }}>
               <input type="checkbox" checked={previewFirst} onChange={(e) => setPreviewFirst(e.target.checked)} />

@@ -45,6 +45,7 @@ export class KitchenAlertsService implements OnModuleInit, OnModuleDestroy {
       where: {
         status: "PENDING",
         tableId: { not: null },
+        kitchenHold: false,
         pendingAlertedAt: null,
         pendingAt: { lte: cutoff },
         items: { some: { lineKind: "MENU" } },
@@ -86,6 +87,7 @@ export class KitchenAlertsService implements OnModuleInit, OnModuleDestroy {
       where: {
         status: "PREPARING",
         tableId: { not: null },
+        kitchenHold: false,
         lateAlertedAt: null,
         preparingAt: { not: null },
         items: { some: { lineKind: "MENU" } },

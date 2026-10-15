@@ -222,15 +222,20 @@ export class PrintAgentsService {
         where: { agentId_target: { agentId, target } },
       });
       if (existing) {
+        const roles = guessAgentPrinterRoles(target);
+        const healKitchen =
+          roles.printsKot && (!existing.printsKot || existing.printsBill);
         await this.prisma.printer.update({
           where: { id: existing.id },
           data: {
             active: true,
             kind: "AGENT",
             ...(!existing.station?.trim() ? { station } : {}),
+            ...(healKitchen ? { printsKot: true, printsBill: false } : {}),
           },
         });
       } else {
+        const roles = guessAgentPrinterRoles(target);
         await this.prisma.printer.create({
           data: {
             name: autoPrinterName(label, target),
@@ -239,12 +244,14 @@ export class PrintAgentsService {
             agentId,
             station,
             paperWidth: 80,
-            printsKot: false,
-            printsBill: true,
+            printsKot: roles.printsKot,
+            printsBill: roles.printsBill,
             active: true,
           },
         });
-        this.log.log(`Synced agent printer: ${label} / ${target}`);
+        this.log.log(
+          `Synced agent printer: ${label} / ${target} (kot=${roles.printsKot} bill=${roles.printsBill})`,
+        );
       }
     }
 
@@ -261,6 +268,18 @@ export class PrintAgentsService {
 
 function autoPrinterName(label: string, target: string) {
   return `${label} · ${target}`.slice(0, 60);
+}
+
+/** Heuristic roles for newly synced USB printers (admin can change later in Settings). */
+export function guessAgentPrinterRoles(target: string): { printsKot: boolean; printsBill: boolean } {
+  const n = target.trim().toLowerCase();
+  if (/kitchen|kot|cook|grill|tandoor|bbq|bar|beverage|drink/.test(n)) {
+    return { printsKot: true, printsBill: false };
+  }
+  if (/cashier|bill|receipt|counter|laser|office/.test(n)) {
+    return { printsKot: false, printsBill: true };
+  }
+  return { printsKot: false, printsBill: true };
 }
 
 function toDevicesJson(devices?: AgentDeviceIn[]): Prisma.InputJsonValue {

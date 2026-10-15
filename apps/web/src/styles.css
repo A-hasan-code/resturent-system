@@ -4246,6 +4246,9 @@ tr.bill-requested-row td {
 .dot.free {
   background: #fff;
 }
+.dot.reserved {
+  background: #2f6fed;
+}
 .dot.busy {
   background: var(--accent);
 }
@@ -4265,11 +4268,11 @@ tr.bill-requested-row td {
 .table-card {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 0.2rem;
+  align-items: stretch;
+  gap: 0.35rem;
   min-width: 0;
   min-height: 110px;
-  padding: 0.9rem;
+  padding: 0.65rem;
   border-radius: var(--radius);
   border: 2px solid var(--line);
   background: #fff;
@@ -4279,6 +4282,28 @@ tr.bill-requested-row td {
   box-shadow: var(--shadow);
   touch-action: manipulation;
   overflow: hidden;
+}
+
+.table-card-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  flex: 1;
+  width: 100%;
+  margin: 0;
+  padding: 0.25rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.table-reserve-btn {
+  width: 100%;
+  justify-content: center;
 }
 
 .table-card:disabled {
@@ -4295,6 +4320,18 @@ tr.bill-requested-row td {
   max-width: 100%;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.table-card.reserved {
+  background: #e8f0ff;
+  border-color: #2f6fed;
+  color: #143a7a;
+}
+
+.table-card.busy .table-card-main,
+.table-card.ready .table-card-main,
+.table-card.bill .table-card-main {
+  color: inherit;
 }
 
 .table-card.busy {
@@ -4320,6 +4357,11 @@ tr.bill-requested-row td {
 .table-card.ready .muted,
 .table-card.bill .muted {
   color: rgba(255, 255, 255, 0.9);
+}
+
+.reserve-banner {
+  border: 1px solid #b7cdf8;
+  background: #f3f7ff;
 }
 
 .table-card.walkin {

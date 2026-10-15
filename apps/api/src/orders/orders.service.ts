@@ -7,7 +7,12 @@ import { toNumber } from "../common/units";
 import { AuthUser } from "../common/decorators";
 import { PrintService } from "../print/print.service";
 import { RealtimeService } from "../realtime/realtime.service";
-import { OPEN_ORDER_WHERE, tableLabel } from "../tables/tables.controller";
+import {
+  CLEAR_TABLE_RESERVATION,
+  OPEN_ORDER_WHERE,
+  canManageReservation,
+  tableLabel,
+} from "../tables/tables.controller";
 import {
   AddItemsDto,
   CancelOrderDto,
@@ -28,6 +33,16 @@ import { businessQueryRange } from "../common/business-day";
 import { itemPrepMinutes, targetPrepMinutes } from "./kitchen-timing";
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseOrderReservedFor(raw?: string | null): Date | null {
+  if (!raw?.trim()) return null;
+  const s = raw.trim();
+  const d = new Date(s.length === 16 ? `${s}:00` : s);
+  if (Number.isNaN(d.getTime())) {
+    throw new BadRequestException("Invalid reservation time");
+  }
+  return d;
+}
 
 const staffSelect = { id: true, name: true, role: { select: { code: true, name: true } } } as const;
 
@@ -294,7 +309,11 @@ export class OrdersService {
       throw new ForbiddenException("Kitchen view required");
     }
     const orders = await this.prisma.order.findMany({
-      where: { status: { in: KITCHEN_ACTIVE }, tableId: { not: null } },
+      where: {
+        status: { in: KITCHEN_ACTIVE },
+        tableId: { not: null },
+        kitchenHold: false,
+      },
       include: orderInclude,
       orderBy: { createdAt: "asc" },
       take: 500,
@@ -356,11 +375,61 @@ export class OrdersService {
     // Takeaway is counter work for Main Cashier — no kitchen board / KOT.
     const hasKitchen = !isTakeaway && lines.some((l) => l.lineKind === "MENU");
     const now = new Date();
+
+    // Soft table hold → copy guest onto the order, then clear the hold.
+    let hold: {
+      reservedGuestName: string | null;
+      reservedPhone: string | null;
+      reservedPartySize: number | null;
+      reservedFor: Date | null;
+      reservedNotes: string | null;
+    } | null = null;
+    if (table) {
+      hold = await this.prisma.restaurantTable.findUnique({
+        where: { id: table.id },
+        select: {
+          reservedGuestName: true,
+          reservedPhone: true,
+          reservedPartySize: true,
+          reservedFor: true,
+          reservedNotes: true,
+        },
+      });
+    }
+    const guestName =
+      cleanName(dto.guestName) || cleanName(hold?.reservedGuestName) || null;
+    const guestPhone =
+      (dto.guestPhone?.trim() || hold?.reservedPhone?.trim() || "") || null;
+    const partySize = dto.partySize ?? hold?.reservedPartySize ?? null;
+    const reservedFor = parseOrderReservedFor(dto.reservedFor) ?? hold?.reservedFor ?? null;
+    const noteBits = [dto.notes?.trim(), hold?.reservedNotes?.trim()].filter(Boolean);
+    if (guestName && reservedFor) {
+      noteBits.unshift(`Reserved for ${guestName}`);
+    } else if (guestName && !dto.notes?.trim() && !hold?.reservedNotes?.trim()) {
+      noteBits.unshift(`Guest: ${guestName}`);
+    }
+    const notes = noteBits.length ? noteBits.join(" · ") : dto.notes;
+
+    // Reserved / advance pre-order: kitchen + timers wait until guest is seated.
+    const kitchenHold =
+      !isTakeaway && (dto.kitchenHold === true || !!hold?.reservedGuestName);
+
+    if (kitchenHold && !canManageReservation(user)) {
+      throw new ForbiddenException(
+        "Only supervisor, cashier, or admin can place a reserved / advance order",
+      );
+    }
+
     const order = await this.prisma.order.create({
       data: {
         tableNo: table?.label ?? walkInLabel ?? undefined,
         tableId: table?.id ?? null,
-        notes: dto.notes,
+        notes,
+        guestName,
+        guestPhone,
+        partySize,
+        reservedFor,
+        kitchenHold,
         status: isTakeaway ? "READY" : "PENDING",
         paymentStatus: "UNPAID",
         subtotal,
@@ -407,10 +476,62 @@ export class OrdersService {
       await this.rollbackFailedCreate(order.id, order.orderNo);
       throw e;
     }
-    if (dto.printKot !== false && hasKitchen) await this.queueKot(order.id, 1, user.id);
+    if (table && hold?.reservedGuestName) {
+      await this.prisma.restaurantTable.update({
+        where: { id: table.id },
+        data: { ...CLEAR_TABLE_RESERVATION },
+      });
+    }
+    // Held pre-orders: no KOT / kitchen ping until guest arrives (startReserved).
+    if (!kitchenHold && dto.printKot !== false && hasKitchen) {
+      await this.queueKot(order.id, 1, user.id);
+    }
     const full = await this.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: orderInclude });
-    this.realtime.orderChanged(this.event(full), "created");
+    this.realtime.orderChanged(this.event(full), kitchenHold ? "reservation-hold" : "created");
     return this.toDto(full, canSeeCost(user));
+  }
+
+  /** Guest arrived — release kitchen hold, start timers, send KOT. */
+  async startReserved(user: AuthUser, id: string) {
+    if (!canManageReservation(user)) {
+      throw new ForbiddenException("Only supervisor, cashier, or admin can start a reserved order");
+    }
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      include: { items: { select: { lineKind: true, kotRound: true } } },
+    });
+    if (!order) throw new NotFoundException("Order not found");
+    if (order.status === "CANCELLED") throw new BadRequestException("Order is cancelled");
+    if (!order.kitchenHold) throw new BadRequestException("This order is already started");
+    if (!order.tableId) throw new BadRequestException("Only table orders can be held for a guest");
+
+    const menuRounds = [
+      ...new Set(
+        order.items
+          .filter((i) => i.lineKind === "MENU" && i.kotRound > 0)
+          .map((i) => i.kotRound),
+      ),
+    ].sort((a, b) => a - b);
+
+    const updated = await this.prisma.order.update({
+      where: { id },
+      data: {
+        kitchenHold: false,
+        pendingAt: new Date(),
+        pendingAlertedAt: null,
+        lateAlertedAt: null,
+        preparingAt: null,
+        readyAt: null,
+        status: "PENDING",
+      },
+      include: orderInclude,
+    });
+
+    for (const round of menuRounds) {
+      await this.queueKot(id, round, user.id);
+    }
+    this.realtime.orderChanged(this.event(updated), "created");
+    return this.toDto(updated, canSeeCost(user));
   }
 
   async addItems(user: AuthUser, id: string, dto: AddItemsDto) {
@@ -426,6 +547,11 @@ export class OrdersService {
       throw new BadRequestException("This credit visit is closed. Place a new order for the next sitting");
     }
     this.assertCanModify(user, order);
+    if (order.kitchenHold && !canManageReservation(user)) {
+      throw new ForbiddenException(
+        "Reserved order — wait for supervisor/cashier to start when the guest arrives",
+      );
+    }
     if (dto.creditCustomerId && order.creditCustomerId && dto.creditCustomerId !== order.creditCustomerId) {
       throw new BadRequestException("This table is already on another credit account");
     }
@@ -518,17 +644,20 @@ export class OrdersService {
         discountAmount: Math.min(toNumber(order.discountAmount), Math.max(0, sum - toNumber(order.paidAmount))),
         billRequestedAt: null,
         // Takeaway stays READY with cashier — never bounce back to kitchen PENDING.
+        // Held pre-orders: do not touch kitchen timers until guest is seated.
         ...(isTakeaway
           ? order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED"
             ? {}
             : { status: "READY" as const, readyAt: new Date(), preparingAt: new Date() }
-          : order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED"
-            ? kitchenPendingReset()
-            : menuLines.length && order.status === "PENDING"
-              ? { pendingAt: new Date(), pendingAlertedAt: null }
-              : menuLines.length && order.status === "PREPARING"
-                ? { lateAlertedAt: null }
-                : {}),
+          : order.kitchenHold
+            ? {}
+            : order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED"
+              ? kitchenPendingReset()
+              : menuLines.length && order.status === "PENDING"
+                ? { pendingAt: new Date(), pendingAlertedAt: null }
+                : menuLines.length && order.status === "PREPARING"
+                  ? { lateAlertedAt: null }
+                  : {}),
         paymentStatus: toNumber(order.paidAmount) > 0 ? "PARTIAL" : order.paymentStatus,
         ...(order.waiterId ? {} : { waiterId: user.id }),
         ...(servedByName !== undefined ? { servedByName } : {}),
@@ -561,9 +690,14 @@ export class OrdersService {
       }
       throw e;
     }
-    if (!isTakeaway && dto.printKot !== false && menuLines.length) await this.queueKot(id, nextRound, user.id);
+    if (!order.kitchenHold && !isTakeaway && dto.printKot !== false && menuLines.length) {
+      await this.queueKot(id, nextRound, user.id);
+    }
     const full = await this.prisma.order.findUniqueOrThrow({ where: { id }, include: orderInclude });
-    this.realtime.orderChanged(this.event(full), "items-added");
+    this.realtime.orderChanged(
+      this.event(full),
+      order.kitchenHold ? "reservation-hold" : "items-added",
+    );
     return this.toDto(full, canSeeCost(user));
   }
 
@@ -1336,6 +1470,9 @@ export class OrdersService {
     if (!existing) throw new NotFoundException("Order not found");
     if (existing.status === "CANCELLED") {
       throw new BadRequestException("Order is cancelled");
+    }
+    if (existing.kitchenHold) {
+      throw new BadRequestException("Guest not seated yet — supervisor/cashier must start this order first");
     }
 
     const allowed = KITCHEN_NEXT[existing.status] ?? [];
@@ -2286,6 +2423,7 @@ export class OrdersService {
       paymentStatus: o.paymentStatus,
       waiterId: o.waiterId,
       assignedCashierId: o.assignedCashierId,
+      kitchenHold: o.kitchenHold ?? false,
     };
   }
 
@@ -2307,6 +2445,11 @@ export class OrdersService {
       tableName: o.table?.name ?? null,
       partitionName: o.table?.partition?.name ?? null,
       notes: o.notes,
+      guestName: o.guestName ?? null,
+      guestPhone: o.guestPhone ?? null,
+      partySize: o.partySize ?? null,
+      reservedFor: o.reservedFor ?? null,
+      kitchenHold: o.kitchenHold ?? false,
       status: o.status,
       paymentStatus: o.paymentStatus,
       pendingAt: o.pendingAt,

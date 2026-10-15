@@ -1,4 +1,4 @@
-# Hotel System v1.4.50 - Release Notes
+# Hotel System v1.4.52 - Release Notes
 
 **Date:** 2026-10-15  
 **Targets:** Windows installer + Desktop (Electron) + Android APK + Web/PWA  
@@ -6,7 +6,7 @@
 
 ### Data safety (upgrade confirmation)
 
-**Updating to v1.4.50 will NOT remove your live data.**
+**Updating to v1.4.52 will NOT remove your live data.**
 
 | What happens on upgrade | Result |
 |-------------------------|--------|
@@ -16,6 +16,21 @@
 | Pre-upgrade backup | Written under `C:\ProgramData\HotelSystem\backups` (`*-pre-upgrade.dump`) |
 
 **Do not uninstall first.** Run the newer Setup over the existing install as Administrator (Main PC → server mode). Schema migrate only; live hotel data stays in place.
+
+### v1.4.52
+- **Table reservation (Supervisor / Cashier / Admin):** Hold a free table for a guest (name, phone, party, arrival time, notes). Waiter cannot reserve. Board shows Reserved (blue). Long-press / right-click a free table, or use Reserve on the order screen. Admin can view and edit.
+- **Advance (pre) order:** After reserving, add menu items — order is saved but kitchen slip + timers stay off until guest arrives.
+- **Guest arrived:** Supervisor / Cashier presses **Guest arrived — start kitchen** → KOT prints and kitchen timers start.
+- **Cancel reservation:** From the reserved table order screen.
+
+### v1.4.51
+- **Print — Kitchen/Bar no longer take guest bills:** Agent USB printers named Kitchen / Bar / KOT auto-heal to KOT-only (bill off). Bills prefer non-kitchen printers (e.g. LaserJet / cashier).
+- **Print — server prints when Windows has the printer:** If Additional PC desktop is offline but the same printer name is installed on the Main PC (network/shared Windows printer), the server prints it — no “open desktop app” fail.
+- **Print — remove is undoable:** Remove turns Active off (keeps the row). Tick **Active** to restore. Additional PC USB printers also return when the desktop app opens.
+- **Print — offline Additional PC:** Pending AGENT jobs only fail when the desktop is offline *and* the printer is not on the Main PC spooler.
+- **Close report credit:** Credit sales separated from expected cash; today’s credit new / paid / outstanding shown clearly.
+- **Takeaway credit:** Credit payment allowed on takeaway orders.
+- **Cashier per-head:** Cashiers can charge per-head (not Supervisor-only).
 
 ### v1.4.50
 - **Production empty dashboard / billing fix:** Windows service TZ (`Asia/Karachi` default + installer `TZ`) and shared business-day query pad across Dashboard, Bills, Payments, Finance, Close, Audit, Expenses — empty “today” on installed servers is fixed.

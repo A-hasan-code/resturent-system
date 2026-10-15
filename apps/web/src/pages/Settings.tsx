@@ -1178,6 +1178,7 @@ function PrintersSection() {
     if (!(await ask({ title: t("settings.removePrinter"), body: t("settings.removePrinterConfirm", { name: p.name }), danger: true }))) return;
     try {
       await api(`/printers/${p.id}`, { method: "DELETE" });
+      toast.push(t("settings.printerDeactivated"), "ok");
       void load();
     } catch (err) {
       toast.push(errMsg(err, t("common.failed")), "err");
@@ -1316,9 +1317,10 @@ function PrintersSection() {
         </thead>
         <tbody>
           {pageRows.map((p) => (
-            <tr key={p.id}>
+            <tr key={p.id} style={p.active ? undefined : { opacity: 0.55 }}>
               <td>
                 {p.name}
+                {!p.active && <div className="tiny muted">{t("settings.printerDeactivated")}</div>}
                 {p.categories && <div className="tiny muted">{t("settings.only")} {p.categories}</div>}
                 {p.kind === "AGENT" && p.agent && (
                   <div className="tiny muted">

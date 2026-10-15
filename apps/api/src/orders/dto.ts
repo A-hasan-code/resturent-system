@@ -117,6 +117,36 @@ export class CreateOrderDto {
   @IsOptional()
   servedByName?: string;
 
+  /** Guest name for reservation / advance (pre) order. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  guestName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  guestPhone?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  partySize?: number;
+
+  /** Expected arrival (ISO datetime). Marks advance / reserved order. */
+  @IsOptional()
+  @IsString()
+  reservedFor?: string;
+
+  /**
+   * Advance / reserved pre-order: keep off kitchen board and timers until
+   * supervisor/cashier starts when the guest arrives.
+   */
+  @IsOptional()
+  @IsBoolean()
+  kitchenHold?: boolean;
+
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })

@@ -10,6 +10,7 @@ export type OrderEvent = {
   paymentStatus?: string;
   waiterId?: string | null;
   assignedCashierId?: string | null;
+  kitchenHold?: boolean;
 };
 
 @Injectable()
@@ -21,6 +22,8 @@ export class RealtimeService {
     // Takeaway (no table) belongs to Main Cashier — do not ping kitchen board.
     const toKitchen =
       !!o.tableId &&
+      !o.kitchenHold &&
+      reason !== "reservation-hold" &&
       (reason === "created" ||
         reason === "items-added" ||
         reason === "cancelled" ||
