@@ -11,7 +11,7 @@
     "dev:api": "pnpm --filter @hotel/api run dev",
     "dev:web": "pnpm --filter @hotel/web run dev",
     "dev:desktop": "pnpm --filter @hotel/desktop run dev",
-    "build": "pnpm --filter @hotel/api run build && pnpm --filter @hotel/web run build",
+    "build": "pnpm db:generate && pnpm --filter @hotel/api run build && pnpm --filter @hotel/web run build",
     "typecheck": "pnpm --filter @hotel/api exec tsc --noEmit && pnpm --filter @hotel/web exec tsc -b",
     "db:start": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./scripts/dev-db.ps1\" start",
     "db:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./scripts/dev-db.ps1\" stop",
