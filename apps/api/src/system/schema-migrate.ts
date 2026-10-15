@@ -19,9 +19,14 @@ export async function migrateDeploy(opts: {
   const { apiRoot, databaseUrl } = opts;
   const log = opts.log ?? (() => undefined);
   const node = process.execPath;
-  const prismaJs = join(apiRoot, "node_modules", "prisma", "build", "index.js");
-  if (!existsSync(prismaJs)) {
-    throw new Error(`Prisma CLI missing at ${prismaJs}`);
+  // pnpm often hoists prisma to the workspace root, not apps/api/node_modules.
+  const candidates = [
+    join(apiRoot, "node_modules", "prisma", "build", "index.js"),
+    join(apiRoot, "..", "..", "node_modules", "prisma", "build", "index.js"),
+  ];
+  const prismaJs = candidates.find((p) => existsSync(p));
+  if (!prismaJs) {
+    throw new Error(`Prisma CLI missing (tried: ${candidates.join(", ")})`);
   }
   const env = {
     ...process.env,

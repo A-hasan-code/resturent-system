@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start API (serves built web UI). Migrations run on boot via SchemaHealService.
+# Start API (serves built web UI). Migrate (+ optional seed) then listen.
 set -euo pipefail
 
 cd "$(dirname "$0")/../apps/api"
@@ -11,9 +11,12 @@ export HOTEL_DATA_DIR="${HOTEL_DATA_DIR:-/var/data}"
 
 mkdir -p "$HOTEL_DATA_DIR"
 
+echo "Applying Prisma migrations…"
+pnpm exec prisma migrate deploy --schema=prisma/schema.prisma
+
 if [ "${HOTEL_SEED_ON_BOOT:-0}" = "1" ]; then
   echo "HOTEL_SEED_ON_BOOT=1 — running prisma seed (demo users/menu)…"
-  pnpm exec tsx prisma/seed.ts || echo "Seed finished with warnings (continuing)"
+  pnpm exec tsx prisma/seed.ts
 fi
 
 echo "Starting Hotel System on PORT=${PORT:-10000}…"
