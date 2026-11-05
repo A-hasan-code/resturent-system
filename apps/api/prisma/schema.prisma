@@ -3,8 +3,10 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  /// Neon / PgBouncer: migrate needs a direct (non-pooler) URL. Same as DATABASE_URL on local/Render Postgres.
+  directUrl = env("DIRECT_DATABASE_URL")
 }
 
 enum UnitType {

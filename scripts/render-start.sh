@@ -5,7 +5,11 @@
 # on "Connecting to server…" while /api/health is unreachable.
 set -euo pipefail
 
-cd "$(dirname "$0")/../apps/api"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=neon-direct-url.sh
+source "$ROOT/scripts/neon-direct-url.sh"
+
+cd "$ROOT/apps/api"
 
 export NODE_ENV="${NODE_ENV:-production}"
 export DISCOVERY_DISABLED="${DISCOVERY_DISABLED:-1}"
@@ -16,11 +20,11 @@ export HOTEL_SKIP_SCHEMA_HEAL="${HOTEL_SKIP_SCHEMA_HEAL:-1}"
 
 mkdir -p "$HOTEL_DATA_DIR"
 
-echo "Applying Prisma migrations…"
+echo "Applying Prisma migrations (directUrl=${DIRECT_DATABASE_URL%%@*}@…)…"
 pnpm exec prisma migrate deploy --schema=prisma/schema.prisma
 
 if [ "${HOTEL_SEED_ON_BOOT:-0}" = "1" ]; then
-  echo "HOTEL_SEED_ON_BOOT=1 — running prisma seed (demo users/menu)…"
+  echo "HOTEL_SEED_ON_BOOT=1 — running prisma seed (demo users/menu/kitchen transfer)…"
   echo "Tip: set HOTEL_SEED_ON_BOOT=0 after the first successful boot (faster restarts)."
   pnpm exec tsx prisma/seed.ts
 fi

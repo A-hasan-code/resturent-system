@@ -1,6 +1,6 @@
 # Render Blueprint — one web service + Postgres.
 # Dashboard: New → Blueprint → connect this GitHub repo → apply.
-# Branch defaults to improve-the-system (change below if needed).
+# Branch defaults to master (change below if needed).
 
 databases:
   - name: hotel-db
@@ -14,7 +14,7 @@ services:
     runtime: node
     plan: starter
     region: singapore
-    branch: improve-the-system
+    branch: master
     autoDeploy: true
     buildCommand: bash scripts/render-build.sh
     startCommand: bash scripts/render-start.sh
@@ -32,15 +32,22 @@ services:
         fromDatabase:
           name: hotel-db
           property: connectionString
+      # Same as DATABASE_URL for Render Postgres. For Neon, set this to the non-pooler connection string.
+      - key: DIRECT_DATABASE_URL
+        fromDatabase:
+          name: hotel-db
+          property: connectionString
       - key: JWT_SECRET
         generateValue: true
       - key: DISCOVERY_DISABLED
+        value: "1"
+      - key: HOTEL_SKIP_SCHEMA_HEAL
         value: "1"
       - key: HOTEL_DATA_DIR
         value: /var/data
       - key: WEB_DIST
         value: ../web/dist
-      # First deploy: seeds admin/supervisor/cashier demo users. Set to 0 after first boot.
+      # First deploy: seeds admin/supervisor/cashier demo users + kitchen stations/transfers. Set to 0 after first boot.
       - key: HOTEL_SEED_ON_BOOT
         value: "1"
       - key: TZ
