@@ -37,13 +37,29 @@ const K_ID = "hotel.serverId";
 const K_HOST = "hotel.lastHost";
 const K_PORT = "hotel.port";
 const PROBE_TIMEOUT_MS = 1500;
+/** Render / cloud cold start + migrate can take well over a few seconds. */
+const HOSTED_PROBE_TIMEOUT_MS = 12_000;
 const SCAN_CONCURRENCY = 48;
 const RETRY_MS = 4000;
+const HOSTED_RETRY_MS = 2500;
 /** Short blips reconnect; after this long offline, clients must log in again. */
 const OFFLINE_SESSION_MS = 5 * 60 * 1000;
 const RELOGIN_REASON_KEY = "hotel:reloginReason";
 
 const envBase = import.meta.env.VITE_API_URL as string | undefined;
+
+/** True on public hosts (e.g. *.onrender.com). LAN discovery cannot work there. */
+function isPrivateHost(host: string): boolean {
+  if (!host || host === "localhost" || host.endsWith(".local")) return true;
+  if (host.startsWith("127.")) return true;
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) return false;
+  if (host.startsWith("10.") || host.startsWith("192.168.")) return true;
+  return /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
+}
+
+function isHostedPage(): boolean {
+  return !isNative && typeof location !== "undefined" && !isPrivateHost(location.hostname);
+}
 
 let status: ConnStatus = "ok";
 const statusListeners = new Set<(s: ConnStatus) => void>();
@@ -171,11 +187,24 @@ export async function initConnection() {
 
   // Browser/dev: always try this page's origin first (Vite proxies /api → :4000).
   // Clears a stale saved LAN IP that keeps showing "Connecting to server…".
+  // Hosted (Render etc.): same origin only — never fall into LAN subnet scan.
   if (!isNative) {
-    const page = await probe("", 3000);
-    if (page) {
-      remember("", page);
-      setStatus("ok");
+    const timeout = isHostedPage() ? HOSTED_PROBE_TIMEOUT_MS : 3000;
+    const attempts = isHostedPage() ? 4 : 1;
+    for (let i = 0; i < attempts; i++) {
+      progress = i === 0 ? "Checking this address" : `Waiting for server… (${i + 1}/${attempts})`;
+      const page = await probe("", timeout);
+      if (page) {
+        remember("", page);
+        setStatus("ok");
+        return;
+      }
+      if (i + 1 < attempts) await new Promise((r) => setTimeout(r, HOSTED_RETRY_MS));
+    }
+    if (isHostedPage()) {
+      // Drop any stale LAN IP saved from local testing; keep retrying this URL only.
+      localStorage.removeItem(K_ORIGIN);
+      void reportLost();
       return;
     }
   }
@@ -266,6 +295,18 @@ async function scanSubnet(prefix: string, port: number, lenient = false): Promis
  * reset database); the Android app uses it after a strict pass found nothing.
  */
 async function findServer(lenient: boolean): Promise<boolean> {
+  // Public cloud URL: only same-origin /api/health. Subnet/UDP scan is useless and
+  // leaves the UI stuck on "Connecting to server…" forever.
+  if (isHostedPage()) {
+    progress = "Checking this address";
+    const h = await probe("", HOSTED_PROBE_TIMEOUT_MS);
+    if (h) {
+      remember("", h);
+      return true;
+    }
+    return false;
+  }
+
   const saved = serverOrigin();
   const trusted = isNative ? (saved ? [saved] : []) : ["", saved];
   const uiPort = Number(location.port || localStorage.getItem(K_PORT) || 3000);
@@ -339,7 +380,7 @@ export function reportLost(): Promise<boolean> {
         setStatus("lost");
         first = false;
       }
-      await new Promise((r) => setTimeout(r, RETRY_MS));
+      await new Promise((r) => setTimeout(r, isHostedPage() ? HOSTED_RETRY_MS : RETRY_MS));
     }
   })().finally(() => {
     searching = null;

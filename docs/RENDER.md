@@ -43,3 +43,18 @@ You do not need to paste secrets manually when using the Blueprint.
 - **Migrations:** Applied automatically on API boot (`SchemaHeal`).
 - **Health check:** `GET /api/health`
 - **Redeploy:** Push to the connected branch; `autoDeploy: true`.
+
+## 5. Stuck on “Connecting to server…”
+
+The web UI only continues after `GET /api/health` succeeds. On Render that must be **same origin** (your `*.onrender.com` URL). If health fails once, older builds started a **LAN subnet scan**, which never finds a cloud server — the overlay spins forever.
+
+**Check in order:**
+
+1. Render → **Logs**: service should end with `PixalBotics Restaurant on http://0.0.0.0:…`. If it restarts in a loop, migrate/seed or `DATABASE_URL` is failing.
+2. Open `https://YOUR-SERVICE.onrender.com/api/health` — expect JSON with `"app":"hotel-system"`. If this 502/spinning, the process is not up yet (cold start / crash).
+3. After first successful login, set `HOTEL_SEED_ON_BOOT=0` and redeploy — seed on every boot delays listen and can trip health checks.
+4. Dashboard → service → **Health Check** grace period: raise to **60–120s** so migrate+seed can finish before Render marks the deploy unhealthy.
+5. Hard-refresh or clear site data for that URL (stale `hotel.serverOrigin` from local LAN testing).
+6. Branch: Blueprint deploys `improve-the-system`. Deploying another branch without the Render scripts will not boot correctly.
+
+**Android / desktop apps** cannot auto-discover a Render URL (UDP/mDNS is LAN-only). Use the browser on the Render link, or enter the HTTPS address manually.
