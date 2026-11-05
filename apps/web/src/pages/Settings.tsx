@@ -12,8 +12,28 @@ import { useSocketEvent } from "../socket";
 import { serverOrigin } from "../server";
 import { applyAccent, THEME_PRESETS, useBrand } from "../brand";
 import { useT } from "../i18n";
+import { loadKitchenStations, type KitchenStationRow } from "../kitchenStations";
 
 const PAGE_SIZE = 15;
+
+/** Kitchen station codes stored in printer.categories (comma-separated). */
+function parseKotStationCodes(categories: string): string[] {
+  return categories
+    .split(",")
+    .map((c) => c.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+function joinKotStationCodes(codes: string[]): string {
+  return [...new Set(codes.map((c) => c.trim().toUpperCase()).filter(Boolean))].join(",");
+}
+
+function labelKotStations(categories: string, stations: KitchenStationRow[]): string {
+  const codes = parseKotStationCodes(categories);
+  if (!codes.length) return "";
+  const byCode = new Map(stations.map((s) => [s.code.toUpperCase(), s.name]));
+  return codes.map((c) => byCode.get(c) || c).join(", ");
+}
 
 type ServerInfo = {
   serverId: string;
@@ -35,6 +55,7 @@ type Restaurant = {
   accent?: string;
   logoUrl?: string | null;
   dayStart?: string;
+  dayClose?: string;
 };
 
 type Printer = {
@@ -49,6 +70,9 @@ type Printer = {
   station: string;
   categories: string;
   active: boolean;
+  manual?: boolean;
+  /** LAN TCP or Additional PC agent heartbeat — null for Windows/FILE */
+  online?: boolean | null;
   agentId?: string | null;
   agent?: {
     id: string;
@@ -102,6 +126,8 @@ const EMPTY_PRINTER: Omit<Printer, "id"> = {
   station: "",
   categories: "",
   active: true,
+  agentId: null,
+  online: null,
 };
 
 function errMsg(e: unknown, fallback: string) {
@@ -127,6 +153,7 @@ export function SettingsPage() {
       {can("system.manage") && <BillDesignPreviewSection />}
       {can("printers.manage") && <PrintersSection />}
       {can("printers.manage") && <JobsSection />}
+      {(can("system.manage") || can("printers.manage")) && <NetworkLogsSection />}
       {can("system.manage") && (
         <div className="panel panel-pad settings-block">
           <h2 className="settings-h" style={{ margin: 0 }}>{t("dev.title")}</h2>
@@ -134,6 +161,229 @@ export function SettingsPage() {
           <p className="tiny muted" style={{ margin: "0 0 0.75rem" }}>{t("dev.tabShortcut")}</p>
         </div>
       )}
+    </div>
+  );
+}
+
+type NetHealth = {
+  checkedAt: string;
+  ok: boolean;
+  api: { ok: boolean; port: number; version: string; hostname: string };
+  database: { ok: boolean; detail: string };
+  lan: {
+    ok: boolean;
+    addresses: { iface: string; ip: string }[];
+    urls: string[];
+    mdnsUrl: string;
+  };
+  agents: {
+    id: string;
+    hostname: string;
+    displayName: string;
+    online: boolean;
+    lastSeenAt: string;
+    printerCount: number;
+    activePrinters: number;
+  }[];
+  printers: {
+    network: { total: number; online: number; offline: number };
+    windows: { total: number; active: number };
+    agent: { total: number; active: number };
+  };
+  summary: string[];
+};
+
+type MachineLogRow = {
+  at: string;
+  machineId: string;
+  machineName: string;
+  level: "info" | "warn" | "error";
+  message: string;
+};
+
+/** LAN health + per-machine event log (Main + Cashier PCs). */
+function NetworkLogsSection() {
+  const toast = useToast();
+  const t = useT();
+  const [health, setHealth] = useState<NetHealth | null>(null);
+  const [healthBusy, setHealthBusy] = useState(false);
+  const [machineId, setMachineId] = useState("all");
+  const [machines, setMachines] = useState<{ id: string; name: string }[]>([]);
+  const [entries, setEntries] = useState<MachineLogRow[]>([]);
+  const [logsBusy, setLogsBusy] = useState(false);
+
+  async function loadLogs(id = machineId) {
+    setLogsBusy(true);
+    try {
+      const res = await api<{ machines: { id: string; name: string }[]; entries: MachineLogRow[] }>(
+        `/system/machine-logs?machineId=${encodeURIComponent(id)}&limit=250`
+      );
+      setMachines(res.machines || []);
+      setEntries(res.entries || []);
+    } catch (e) {
+      toast.push(errMsg(e, t("settings.logsLoadFailed")), "err");
+    } finally {
+      setLogsBusy(false);
+    }
+  }
+
+  async function runHealth() {
+    setHealthBusy(true);
+    try {
+      setHealth(await api<NetHealth>("/system/network-health"));
+      void loadLogs(machineId);
+    } catch (e) {
+      toast.push(errMsg(e, t("settings.healthFailed")), "err");
+    } finally {
+      setHealthBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadLogs("all");
+  }, []);
+
+  const levelColor = (level: string) =>
+    level === "error" ? "var(--danger)" : level === "warn" ? "#b45309" : "#0f7a6c";
+
+  return (
+    <div className="panel panel-pad settings-block">
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: "0.75rem" }}>
+        <div>
+          <h2 className="settings-h" style={{ margin: 0 }}>
+            {t("settings.networkLogs")}
+          </h2>
+          <p className="tiny muted" style={{ margin: "0.35rem 0 0" }}>
+            {t("settings.networkLogsHint")}
+          </p>
+        </div>
+        <button type="button" className="btn" disabled={healthBusy} onClick={() => void runHealth()}>
+          {healthBusy ? t("common.loading") : t("settings.checkNetwork")}
+        </button>
+      </div>
+
+      {health && (
+        <div style={{ marginTop: "0.85rem" }}>
+          <div className="row" style={{ gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
+            <span className={`tiny ${health.ok ? "paid" : "unpaid"}`} style={{ fontWeight: 700 }}>
+              {health.ok ? t("settings.healthOk") : t("settings.healthIssues")}
+            </span>
+            <span className="tiny muted">{new Date(health.checkedAt).toLocaleString()}</span>
+          </div>
+          <ul className="tiny" style={{ margin: "0 0 0.65rem", paddingLeft: "1.1rem" }}>
+            {health.summary.map((s) => (
+              <li key={s}>{s}</li>
+            ))}
+          </ul>
+          <div className="row" style={{ gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.65rem" }}>
+            <div className="tiny">
+              <strong>API</strong> · {health.api.hostname}:{health.api.port} · v{health.api.version}
+            </div>
+            <div className="tiny">
+              <strong>DB</strong> ·{" "}
+              <span className={health.database.ok ? "paid" : "unpaid"}>{health.database.detail}</span>
+            </div>
+            <div className="tiny">
+              <strong>LAN</strong> ·{" "}
+              {health.lan.addresses.length
+                ? health.lan.addresses.map((a) => a.ip).join(", ")
+                : "—"}
+            </div>
+            <div className="tiny">
+              <strong>mDNS</strong> · {health.lan.mdnsUrl}
+            </div>
+            <div className="tiny">
+              <strong>{t("settings.lanPrinters")}</strong> · {health.printers.network.online}/
+              {health.printers.network.total} online
+            </div>
+          </div>
+          {!!health.agents.length && (
+            <div className="table-wrap" style={{ marginBottom: "0.75rem" }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>{t("settings.cashierPc")}</th>
+                    <th>{t("settings.status")}</th>
+                    <th>{t("settings.printers")}</th>
+                    <th>{t("settings.lastSeen")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {health.agents.map((a) => (
+                    <tr key={a.id}>
+                      <td>
+                        {a.displayName}
+                        <div className="tiny muted">{a.hostname}</div>
+                      </td>
+                      <td>
+                        <span className={a.online ? "paid" : "unpaid"} style={{ fontWeight: 600 }}>
+                          {a.online ? t("settings.agentOnline") : t("settings.agentOffline")}
+                        </span>
+                      </td>
+                      <td className="tiny">
+                        {a.activePrinters}/{a.printerCount} active
+                      </td>
+                      <td className="tiny muted">{new Date(a.lastSeenAt).toLocaleTimeString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="row" style={{ gap: "0.5rem", alignItems: "flex-end", marginTop: "0.75rem", flexWrap: "wrap" }}>
+        <div className="field" style={{ margin: 0, minWidth: "12rem" }}>
+          <label htmlFor="machine-log-pick">{t("settings.logMachine")}</label>
+          <select
+            id="machine-log-pick"
+            value={machineId}
+            onChange={(e) => {
+              const v = e.target.value;
+              setMachineId(v);
+              void loadLogs(v);
+            }}
+          >
+            <option value="all">{t("settings.logAllMachines")}</option>
+            {machines.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button type="button" className="btn ghost" disabled={logsBusy} onClick={() => void loadLogs(machineId)}>
+          {logsBusy ? t("common.loading") : t("settings.refreshLogs")}
+        </button>
+      </div>
+
+      <div
+        className="tiny"
+        style={{
+          marginTop: "0.65rem",
+          maxHeight: "16rem",
+          overflow: "auto",
+          background: "#f4f7f9",
+          color: "var(--ink)",
+          border: "1px solid var(--line)",
+          borderRadius: "8px",
+          padding: "0.55rem 0.7rem",
+          fontFamily: "ui-monospace, Consolas, monospace",
+          fontSize: "0.8rem",
+          lineHeight: 1.5,
+        }}
+      >
+        {!entries.length && <div className="muted">{t("settings.noLogsYet")}</div>}
+        {entries.map((e, i) => (
+          <div key={`${e.at}-${i}`} style={{ marginBottom: "0.3rem", color: "var(--ink)" }}>
+            <span style={{ color: "#5b6b7a" }}>{new Date(e.at).toLocaleTimeString()}</span>{" "}
+            <span style={{ color: levelColor(e.level), fontWeight: 700 }}>[{e.level}]</span>{" "}
+            <span style={{ color: "var(--accent)", fontWeight: 600 }}>{e.machineName}</span>
+            <span style={{ color: "var(--ink)" }}> — {e.message}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -525,7 +775,15 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
   const { refresh, logoSrc } = useBrand();
   const [info, setInfo] = useState<ServerInfo | null>(null);
   const [serverName, setServerName] = useState("");
-  const [r, setR] = useState<Restaurant>({ name: "", tagline: "", address: "", phone: "", accent: "#0f7a6c", dayStart: "11:00" });
+  const [r, setR] = useState<Restaurant>({
+    name: "",
+    tagline: "",
+    address: "",
+    phone: "",
+    accent: "#0f7a6c",
+    dayStart: "10:00",
+    dayClose: "03:00",
+  });
   const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
@@ -551,7 +809,8 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
           address: r.address,
           phone: r.phone,
           accent: r.accent,
-          dayStart: r.dayStart || "11:00",
+          dayStart: r.dayStart || "10:00",
+          dayClose: r.dayClose || "03:00",
         }),
       });
       applyAccent(r.accent || "#0f7a6c");
@@ -675,12 +934,25 @@ function ServerSection({ canEdit }: { canEdit: boolean }) {
           <input
             id="day-start"
             type="time"
-            value={r.dayStart || "11:00"}
+            value={r.dayStart || "10:00"}
             disabled={!canEdit}
             onChange={(e) => setR({ ...r, dayStart: e.target.value })}
           />
           <p className="tiny muted" style={{ margin: "0.3rem 0 0" }}>
             {t("settings.dayStartHint")}
+          </p>
+        </div>
+        <div className="field">
+          <label htmlFor="day-close">{t("settings.dayClose")}</label>
+          <input
+            id="day-close"
+            type="time"
+            value={r.dayClose || "03:00"}
+            disabled={!canEdit}
+            onChange={(e) => setR({ ...r, dayClose: e.target.value })}
+          />
+          <p className="tiny muted" style={{ margin: "0.3rem 0 0" }}>
+            {t("settings.dayCloseHint")}
           </p>
         </div>
         {canEdit && (
@@ -763,6 +1035,7 @@ function TipPrintSection() {
   const [tipSplit, setTipSplit] = useState("SPLIT_50");
   const [kotShowOrderBy, setKotShowOrderBy] = useState(true);
   const [kotFooter, setKotFooter] = useState("");
+  const [payClosesKitchen, setPayClosesKitchen] = useState(false);
   const [perHeadEnabled, setPerHeadEnabled] = useState(true);
   const [perHeadAmount, setPerHeadAmount] = useState("100");
   const [perHeadLabel, setPerHeadLabel] = useState("Per head");
@@ -783,6 +1056,7 @@ function TipPrintSection() {
     api<{
       tip: { split: string };
       billing?: {
+        payClosesKitchen?: boolean;
         perHead?: {
           enabled: boolean;
           amount: number;
@@ -804,6 +1078,7 @@ function TipPrintSection() {
         setTipSplit(s.tip?.split || "SPLIT_50");
         setKotShowOrderBy(s.print?.kot?.showOrderBy !== false);
         setKotFooter(s.print?.kot?.footer || "");
+        setPayClosesKitchen(!!s.billing?.payClosesKitchen);
         const ph = s.billing?.perHead;
         if (ph) {
           setPerHeadEnabled(ph.enabled !== false);
@@ -847,6 +1122,7 @@ function TipPrintSection() {
           tipSplit,
           kotShowOrderBy: kotShowOrderBy ? "1" : "0",
           kotFooter,
+          payClosesKitchen: payClosesKitchen ? "1" : "0",
           perHeadEnabled: perHeadEnabled ? "1" : "0",
           perHeadAmount: amount,
           perHeadLabel: perHeadLabel.trim() || "Per head",
@@ -1048,6 +1324,21 @@ function TipPrintSection() {
         <input value={kotFooter} onChange={(e) => setKotFooter(e.target.value)} maxLength={120} />
       </div>
 
+      <h3 className="settings-h" style={{ fontSize: "1rem" }}>
+        {t("settings.payClosesKitchen")}
+      </h3>
+      <p className="tiny muted" style={{ marginTop: 0 }}>
+        {t("settings.payClosesKitchenHint")}
+      </p>
+      <label className="switch-row">
+        <input
+          type="checkbox"
+          checked={payClosesKitchen}
+          onChange={(e) => setPayClosesKitchen(e.target.checked)}
+        />
+        <span>{t("settings.payClosesKitchenEnabled")}</span>
+      </label>
+
       <div className="form-footer">
         <button className="btn" type="submit" disabled={busy}>
           {busy ? t("common.saving") : t("common.save")}
@@ -1103,6 +1394,7 @@ function PrintersSection() {
   const [printers, setPrinters] = useState<Printer[]>([]);
   const [agents, setAgents] = useState<PrintAgentRow[]>([]);
   const [agentLabels, setAgentLabels] = useState<Record<string, string>>({});
+  const [kitchenStations, setKitchenStations] = useState<KitchenStationRow[]>([]);
   const [page, setPage] = useState(1);
   const [system, setSystem] = useState<SystemPrinter[]>([]);
   const [serverDevices, setServerDevices] = useState<UsbDeviceRow[]>([]);
@@ -1110,14 +1402,16 @@ function PrintersSection() {
 
   const load = useCallback(async () => {
     try {
-      const [p, a, devices] = await Promise.all([
+      const [p, a, devices, stations] = await Promise.all([
         api<Printer[]>("/printers"),
         api<PrintAgentRow[]>("/print-agents").catch(() => [] as PrintAgentRow[]),
         api<UsbDeviceRow[]>("/printers/devices").catch(() => [] as UsbDeviceRow[]),
+        loadKitchenStations(),
       ]);
       setPrinters(p);
       setAgents(a);
       setServerDevices(devices);
+      setKitchenStations(stations);
       setAgentLabels((prev) => {
         const next: Record<string, string> = {};
         for (const row of a) {
@@ -1138,14 +1432,18 @@ function PrintersSection() {
   }, [load]);
 
   async function openEditor(p?: Printer) {
-    setEdit(p ? { ...p, printsOther: !!p.printsOther } : { ...EMPTY_PRINTER });
-    if (p?.kind === "AGENT") {
-      setSystem([]);
-      return;
-    }
-    try {
-      setSystem(await api<SystemPrinter[]>("/printers/system"));
-    } catch {
+    setEdit(
+      p
+        ? { ...p, printsOther: !!p.printsOther, agentId: p.agentId ?? p.agent?.id ?? null }
+        : { ...EMPTY_PRINTER },
+    );
+    if (!p || p.kind === "WINDOWS") {
+      try {
+        setSystem(await api<SystemPrinter[]>("/printers/system"));
+      } catch {
+        setSystem([]);
+      }
+    } else {
       setSystem([]);
     }
   }
@@ -1153,7 +1451,29 @@ function PrintersSection() {
   async function save(e: FormEvent) {
     e.preventDefault();
     if (!edit) return;
-    const { id, ...body } = edit;
+    if (edit.kind === "AGENT" && !(edit.agentId || "").trim()) {
+      toast.push(t("settings.agentSelectRequired"), "err");
+      return;
+    }
+    if (edit.kind === "AGENT" && !edit.target.trim()) {
+      toast.push(t("settings.agentTargetRequired"), "err");
+      return;
+    }
+    const { id, agent, online, manual, ...rest } = edit;
+    const body = {
+      name: rest.name,
+      kind: rest.kind,
+      target: rest.target.trim(),
+      agentId: rest.kind === "AGENT" ? rest.agentId || undefined : undefined,
+      paperWidth: rest.paperWidth,
+      printsKot: rest.printsKot,
+      printsBill: rest.printsBill,
+      printsOther: rest.kind === "WINDOWS" ? !!rest.printsOther : false,
+      station: rest.station,
+      // Kitchen: selected station codes (empty = all stations → 1 slip on this printer).
+      categories: rest.printsKot ? joinKotStationCodes(parseKotStationCodes(rest.categories)) : "",
+      active: rest.active,
+    };
     try {
       if (id) await api(`/printers/${id}`, { method: "PATCH", body: JSON.stringify(body) });
       else await api("/printers", { method: "POST", body: JSON.stringify(body) });
@@ -1212,6 +1532,26 @@ function PrintersSection() {
     }
   }
 
+  async function removeAgent(a: PrintAgentRow) {
+    const label = a.displayName || a.hostname;
+    if (
+      !(await ask({
+        title: t("settings.removeCashierPc"),
+        body: t("settings.removeCashierPcConfirm", { name: label }),
+        danger: true,
+      }))
+    ) {
+      return;
+    }
+    try {
+      await api(`/print-agents/${a.id}`, { method: "DELETE" });
+      toast.push(t("settings.cashierPcRemoved"), "ok");
+      void load();
+    } catch (err) {
+      toast.push(errMsg(err, t("common.failed")), "err");
+    }
+  }
+
   function kindLabel(kind: Printer["kind"]) {
     if (kind === "WINDOWS") return t("settings.usb");
     if (kind === "NETWORK") return t("settings.lan");
@@ -1244,6 +1584,9 @@ function PrintersSection() {
         <p className="tiny muted" style={{ margin: "0.25rem 0 0.5rem" }}>
           {t("settings.cashierPcsHint")}
         </p>
+        <p className="tiny muted" style={{ margin: "0 0 0.5rem" }}>
+          {t("settings.mainServerNotCashier")}
+        </p>
         {!agents.length ? (
           <p className="tiny muted">{t("settings.noAgents")}</p>
         ) : (
@@ -1274,6 +1617,9 @@ function PrintersSection() {
                   </div>
                   <button type="button" className="btn sm" onClick={() => void saveAgentLabel(a.id)}>
                     {t("settings.saveAgentLabel")}
+                  </button>
+                  <button type="button" className="btn danger sm" onClick={() => void removeAgent(a)}>
+                    {t("settings.removeCashierPc")}
                   </button>
                 </div>
                 <p className="tiny muted" style={{ margin: "0.4rem 0 0" }}>
@@ -1321,12 +1667,29 @@ function PrintersSection() {
               <td>
                 {p.name}
                 {!p.active && <div className="tiny muted">{t("settings.printerDeactivated")}</div>}
-                {p.categories && <div className="tiny muted">{t("settings.only")} {p.categories}</div>}
+                {p.printsKot && (
+                  <div className="tiny muted">
+                    {p.categories
+                      ? `${t("settings.only")} ${labelKotStations(p.categories, kitchenStations) || p.categories}`
+                      : t("settings.kotStationsAll")}
+                  </div>
+                )}
+                {(p.kind === "NETWORK" || p.kind === "WINDOWS" || p.kind === "AGENT") &&
+                  p.online != null && (
+                  <div className={`tiny ${p.online ? "paid" : "unpaid"}`} style={{ fontWeight: 600 }}>
+                    {p.online
+                      ? t("settings.agentOnline")
+                      : p.kind === "AGENT" && !p.agent?.online
+                        ? t("settings.agentOffline")
+                        : t("settings.lanOffline")}
+                  </div>
+                )}
                 {p.kind === "AGENT" && p.agent && (
                   <div className="tiny muted">
-                    {p.agent.online ? t("settings.agentOnline") : t("settings.agentOffline")} · {p.agent.displayName}
+                    {p.agent.displayName}
                     {" · "}
                     {p.agent.hostname}
+                    {p.manual ? ` · ${t("settings.manualAdd")}` : ""}
                   </div>
                 )}
               </td>
@@ -1395,41 +1758,96 @@ function PrintersSection() {
                 onChange={(e) => setEdit({ ...edit, station: e.target.value })}
                 placeholder={t("settings.stationPh")}
               />
-              <p className="tiny muted">{t("settings.stationHint")}</p>
+              <p className="tiny muted">
+                {edit.printsKot ? t("settings.stationHintKitchen") : t("settings.stationHint")}
+              </p>
             </div>
             <div className="field">
               <label>{t("settings.connOptions")}</label>
-              {edit.kind === "AGENT" ? (
-                <>
-                  <input value={t("settings.usbAdditional")} disabled />
-                  <p className="tiny muted">{t("settings.agentPrinterHint")}</p>
-                  {edit.agent && (
-                    <p className="tiny muted">
-                      {edit.agent.online ? t("settings.agentOnline") : t("settings.agentOffline")} · {edit.agent.displayName}
-                      {" · "}
-                      {edit.target}
-                    </p>
-                  )}
-                </>
-              ) : (
-                <select
-                  value={edit.kind}
-                  onChange={(e) => {
-                    const kind = e.target.value as Printer["kind"];
-                    setEdit({
-                      ...edit,
-                      kind,
-                      target: "",
-                      printsOther: kind === "WINDOWS" ? edit.printsOther : false,
-                    });
-                  }}
-                >
-                  <option value="NETWORK">{t("settings.lan")}</option>
-                  <option value="WINDOWS">{t("settings.usbServer")}</option>
-                  <option value="FILE">{t("settings.previewFile")}</option>
-                </select>
-              )}
+              <select
+                value={edit.kind}
+                disabled={!!edit.id && edit.kind === "AGENT"}
+                onChange={(e) => {
+                  const kind = e.target.value as Printer["kind"];
+                  setEdit({
+                    ...edit,
+                    kind,
+                    target: kind === edit.kind ? edit.target : "",
+                    agentId: kind === "AGENT" ? edit.agentId : null,
+                    printsOther: kind === "WINDOWS" ? edit.printsOther : false,
+                  });
+                  if (kind === "WINDOWS") {
+                    void api<SystemPrinter[]>("/printers/system")
+                      .then(setSystem)
+                      .catch(() => setSystem([]));
+                  } else {
+                    setSystem([]);
+                  }
+                }}
+              >
+                <option value="NETWORK">{t("settings.lan")}</option>
+                <option value="WINDOWS">{t("settings.usbServer")}</option>
+                <option value="AGENT">{t("settings.usbAdditional")}</option>
+                <option value="FILE">{t("settings.previewFile")}</option>
+              </select>
             </div>
+            {edit.kind === "AGENT" && (
+              <>
+                <div className="field">
+                  <label>{t("settings.cashierPc")}</label>
+                  <select
+                    value={edit.agentId || ""}
+                    onChange={(e) => setEdit({ ...edit, agentId: e.target.value || null })}
+                    required
+                  >
+                    <option value="">{t("settings.selectCashierPc")}</option>
+                    {agents.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {(a.displayName || a.hostname)
+                          + (a.online ? ` (${t("settings.agentOnline")})` : ` (${t("settings.agentOfflineShort")})`)}
+                      </option>
+                    ))}
+                  </select>
+                  {!agents.length && (
+                    <p className="tiny unpaid">{t("settings.noAgents")}</p>
+                  )}
+                  <p className="tiny muted">{t("settings.agentManualHint")}</p>
+                </div>
+                <div className="field">
+                  <label>{t("settings.windowsPrinterOnPc")}</label>
+                  {(() => {
+                    const ag = agents.find((a) => a.id === edit.agentId);
+                    const names = [
+                      ...new Set(
+                        (ag?.printers || [])
+                          .map((x) => (x.target || x.name || "").trim())
+                          .filter(Boolean),
+                      ),
+                    ];
+                    const listId = `agent-printers-${edit.agentId || "none"}`;
+                    return (
+                      <>
+                        <input
+                          list={names.length ? listId : undefined}
+                          value={edit.target}
+                          onChange={(e) => setEdit({ ...edit, target: e.target.value })}
+                          placeholder={t("settings.agentTargetPh")}
+                          required
+                        />
+                        {names.length > 0 && (
+                          <datalist id={listId}>
+                            {names.map((n) => (
+                              <option key={n} value={n} />
+                            ))}
+                          </datalist>
+                        )}
+                      </>
+                    );
+                  })()}
+                  <p className="tiny muted">{t("settings.agentTargetHint")}</p>
+                </div>
+              </>
+            )}
             {edit.kind === "WINDOWS" && (
               <div className="field">
                 <label>{t("settings.windowsPrinter")}</label>
@@ -1457,6 +1875,11 @@ function PrintersSection() {
                   required
                 />
                 <p className="tiny muted">{t("settings.networkPrinterHint")}</p>
+                {edit.id && edit.online != null && (
+                  <p className={`tiny ${edit.online ? "paid" : "unpaid"}`} style={{ fontWeight: 600 }}>
+                    {edit.online ? t("settings.agentOnline") : t("settings.lanOffline")}
+                  </p>
+                )}
               </div>
             )}
             {edit.kind === "FILE" && (
@@ -1497,14 +1920,55 @@ function PrintersSection() {
             {edit.kind === "WINDOWS" && (
               <p className="tiny muted">{t("settings.otherPrintHint")}</p>
             )}
-            <div className="field">
-              <label>{t("settings.categoriesHint")}</label>
-              <input
-                value={edit.categories}
-                onChange={(e) => setEdit({ ...edit, categories: e.target.value })}
-                placeholder="beverages, cooking, bbq"
-              />
-            </div>
+            {edit.printsKot && (
+              <div className="field">
+                <label>{t("settings.kotStations")}</label>
+                <p className="tiny muted" style={{ marginBottom: "0.5rem" }}>
+                  {t("settings.kotStationsHint")}
+                </p>
+                <label className="check" style={{ display: "flex", marginBottom: "0.35rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={!parseKotStationCodes(edit.categories).length}
+                    onChange={(e) => {
+                      if (e.target.checked) setEdit({ ...edit, categories: "" });
+                      else if (kitchenStations[0]) {
+                        setEdit({ ...edit, categories: kitchenStations[0].code });
+                      }
+                    }}
+                  />{" "}
+                  {t("settings.kotStationsAll")}
+                </label>
+                <div className="row" style={{ flexWrap: "wrap", gap: "0.5rem 1rem" }}>
+                  {kitchenStations.map((s) => {
+                    const selected = parseKotStationCodes(edit.categories);
+                    const allMode = selected.length === 0;
+                    const on = !allMode && selected.includes(s.code.toUpperCase());
+                    return (
+                      <label key={s.id} className="check">
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          disabled={allMode}
+                          onChange={(e) => {
+                            const cur = parseKotStationCodes(edit.categories);
+                            const code = s.code.toUpperCase();
+                            const next = e.target.checked
+                              ? joinKotStationCodes([...cur, code])
+                              : joinKotStationCodes(cur.filter((c) => c !== code));
+                            setEdit({ ...edit, categories: next });
+                          }}
+                        />{" "}
+                        {s.name}
+                      </label>
+                    );
+                  })}
+                </div>
+                {!kitchenStations.length && (
+                  <p className="tiny unpaid">{t("settings.kotStationsEmpty")}</p>
+                )}
+              </div>
+            )}
             </div>
             <div className="form-actions">
               <button className="btn" type="submit">

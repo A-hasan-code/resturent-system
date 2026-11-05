@@ -3,7 +3,7 @@ import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { PermissionsGuard } from "../common/permissions.guard";
 import { AuthUser, CurrentUser, RequirePerms } from "../common/decorators";
 import { CreditService } from "./credit.service";
-import { CreditCustomerDto, SettleCreditDto } from "./dto";
+import { CreditCustomerDto, PrintCreditSlipDto, SettleCreditDto } from "./dto";
 
 @Controller("credit-customers")
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -44,5 +44,11 @@ export class CreditController {
   @RequirePerms("order.pay")
   settle(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: SettleCreditDto) {
     return this.credit.settle(user, id, dto.amount);
+  }
+
+  @Post(":id/print-slip")
+  @RequirePerms("print.bill", "order.pay")
+  printSlip(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: PrintCreditSlipDto) {
+    return this.credit.printSlip(user, id, dto);
   }
 }

@@ -68,7 +68,7 @@ export function FinancePage() {
   const t = useT();
   const toast = useToast();
   const { can } = useAuth();
-  const { businessDate, dayStart } = useBusinessDay();
+  const { businessDate, dayStart, dayClose } = useBusinessDay();
   const [date, setDate] = useState(businessDate);
   const [dateTouched, setDateTouched] = useState(false);
   const [pnl, setPnl] = useState<DayPnl | null>(null);
@@ -141,7 +141,7 @@ export function FinancePage() {
           <p>
             {t("finance.hint")}
             <span className="tiny muted" style={{ display: "block" }}>
-              {t("cash.businessDayHint", { start: dayStart })}
+              {t("cash.businessDayHint", { start: dayStart, end: dayClose })}
             </span>
             {pnl?.locked ? (
               <>

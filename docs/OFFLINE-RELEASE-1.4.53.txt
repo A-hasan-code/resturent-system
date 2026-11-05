@@ -1,0 +1,30 @@
+Hotel System v1.4.53 — Offline release
+======================================
+Date: 2026-10-15
+No internet required on the hotel PCs.
+
+BUILD (on your build machine)
+-----------------------------
+  pnpm release
+  → releases\HotelSystem-Setup-1.4.53.exe
+
+INSTALL / UPGRADE (Main PC)
+--------------------------
+  1. Copy HotelSystem-Setup-1.4.53.exe to USB or LAN share.
+  2. On Main server PC: run as Administrator.
+  3. Do NOT uninstall first — install over the existing copy.
+  4. Live data is kept (Prisma migrate only).
+
+ADDITIONAL / CASHIER PCs
+------------------------
+  Open the Hotel desktop app (not browser only).
+  App can download desktop-update.zip from the Main server over LAN.
+
+WHAT'S NEW (print)
+------------------
+  • Manual Add for Additional PC USB printers
+    Settings → + Add printer → USB (Additional PC)
+  • LAN (IP) printers show Online / Offline (TCP port 9100)
+  • Manual Additional PC printers are not auto-removed on brief USB disconnect
+
+Full notes: docs\RELEASE-NOTES.md

@@ -18,6 +18,7 @@ import { useT } from "../i18n";
 import { useToast } from "../toast";
 import { DateField } from "../components/DateField";
 import { Pagination, paginate } from "../components/Pagination";
+import { useBusinessDay } from "../hotel-gate";
 
 const PAGE_SIZE = 15;
 
@@ -101,11 +102,6 @@ type Cat = { id: string; code: string; name: string };
 
 const UNITS = ["KG", "G", "L", "ML", "PCS"] as const;
 
-function todayIso() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
 export function StorePurchasing({
   view,
   items,
@@ -134,6 +130,7 @@ function BuyView({
   const t = useT();
   const toast = useToast();
   const ask = useConfirm();
+  const { businessDate } = useBusinessDay();
   const [suppliers, setSuppliers] = useState<SupplierRow[]>([]);
   const [recent, setRecent] = useState<RecentBill[]>([]);
   const [categories, setCategories] = useState<Cat[]>([]);
@@ -145,7 +142,7 @@ function BuyView({
   const [newBrand, setNewBrand] = useState("");
   const [newAddress, setNewAddress] = useState("");
   const [addingSupplier, setAddingSupplier] = useState(false);
-  const [date, setDate] = useState(todayIso);
+  const [date, setDate] = useState(businessDate);
   const [payKind, setPayKind] = useState<"CASH" | "CREDIT">("CASH");
   const [paidNow, setPaidNow] = useState("");
   const [note, setNote] = useState("");
@@ -1048,6 +1045,7 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
   const t = useT();
   const toast = useToast();
   const ask = useConfirm();
+  const { businessDate } = useBusinessDay();
   const [rows, setRows] = useState<SupplierRow[]>([]);
   const [addOpen, setAddOpen] = useState(false);
   const [editFor, setEditFor] = useState<SupplierRow | null>(null);
@@ -1061,7 +1059,7 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
   const [viewBillId, setViewBillId] = useState<string | null>(null);
   const [payFor, setPayFor] = useState<SupplierRow | null>(null);
   const [amount, setAmount] = useState("");
-  const [paidOn, setPaidOn] = useState(todayIso);
+  const [paidOn, setPaidOn] = useState(businessDate);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
@@ -1448,7 +1446,7 @@ function SuppliersView({ canManage }: { canManage: boolean }) {
                       onClick={() => {
                         setPayFor(s);
                         setAmount(String(s.outstanding));
-                        setPaidOn(todayIso());
+                        setPaidOn(businessDate);
                         setNote("");
                       }}
                     >
@@ -1839,7 +1837,8 @@ type DailyExtra = {
 function DailyView() {
   const t = useT();
   const toast = useToast();
-  const [date, setDate] = useState(todayIso);
+  const { businessDate } = useBusinessDay();
+  const [date, setDate] = useState(businessDate);
   const [dates, setDates] = useState<string[]>([]);
   const [lines, setLines] = useState<DailyLine[]>([]);
   const [extras, setExtras] = useState<DailyExtra[]>([]);

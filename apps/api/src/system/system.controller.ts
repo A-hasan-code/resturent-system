@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -37,6 +38,8 @@ import { BackupService } from "./backup.service";
 import { SeedService } from "./seed.service";
 import { DeveloperShellService, SHELL_CONFIRM } from "./developer-shell.service";
 import { TipService } from "./tip.service";
+import { MachineLogService } from "./machine-log.service";
+import { NetworkHealthService } from "./network-health.service";
 import { sampleBillPayload } from "../print/receipts";
 import { normalizeBillBlockOrder } from "../print/bill-blocks";
 import {
@@ -106,6 +109,8 @@ class UpdateSettingsDto {
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) perHeadAmount?: number;
   @IsOptional() @IsString() @MaxLength(40) perHeadLabel?: string;
   @IsOptional() @IsString() @Matches(/^[01]$/) taxEnabled?: string;
+  /** When "1": full payment closes the kitchen ticket (COMPLETED / served). */
+  @IsOptional() @IsString() @Matches(/^[01]$/) payClosesKitchen?: string;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) taxPercent?: number;
   @IsOptional() @IsString() @MaxLength(40) ntn?: string;
   @IsOptional() @IsString() @MaxLength(40) strn?: string;
@@ -116,8 +121,10 @@ class UpdateSettingsDto {
   @ValidateNested({ each: true })
   @Type(() => PerHeadPackageItemDto)
   perHeadPackage?: PerHeadPackageItemDto[];
-  /** Business day starts at this server time, HH:mm. Runs until the same time next day. */
+  /** Shift open (business day starts), HH:mm. */
   @IsOptional() @IsString() @Matches(/^([01]\d|2[0-3]):[0-5]\d$/) dayStart?: string;
+  /** Shift close (business day ends), HH:mm — next morning if earlier than dayStart (e.g. 03:00). */
+  @IsOptional() @IsString() @Matches(/^([01]\d|2[0-3]):[0-5]\d$/) dayClose?: string;
 }
 
 class PerHeadPackageItemDto {
@@ -176,8 +183,30 @@ export class SystemController {
     private readonly seeds: SeedService,
     private readonly shell: DeveloperShellService,
     private readonly tips: TipService,
-    private readonly realtime: RealtimeService
+    private readonly realtime: RealtimeService,
+    private readonly machineLogs: MachineLogService,
+    private readonly networkHealth: NetworkHealthService
   ) {}
+
+  /** Per-machine logs (Main + Cashier / Additional PCs). Admin Settings. */
+  @Get("machine-logs")
+  @RequirePerms("system.manage", "printers.manage")
+  machineLogsList(
+    @Query("machineId") machineId?: string,
+    @Query("limit") limit?: string
+  ) {
+    return this.machineLogs.list({
+      machineId: machineId || "all",
+      limit: limit ? Number(limit) : 150,
+    });
+  }
+
+  /** LAN / DB / Cashier PC / printer reachability snapshot. */
+  @Get("network-health")
+  @RequirePerms("system.manage", "printers.manage")
+  networkHealthCheck() {
+    return this.networkHealth.check();
+  }
 
   /** Any signed-in user can see whether new orders are allowed. */
   @Get("hotel")
@@ -218,6 +247,7 @@ export class SystemController {
         perHead,
         taxEnabled: (taxS["billing.taxEnabled"] ?? (taxPercent > 0 ? "1" : "0")) !== "0",
         taxPercent,
+        payClosesKitchen: (taxS["billing.payClosesKitchen"] ?? "0") !== "0",
       },
       legal: {
         ntn: (legal["restaurant.ntn"] || "").trim(),
@@ -338,9 +368,11 @@ export class SystemController {
       ["perHeadEnabled", "billing.perHeadEnabled"],
       ["perHeadLabel", "billing.perHeadLabel"],
       ["taxEnabled", "billing.taxEnabled"],
+      ["payClosesKitchen", "billing.payClosesKitchen"],
       ["ntn", "restaurant.ntn"],
       ["strn", "restaurant.strn"],
       ["dayStart", "restaurant.dayStart"],
+      ["dayClose", "restaurant.dayClose"],
     ];
     for (const [field, key] of map) {
       const v = dto[field];

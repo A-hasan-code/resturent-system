@@ -319,13 +319,12 @@ export function AuditPage() {
   }
 
   function preset(kind: "today" | "month" | "year" | "all") {
-    const now = new Date();
     if (kind === "today") return commit({ from: today, to: today, staff });
     if (kind === "month") {
       const b = monthBounds(thisMonth, today);
       return commit({ from: b.from, to: b.to, staff });
     }
-    if (kind === "year") return commit({ from: `${now.getFullYear()}-01-01`, to: today, staff });
+    if (kind === "year") return commit({ from: `${today.slice(0, 4)}-01-01`, to: today, staff });
     return commit({ from: firstSale || today, to: today, staff });
   }
 
@@ -340,7 +339,7 @@ export function AuditPage() {
       ? "today"
       : applied.from === monthPreset.from && applied.to === monthPreset.to
         ? "month"
-        : applied.from === `${new Date().getFullYear()}-01-01` && applied.to === today
+        : applied.from === `${today.slice(0, 4)}-01-01` && applied.to === today
           ? "year"
           : firstSale && applied.from === firstSale && applied.to === today
             ? "all"

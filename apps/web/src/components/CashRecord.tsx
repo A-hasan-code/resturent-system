@@ -14,6 +14,7 @@ type Result = {
   rows: PaymentRow[];
   summary: { count: number; bills: number; total: number };
   dayStart?: string;
+  dayClose?: string;
 };
 
 const clock = (iso: string) =>
@@ -23,7 +24,7 @@ const clock = (iso: string) =>
 export function CashRecord() {
   const { user } = useAuth();
   const t = useT();
-  const { businessDate, dayStart } = useBusinessDay();
+  const { businessDate, dayStart, dayClose } = useBusinessDay();
   const [day, setDay] = useState(businessDate);
   const [dayTouched, setDayTouched] = useState(false);
   const [page, setPage] = useState(1);
@@ -67,7 +68,8 @@ export function CashRecord() {
 
   const rows = data?.rows ?? [];
   const pageRows = paginate(rows, page, PAGE_SIZE);
-  const windowLabel = data?.dayStart || dayStart;
+  const windowStart = data?.dayStart || dayStart;
+  const windowEnd = data?.dayClose || dayClose;
 
   return (
     <div>
@@ -75,7 +77,7 @@ export function CashRecord() {
         <p className="muted" style={{ margin: 0 }}>
           {t("cash.recordHint")}
           <span className="tiny" style={{ display: "block", marginTop: "0.25rem" }}>
-            {t("cash.businessDayHint", { start: windowLabel })}
+            {t("cash.businessDayHint", { start: windowStart, end: windowEnd })}
           </span>
         </p>
         <div className="field cash-day-field" style={{ margin: 0 }}>

@@ -1,0 +1,34 @@
+Hotel System v1.4.54 — Offline release
+======================================
+Date: 2026-10-15
+No internet required on the hotel PCs.
+
+BUILD (on your build machine)
+-----------------------------
+  pnpm release
+  or:  .\packaging\windows\Build-Release.ps1 -SkipAndroid
+  → releases\v1.4.54\HotelSystem-Setup-1.4.54.exe
+
+INSTALL / UPGRADE (Main PC = siteserver)
+---------------------------------------
+  1. Copy HotelSystem-Setup-1.4.54.exe to USB or LAN share.
+  2. On Main server PC: run as Administrator.
+  3. Do NOT uninstall first — install over the existing copy.
+  4. Live data is kept.
+
+AFTER UPGRADE (printers)
+------------------------
+  • Cashier PCs: Main server (siteserver) is removed automatically if it
+    wrongly listed itself. You can also click Remove PC.
+  • Server printers: Settings → + Add printer
+      - LAN thermal → LAN (IP) → IP:9100
+      - Windows / USB / Other print → USB / Windows (this server PC)
+        then tick Other print for A4 PDFs
+  • Main server PC — USB devices = diagnosis only (not a second PC).
+
+ADDITIONAL / CASHIER PCs (other counters only)
+----------------------------------------------
+  Open Hotel desktop app (not browser only).
+  They must NOT be the Main server PC.
+
+Full notes: docs\RELEASE-NOTES.md

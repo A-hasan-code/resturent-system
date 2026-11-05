@@ -1,10 +1,15 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import { useT } from "../i18n";
+import {
+  ensureNotifyPermission,
+  notificationsEnabled,
+  setNotificationsEnabled,
+} from "../notify";
 import { useToast } from "../toast";
 import { Modal } from "./Modal";
 
-type Tab = "password" | "pin";
+type Tab = "password" | "pin" | "notify";
 
 export function AccountModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const toast = useToast();
@@ -15,17 +20,43 @@ export function AccountModal({ open, onClose }: { open: boolean; onClose: () => 
   const [confirm, setConfirm] = useState("");
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
+  const [notifyOn, setNotifyOn] = useState(() => notificationsEnabled());
+
+  useEffect(() => {
+    if (open) setNotifyOn(notificationsEnabled());
+  }, [open]);
 
   function close() {
     setCurrent("");
     setNext("");
     setConfirm("");
     setPin("");
+    setTab("password");
     onClose();
+  }
+
+  async function toggleNotify(on: boolean) {
+    if (on) {
+      const ok = await ensureNotifyPermission();
+      if (!ok) {
+        setNotifyOn(false);
+        setNotificationsEnabled(false);
+        toast.push(t("account.notifyPermissionDenied"), "err");
+        return;
+      }
+      setNotifyOn(true);
+      setNotificationsEnabled(true);
+      toast.push(t("account.notifyOn"), "ok");
+    } else {
+      setNotifyOn(false);
+      setNotificationsEnabled(false);
+      toast.push(t("account.notifyOff"), "ok");
+    }
   }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    if (tab === "notify") return;
     if (tab === "password" && next !== confirm) {
       toast.push(t("account.passwordMismatch"), "err");
       return;
@@ -61,66 +92,89 @@ export function AccountModal({ open, onClose }: { open: boolean; onClose: () => 
             <button type="button" className={tab === "pin" ? "active" : ""} onClick={() => setTab("pin")}>
               {t("account.setPin")}
             </button>
+            <button type="button" className={tab === "notify" ? "active" : ""} onClick={() => setTab("notify")}>
+              {t("account.notifications")}
+            </button>
           </div>
-        <div className="field">
-          <label>{t("account.currentPassword")}</label>
-          <input
-            type="password"
-            value={current}
-            onChange={(e) => setCurrent(e.target.value)}
-            autoComplete="current-password"
-            required
-          />
-        </div>
-        {tab === "password" ? (
-          <>
+          {tab === "notify" ? (
             <div className="field">
-              <label>{t("account.newPassword")}</label>
-              <input
-                type="password"
-                value={next}
-                onChange={(e) => setNext(e.target.value)}
-                autoComplete="new-password"
-                minLength={6}
-                required
-                placeholder={t("account.passwordHint")}
-              />
+              <label className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: "0.75rem" }}>
+                <span>{t("account.notifyToggle")}</span>
+                <button
+                  type="button"
+                  className={`btn sm ${notifyOn ? "" : "ghost"}`}
+                  onClick={() => void toggleNotify(!notifyOn)}
+                >
+                  {notifyOn ? t("account.notifyOnLabel") : t("account.notifyOffLabel")}
+                </button>
+              </label>
+              <p className="tiny muted">{t("account.notifyHelp")}</p>
             </div>
-            <div className="field">
-              <label>{t("account.repeatPassword")}</label>
-              <input
-                type="password"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                autoComplete="new-password"
-                minLength={6}
-                required
-              />
-            </div>
-          </>
-        ) : (
-          <div className="field">
-            <label>{t("account.newPin")}</label>
-            <input
-              inputMode="numeric"
-              value={pin}
-              onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
-              pattern="\d{4,6}"
-              placeholder={t("account.pinHint")}
-              autoComplete="off"
-              required
-            />
-            <p className="tiny muted">{t("account.pinHelp")}</p>
-          </div>
-        )}
+          ) : (
+            <>
+              <div className="field">
+                <label>{t("account.currentPassword")}</label>
+                <input
+                  type="password"
+                  value={current}
+                  onChange={(e) => setCurrent(e.target.value)}
+                  autoComplete="current-password"
+                  required
+                />
+              </div>
+              {tab === "password" ? (
+                <>
+                  <div className="field">
+                    <label>{t("account.newPassword")}</label>
+                    <input
+                      type="password"
+                      value={next}
+                      onChange={(e) => setNext(e.target.value)}
+                      autoComplete="new-password"
+                      minLength={6}
+                      required
+                      placeholder={t("account.passwordHint")}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>{t("account.repeatPassword")}</label>
+                    <input
+                      type="password"
+                      value={confirm}
+                      onChange={(e) => setConfirm(e.target.value)}
+                      autoComplete="new-password"
+                      minLength={6}
+                      required
+                    />
+                  </div>
+                </>
+              ) : (
+                <div className="field">
+                  <label>{t("account.newPin")}</label>
+                  <input
+                    inputMode="numeric"
+                    value={pin}
+                    onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    pattern="\d{4,6}"
+                    placeholder={t("account.pinHint")}
+                    autoComplete="off"
+                    required
+                  />
+                  <p className="tiny muted">{t("account.pinHelp")}</p>
+                </div>
+              )}
+            </>
+          )}
         </div>
         <div className="form-footer">
           <button className="btn ghost" type="button" onClick={close}>
             {t("common.cancel")}
           </button>
-          <button className="btn" type="submit" disabled={busy}>
-            {busy ? t("common.saving") : t("common.save")}
-          </button>
+          {tab !== "notify" && (
+            <button className="btn" type="submit" disabled={busy}>
+              {busy ? t("common.saving") : t("common.save")}
+            </button>
+          )}
         </div>
       </form>
     </Modal>

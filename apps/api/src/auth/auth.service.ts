@@ -5,6 +5,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { AuthUser } from "../common/decorators";
 import { ChangePasswordDto, ChangePinDto, LoginDto, PinLoginDto } from "./dto";
 import { LoginThrottle } from "./login-throttle";
+import { MachineLogService } from "../system/machine-log.service";
 
 const INVALID = "Invalid username or password";
 
@@ -14,7 +15,8 @@ export class AuthService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly jwt: JwtService
+    private readonly jwt: JwtService,
+    private readonly machineLogs: MachineLogService
   ) {}
 
   async loadUserAuth(userId: string): Promise<AuthUser | null> {
@@ -25,12 +27,18 @@ export class AuthService {
       },
     });
     if (!user?.active || user.deletedAt) return null;
+    const permissions = new Set(user.role.permissions.map((p) => p.permission.code));
+    // Admin-granted kitchen board access (cashier Start / Ready / Served on Kitchen).
+    if (user.kitchenBoard) {
+      permissions.add("kitchen.view");
+      permissions.add("kitchen.update");
+    }
     return {
       id: user.id,
       name: user.name,
       username: user.username,
       roleCode: user.role.code,
-      permissions: user.role.permissions.map((p) => p.permission.code),
+      permissions: [...permissions],
     };
   }
 
@@ -41,9 +49,19 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({ where: { username } });
     if (!user?.active || user.deletedAt || !(await bcrypt.compare(dto.password, user.passwordHash))) {
       this.throttle.fail(key);
+      this.machineLogs.warn(
+        this.machineLogs.mainId(),
+        "Main server",
+        `Login failed · user=${username} · ip=${ip}`
+      );
       throw new UnauthorizedException(INVALID);
     }
     this.throttle.succeed(key);
+    this.machineLogs.info(
+      this.machineLogs.mainId(),
+      "Main server",
+      `Login OK · ${user.name} (${username}) · ip=${ip}`
+    );
     return this.issue(user.id);
   }
 
@@ -58,9 +76,19 @@ export class AuthService {
       !(await bcrypt.compare(dto.pin, user.pinHash))
     ) {
       this.throttle.fail(key);
+      this.machineLogs.warn(
+        this.machineLogs.mainId(),
+        "Main server",
+        `PIN login failed · userId=${dto.userId} · ip=${ip}`
+      );
       throw new UnauthorizedException("Wrong PIN");
     }
     this.throttle.succeed(key);
+    this.machineLogs.info(
+      this.machineLogs.mainId(),
+      "Main server",
+      `PIN login OK · ${user.name} · ip=${ip}`
+    );
     return this.issue(user.id);
   }
 

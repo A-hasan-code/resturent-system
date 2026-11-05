@@ -47,8 +47,15 @@ export type BillOrder = {
     ratePerUnit?: number;
     amount: number;
     notes?: string | null;
+    lineKind?: string;
   }[];
 };
+
+/** Included with cover charge — kitchen only, not on customer bill. */
+function isPerHeadPackageLine(i: { notes?: string | null; lineKind?: string }) {
+  if (i.lineKind === "PER_HEAD") return false;
+  return /^per\s*head\b/i.test((i.notes || "").trim());
+}
 
 type BillDesign = {
   showLogo: boolean;
@@ -395,6 +402,7 @@ export function BillPreview({
 
   const phoneLine = customerPhone;
   const partyName = (order.creditName || order.creditCustomer?.name || "General").trim() || "General";
+  const billItems = order.items.filter((i) => !isPerHeadPackageLine(i));
 
   return (
     <div className="receipt-wrap">
@@ -468,7 +476,7 @@ export function BillPreview({
         )}
         <div className="receipt-rule dashed" />
 
-        {order.items.map((i, idx) =>
+        {billItems.map((i, idx) =>
           narrow ? (
             <div key={idx}>
               <div className="receipt-row-3">

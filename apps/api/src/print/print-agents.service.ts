@@ -2,12 +2,15 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
   UnauthorizedException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { createHash, randomBytes } from "crypto";
+import { hostname as osHostname, networkInterfaces } from "os";
 import { PrismaService } from "../prisma/prisma.service";
 import { PrintService } from "./print.service";
+import { MachineLogService } from "../system/machine-log.service";
 
 const ONLINE_MS = 45_000;
 const MAX_DEVICES = 80;
@@ -28,25 +31,92 @@ export type AgentDeviceIn = {
 };
 
 @Injectable()
-export class PrintAgentsService {
+export class PrintAgentsService implements OnModuleInit {
   private readonly log = new Logger("PrintAgent");
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly print: PrintService,
+    private readonly machineLogs: MachineLogService,
   ) {}
 
-  async register(body: {
-    machineKey: string;
-    hostname: string;
-    displayName?: string;
-    printers: AgentPrinterIn[];
-    devices?: AgentDeviceIn[];
-  }) {
+  async onModuleInit() {
+    await this.purgeMainServerAgents();
+  }
+
+  /**
+   * Main PC must never appear under Cashier PCs. Removes agents whose hostname
+   * matches this server (e.g. SITSERVER registered itself by mistake).
+   */
+  async purgeMainServerAgents() {
+    const aliases = serverHostAliases();
+    if (!aliases.size) return;
+    const agents = await this.prisma.printAgent.findMany({
+      select: { id: true, hostname: true, displayName: true },
+    });
+    for (const a of agents) {
+      const h = normalizeHost(a.hostname);
+      const d = normalizeHost(a.displayName);
+      if (!aliases.has(h) && !aliases.has(d)) continue;
+      await this.remove(a.id);
+      this.log.warn(
+        `Removed Main server self-agent "${a.displayName || a.hostname}" — use USB/Windows (server) printers, not Cashier PC`,
+      );
+    }
+  }
+
+  /** Admin: permanently remove a Cashier PC agent + its AGENT printers. */
+  async remove(id: string) {
+    const agent = await this.prisma.printAgent.findUnique({ where: { id } });
+    if (!agent) throw new NotFoundException("Print agent not found");
+    // Clear cashier bill-printer assignments pointing at this agent's printers
+    const printerIds = (
+      await this.prisma.printer.findMany({ where: { agentId: id }, select: { id: true } })
+    ).map((p) => p.id);
+    if (printerIds.length) {
+      await this.prisma.user.updateMany({
+        where: { billPrinterId: { in: printerIds } },
+        data: { billPrinterId: null },
+      });
+    }
+    await this.prisma.printAgent.delete({ where: { id } });
+    this.log.log(`Deleted print agent ${agent.hostname} (${id})`);
+    this.machineLogs.warn(
+      id,
+      agent.displayName || agent.hostname,
+      `Cashier PC removed from Settings (${agent.hostname})`
+    );
+    return { ok: true };
+  }
+
+  async register(
+    body: {
+      machineKey: string;
+      hostname: string;
+      displayName?: string;
+      printers: AgentPrinterIn[];
+      devices?: AgentDeviceIn[];
+    },
+    opts?: { clientIp?: string },
+  ) {
     let machineKey = body.machineKey.trim();
     const hostname = (body.hostname || "PC").trim().slice(0, 80) || "PC";
     const incomingLabel = (body.displayName || hostname).trim().slice(0, 80);
     const devicesJson = toDevicesJson(body.devices);
+
+    // Never let the Main server PC register as a Cashier / Additional PC agent.
+    if (isMainServerAgentRegister(hostname, incomingLabel, opts?.clientIp)) {
+      this.log.warn(
+        `Rejected print-agent register from Main server (host=${hostname}, ip=${opts?.clientIp || "?"})`,
+      );
+      this.machineLogs.warn(
+        this.machineLogs.mainId(),
+        "Main server",
+        `Rejected self-register as Cashier PC (${hostname} / ${opts?.clientIp || "?"})`
+      );
+      await this.purgeMainServerAgents();
+      return { idle: true, mainServer: true, agentId: null, token: null, printers: [] };
+    }
 
     let agent = await this.prisma.printAgent.findUnique({ where: { machineKey } });
     // Cloned Windows images can share the same key — split by hostname so each counter PC stays separate.
@@ -76,6 +146,11 @@ export class PrintAgentsService {
           devices: devicesJson,
         },
       });
+      this.machineLogs.info(
+        agent.id,
+        agent.displayName || hostname,
+        `Reconnected (${hostname}) · ${(body.printers || []).length} printer(s) · ip=${opts?.clientIp || "?"}`
+      );
     } else {
       agent = await this.prisma.printAgent.create({
         data: {
@@ -88,6 +163,11 @@ export class PrintAgentsService {
         },
       });
       this.log.log(`Registered print agent ${hostname} (${machineKey.slice(0, 8)}…)`);
+      this.machineLogs.info(
+        agent.id,
+        incomingLabel || hostname,
+        `Registered Cashier PC (${hostname}) with ${(body.printers || []).length} Windows printer(s)`
+      );
     }
 
     const label = (agent.displayName || agent.hostname).trim() || hostname;
@@ -134,13 +214,14 @@ export class PrintAgentsService {
       const shouldRetitle =
         p.name === autoOld ||
         p.name === autoHost ||
-        p.station === oldLabel ||
-        p.station === agent.hostname ||
-        !p.station;
+        (!p.manual && (p.station === oldLabel || p.station === agent.hostname || !p.station));
+      // Keep custom station from Settings; only retarget auto/default station labels.
+      const stationIsAuto =
+        !p.station?.trim() || p.station === oldLabel || p.station === agent.hostname;
       await this.prisma.printer.update({
         where: { id: p.id },
         data: {
-          station: label.slice(0, 60),
+          ...(stationIsAuto ? { station: label.slice(0, 60) } : {}),
           ...(shouldRetitle ? { name: autoNew } : {}),
         },
       });
@@ -189,8 +270,10 @@ export class PrintAgentsService {
     return agent;
   }
 
-  listForAdmin() {
-    return this.prisma.printAgent.findMany({
+  async listForAdmin() {
+    // Drop Main server if it listed itself again (Settings refresh).
+    await this.purgeMainServerAgents();
+    const rows = await this.prisma.printAgent.findMany({
       include: {
         printers: {
           select: { id: true, name: true, target: true, active: true, printsBill: true, printsKot: true },
@@ -198,17 +281,16 @@ export class PrintAgentsService {
         },
       },
       orderBy: { hostname: "asc" },
-    }).then((rows) =>
-      rows.map((a) => ({
-        id: a.id,
-        hostname: a.hostname,
-        displayName: a.displayName || a.hostname,
-        lastSeenAt: a.lastSeenAt,
-        online: Date.now() - a.lastSeenAt.getTime() < ONLINE_MS,
-        printers: a.printers,
-        devices: parseDevices(a.devices),
-      })),
-    );
+    });
+    return rows.map((a) => ({
+      id: a.id,
+      hostname: a.hostname,
+      displayName: a.displayName || a.hostname,
+      lastSeenAt: a.lastSeenAt,
+      online: Date.now() - a.lastSeenAt.getTime() < ONLINE_MS,
+      printers: a.printers,
+      devices: parseDevices(a.devices),
+    }));
   }
 
   private async syncPrinters(agentId: string, label: string, printers: AgentPrinterIn[]) {
@@ -222,18 +304,23 @@ export class PrintAgentsService {
         where: { agentId_target: { agentId, target } },
       });
       if (existing) {
-        const roles = guessAgentPrinterRoles(target);
-        const healKitchen =
-          roles.printsKot && (!existing.printsKot || existing.printsBill);
-        await this.prisma.printer.update({
-          where: { id: existing.id },
-          data: {
-            active: true,
-            kind: "AGENT",
-            ...(!existing.station?.trim() ? { station } : {}),
-            ...(healKitchen ? { printsKot: true, printsBill: false } : {}),
-          },
-        });
+        // Admin edited / deactivated this printer in Settings (manual) — never
+        // overwrite bill/KOT/active/station on heartbeat / re-register.
+        if (existing.manual) continue;
+
+        // Do NOT force active:true — cashier Active/Remove must stick.
+        // Soft-disabled auto printers that reappear stay off until admin
+        // ticks Active again (avoids fighting Settings every ~15s).
+        const stationPatch = !existing.station?.trim() ? { station } : {};
+        if (existing.kind !== "AGENT" || Object.keys(stationPatch).length) {
+          await this.prisma.printer.update({
+            where: { id: existing.id },
+            data: {
+              kind: "AGENT",
+              ...stationPatch,
+            },
+          });
+        }
       } else {
         const roles = guessAgentPrinterRoles(target);
         await this.prisma.printer.create({
@@ -252,16 +339,25 @@ export class PrintAgentsService {
         this.log.log(
           `Synced agent printer: ${label} / ${target} (kot=${roles.printsKot} bill=${roles.printsBill})`,
         );
+        this.machineLogs.info(agentId, label, `New USB printer synced: ${target}`);
       }
     }
 
-    // Soft-disable printers that disappeared from the PC (keep history / assignments).
+    // Soft-disable auto-synced printers that disappeared from the PC.
+    // Manual (+ Add) AGENT printers stay until the admin removes them.
     const gone = await this.prisma.printer.findMany({
-      where: { agentId, kind: "AGENT", active: true, NOT: { target: { in: [...seen] } } },
+      where: {
+        agentId,
+        kind: "AGENT",
+        active: true,
+        manual: false,
+        NOT: { target: { in: [...seen] } },
+      },
     });
     for (const g of gone) {
       if (!seen.size) break; // empty list = listing failed; don't wipe
       await this.prisma.printer.update({ where: { id: g.id }, data: { active: false } });
+      this.machineLogs.warn(agentId, label, `Printer gone from PC (auto-off): ${g.target}`);
     }
   }
 }
@@ -313,4 +409,58 @@ function bearer(header: string | undefined) {
   if (!header) return null;
   const m = /^Bearer\s+(.+)$/i.exec(header.trim());
   return m?.[1]?.trim() || null;
+}
+
+function normalizeHost(value: string | null | undefined) {
+  return (value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\.local$/i, "")
+    .replace(/\.$/, "");
+}
+
+/** Hostnames that mean "this Main server PC" (never a Cashier agent). */
+function serverHostAliases() {
+  const set = new Set<string>();
+  const host = normalizeHost(osHostname());
+  if (host) {
+    set.add(host);
+    // short name if FQDN
+    const short = host.split(".")[0];
+    if (short) set.add(short);
+  }
+  return set;
+}
+
+function localServerIps() {
+  const ips = new Set<string>(["127.0.0.1", "::1", "0:0:0:0:0:0:0:1"]);
+  for (const list of Object.values(networkInterfaces())) {
+    for (const a of list || []) {
+      const fam = a.family as string | number;
+      if ((fam === "IPv4" || fam === 4 || fam === "IPv6" || fam === 6) && a.address) {
+        ips.add(a.address);
+        // strip IPv6 zone id
+        const bare = a.address.split("%")[0];
+        if (bare) ips.add(bare);
+      }
+    }
+  }
+  return ips;
+}
+
+function normalizeClientIp(raw?: string) {
+  if (!raw) return "";
+  let ip = raw.trim().toLowerCase();
+  if (ip.startsWith("::ffff:")) ip = ip.slice(7);
+  if (ip === "::1") return "127.0.0.1";
+  return ip.split("%")[0];
+}
+
+/** True when register is coming from the Main server itself (hostname or same-machine IP). */
+function isMainServerAgentRegister(hostname: string, displayName: string, clientIp?: string) {
+  const aliases = serverHostAliases();
+  if (aliases.has(normalizeHost(hostname)) || aliases.has(normalizeHost(displayName))) return true;
+  const ip = normalizeClientIp(clientIp);
+  if (!ip) return false;
+  return localServerIps().has(ip);
 }

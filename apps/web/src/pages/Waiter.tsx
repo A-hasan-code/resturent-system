@@ -176,6 +176,8 @@ type Order = {
   taxPercent?: number;
   tipAmount?: number;
   kotRounds: number;
+  printQueued?: number;
+  printError?: string | null;
   billRequestedAt: string | null;
   notes?: string | null;
   guestName?: string | null;
@@ -344,6 +346,7 @@ export function WaiterPage() {
   const [editQty, setEditQty] = useState<Record<string, number>>({});
   const [editMeta, setEditMeta] = useState<EditBillMeta | null>(null);
   const [editStaff, setEditStaff] = useState<EditBillPerson[]>([]);
+  const [printCancelKot, setPrintCancelKot] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [reserveFor, setReserveFor] = useState<TableCard | null>(null);
@@ -391,10 +394,12 @@ export function WaiterPage() {
   const isTakeawayView = selected === WALK_IN || isTwKey(selected);
   // Takeaway goes to Main Cashier automatically (API) — no cashier pick for walk-in.
   const needsCashierPick = !order && !can("cash.keep") && !isTakeawayView;
-  /** Kitchen KOT reprint is for floor/kitchen tables — not cashier counters or takeaway. */
-  const canReprintKot = can("print.kot") && !isCashierRole && !isTakeawayView;
+  /** Kitchen KOT: floor staff on tables; takeaway also (cashier places food to kitchen). */
+  const canReprintKot = can("print.kot") && (!isCashierRole || isTakeawayView);
   /** Counter takeaway: customer is at cashier — skip request/print unpaid bill; Take payment prints PAID. */
   const showTakeawayCashierBillActions = !(isTakeawayView && isCashierRole);
+  /** Takeaway status: cashiers (order.pay) or kitchen.update — Start / Ready / Served. */
+  const canTakeawayKitchen = can("kitchen.update") || can("order.pay");
   const canAddPerHead =
     ["SUPERVISOR", "ADMIN", "MANAGER", "MAIN_CASHIER", "CASHIER"].includes(user?.roleCode ?? "") ||
     can("users.manage");
@@ -423,6 +428,24 @@ export function WaiterPage() {
       setOrder(null);
     }
   }, []);
+
+  async function setTakeawayStatus(status: "PREPARING" | "READY" | "SERVED") {
+    if (!order || !isTakeawayView) return;
+    try {
+      setBusy(true);
+      const res = await api<Order>(`/orders/${order.id}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      setOrder(res);
+      toast.push(t("kitchen.updated", { status: ts(status) }), "ok");
+      void loadTables();
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("kitchen.updateFailed"), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     void loadTables();
@@ -1260,7 +1283,7 @@ export function WaiterPage() {
     try {
       const isNewWalkIn = selected === WALK_IN;
       const isTakeaway = isNewWalkIn || isTwKey(selected);
-      // Takeaway is Main Cashier counter — no kitchen KOT preview/print.
+      // Takeaway: send straight to kitchen (no preview modal). Tables may preview first.
       const preview = !isTakeaway && hasMenu && previewFirst && canReprintKot;
       const tableNo = isTakeaway
         ? walkInName.trim() || order?.tableNo || "Takeaway"
@@ -1270,10 +1293,11 @@ export function WaiterPage() {
       const hold = selectedTable?.reservation;
       const kitchenHold =
         !isTakeaway && (asReserved || !!hold || !!openOrder?.kitchenHold);
-      // Held pre-order: never print KOT / preview until guest start.
+      // Held pre-order: never print KOT / preview until guest start. Takeaway always KOT.
       const body = {
         items,
-        printKot: !kitchenHold && !isTakeaway && hasMenu && !preview,
+        // Takeaway always asks for kitchen slip; tables skip when preview-first.
+        printKot: isTakeaway ? hasMenu && !kitchenHold : !kitchenHold && hasMenu && !preview,
         servedByName: serverName,
       };
       const guestName = pendingGuest?.guestName || hold?.guestName;
@@ -1302,8 +1326,13 @@ export function WaiterPage() {
         toast.push(t("waiter.sentReserved", { n: res.orderNo }), "ok");
       } else if (!hasMenu) {
         toast.push(t("waiter.sentBillOnly", { n: res.orderNo }), "ok");
+      } else if (res.printError || (hasMenu && res.printQueued === 0)) {
+        toast.push(
+          `${t("waiter.sent", { n: res.orderNo })} — ${res.printError || t("waiter.kotPrintFailed")}`,
+          "err",
+        );
       } else if (isTakeaway) {
-        toast.push(t("waiter.sent", { n: res.orderNo }), "ok");
+        toast.push(t("waiter.sentPrint", { n: res.orderNo }), "ok");
       } else if (preview) {
         toast.push(t("waiter.sent", { n: res.orderNo }), "ok");
         setKot({ orderId: res.id, round: res.kotRounds, reprint: false });
@@ -1364,6 +1393,7 @@ export function WaiterPage() {
     const qmap: Record<string, number> = {};
     for (const i of order.items) qmap[i.id] = i.quantity;
     setEditQty(qmap);
+    setPrintCancelKot(false);
     const table = tables.find((tbl) => tbl.id === order.tableId) ?? tables.find((tbl) => tbl.label === order.tableNo);
     setEditMeta({
       partitionId: table?.partitionId ?? "",
@@ -1388,6 +1418,13 @@ export function WaiterPage() {
     if (!order || !can("order.edit")) return;
     const items = Object.entries(editQty).map(([id, quantity]) => ({ id, quantity }));
     if (!items.length) return;
+    const hasKitchenShrink =
+      !!order.tableId &&
+      order.items.some(
+        (i) =>
+          i.lineKind !== "PER_HEAD" &&
+          (editQty[i.id] ?? i.quantity) + 0.0001 < i.quantity
+      );
     setSavingEdit(true);
     try {
       const updated = await api<Order>(`/orders/${order.id}/edit`, {
@@ -1398,10 +1435,12 @@ export function WaiterPage() {
           ...(editMeta?.cashierId ? { assignedCashierId: editMeta.cashierId } : {}),
           ...(editMeta?.supervisorId ? { waiterId: editMeta.supervisorId } : {}),
           servedByName: editMeta?.servedBy ?? "",
+          ...(hasKitchenShrink ? { printCancelKot } : {}),
         }),
       });
       setOrder(updated);
       setEditing(false);
+      setPrintCancelKot(false);
       if (updated.tableId) setSelected(updated.tableId);
       toast.push(t("bills.editSaved"), "ok");
       void loadTables();
@@ -1905,6 +1944,51 @@ export function WaiterPage() {
         </div>
       )}
 
+      {order &&
+        isTakeawayView &&
+        canTakeawayKitchen &&
+        order.status !== "CANCELLED" &&
+        order.status !== "COMPLETED" &&
+        (order.status === "PENDING" || order.status === "PREPARING" || order.status === "READY") && (
+          <div className="panel panel-pad" style={{ marginBottom: "0.75rem" }}>
+            <p className="tiny muted" style={{ margin: "0 0 0.45rem" }}>
+              {t("waiter.takeawayKitchenHint")}
+            </p>
+            <div className="row" style={{ flexWrap: "wrap", gap: "0.45rem" }}>
+              {order.status === "PENDING" && (
+                <button
+                  type="button"
+                  className="btn warn sm"
+                  disabled={busy}
+                  onClick={() => void setTakeawayStatus("PREPARING")}
+                >
+                  {t("kitchen.start")}
+                </button>
+              )}
+              {(order.status === "PENDING" || order.status === "PREPARING") && (
+                <button
+                  type="button"
+                  className="btn ok sm"
+                  disabled={busy}
+                  onClick={() => void setTakeawayStatus("READY")}
+                >
+                  {t("kitchen.markReady")}
+                </button>
+              )}
+              {order.status === "READY" && (
+                <button
+                  type="button"
+                  className="btn sm"
+                  disabled={busy}
+                  onClick={() => void setTakeawayStatus("SERVED")}
+                >
+                  {t("kitchen.complete")}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
       {order && (order.kitchenHold || order.guestName) && (
         <div className="reserve-banner panel panel-pad" style={{ marginBottom: "0.75rem" }}>
           <div className="row" style={{ justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap" }}>
@@ -2061,11 +2145,33 @@ export function WaiterPage() {
                 </h3>
                 {can("order.edit") && order && order.paymentStatus !== "PAID" && order.status !== "CANCELLED" && (
                   editing ? (
-                    <div className="row" style={{ gap: "0.35rem" }}>
+                    <div className="row" style={{ gap: "0.35rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      {!!order.tableId &&
+                        order.items.some(
+                          (i) =>
+                            i.lineKind !== "PER_HEAD" &&
+                            (editQty[i.id] ?? i.quantity) + 0.0001 < i.quantity
+                        ) && (
+                          <label className="switch-row" style={{ marginRight: "auto" }}>
+                            <input
+                              type="checkbox"
+                              checked={printCancelKot}
+                              onChange={(e) => setPrintCancelKot(e.target.checked)}
+                            />
+                            <span className="tiny">{t("bills.printCancelKotOnEdit")}</span>
+                          </label>
+                        )}
                       <button type="button" className="btn sm" disabled={savingEdit} onClick={() => void saveEdit()}>
                         {savingEdit ? t("common.saving") : t("bills.saveEdit")}
                       </button>
-                      <button type="button" className="btn ghost sm" onClick={() => setEditing(false)}>
+                      <button
+                        type="button"
+                        className="btn ghost sm"
+                        onClick={() => {
+                          setEditing(false);
+                          setPrintCancelKot(false);
+                        }}
+                      >
                         {t("common.cancel")}
                       </button>
                     </div>
@@ -2271,7 +2377,18 @@ export function WaiterPage() {
               )}
               <div className="cart-total">
                 <span>{t("waiter.billSoFar")}</span>
-                <span>{money(order?.total ?? 0)}</span>
+                <span>
+                  {money(
+                    editing && order
+                      ? order.items.reduce((s, i) => {
+                          const q = editQty[i.id] ?? i.quantity;
+                          if (q <= 0) return s;
+                          const oldQ = i.quantity || 1;
+                          return s + (i.amount / oldQ) * q;
+                        }, 0)
+                      : (order?.total ?? 0),
+                  )}
+                </span>
               </div>
             </div>
           )}

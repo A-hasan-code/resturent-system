@@ -172,6 +172,7 @@ export class UsersService {
         pinHash: dto.pin ? await bcrypt.hash(dto.pin, 10) : null,
         roleId: role.id,
         billPrinterId: dto.billPrinterId ? await this.assertBillPrinter(dto.billPrinterId) : null,
+        kitchenBoard: !!dto.kitchenBoard,
       },
       include: { role: true, billPrinter: { select: { id: true, name: true, station: true } } },
     });
@@ -213,6 +214,9 @@ export class UsersService {
       data.billPrinter = dto.billPrinterId
         ? { connect: { id: await this.assertBillPrinter(dto.billPrinterId) } }
         : { disconnect: true };
+    }
+    if (dto.kitchenBoard !== undefined) {
+      data.kitchenBoard = !!dto.kitchenBoard;
     }
 
     let newRoleCode = user.role.code;
@@ -306,6 +310,7 @@ export class UsersService {
     pinHash: string | null;
     billPrinterId?: string | null;
     billPrinter?: { id: string; name: string; station: string } | null;
+    kitchenBoard?: boolean;
     createdAt: Date;
     role: { code: string; name: string };
   }) {
@@ -316,6 +321,7 @@ export class UsersService {
       active: u.active,
       protected: isProtectedUsername(u.username),
       hasPin: !!u.pinHash,
+      kitchenBoard: !!u.kitchenBoard,
       billPrinterId: u.billPrinterId ?? null,
       billPrinterName: u.billPrinter
         ? u.billPrinter.station

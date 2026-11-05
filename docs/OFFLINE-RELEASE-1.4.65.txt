@@ -1,0 +1,39 @@
+Hotel System v1.4.65 — Offline release
+======================================
+Date: 2026-10-26
+No internet required on the hotel PCs.
+
+BUILD (on your build machine)
+-----------------------------
+  pnpm release
+  or:  .\packaging\windows\Build-Release.ps1 -SkipAndroid
+  → releases\v1.4.65\HotelSystem-Setup-1.4.65.exe
+
+INSTALL / UPGRADE (Main PC)
+--------------------------
+  1. Copy HotelSystem-Setup-1.4.65.exe to USB or LAN share.
+  2. On Main server PC: run as Administrator.
+  3. Do NOT uninstall first — install over the existing copy.
+  4. Live data is kept.
+
+AFTER UPGRADE — Cashier / Additional PC print agent
+----------------------------------------------------
+  Fix: Additional PC desktop apps were wrongly idle as "main server"
+  because install folder C:\Program Files\HotelSystem exists on cashiers too.
+  Print agent now only treats real server signals (server-info.txt,
+  HotelSystem\app, HotelSystemAPI service) as Main PC.
+
+  1. Upgrade Main PC with this Setup.
+  2. Open Hotel desktop app on each Cashier / Additional PC (not browser only).
+  3. Wait for LAN desktop update, or reopen app after Main upgrade.
+  4. Status should show: Print agent OK · … → server
+  5. Settings → Cashier PCs should show Online; bill USB printers print again.
+  6. Machine logs should show: Reconnected (hostname) · N printer(s)
+
+ADDITIONAL / CASHIER PCs
+------------------------
+  • USB bill printer stays plugged into that Cashier PC (not LAN 9100).
+  • Desktop app must stay open for heartbeats / local USB print.
+  • Not the Main server PC.
+
+Full notes: docs\RELEASE-NOTES.md

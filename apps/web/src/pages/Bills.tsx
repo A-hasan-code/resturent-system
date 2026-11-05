@@ -73,7 +73,7 @@ type OrderPayment = {
   createdAt: string;
 };
 
-type Order = BillOrder & {
+type Order = Omit<BillOrder, "items"> & {
   id: string;
   tableId?: string | null;
   status: string;
@@ -174,7 +174,7 @@ export function BillsPage() {
   const t = useT();
   const { ts } = useI18n();
   const askPrompt = usePrompt();
-  const { businessDate, dayStart } = useBusinessDay();
+  const { businessDate, dayStart, dayClose } = useBusinessDay();
   const [filter, setFilter] = useState<"UNPAID" | "PAID" | "CANCELLED" | "ALL">("UNPAID");
   const [day, setDay] = useState(businessDate);
   const [dayTouched, setDayTouched] = useState(false);
@@ -205,6 +205,7 @@ export function BillsPage() {
   const [editPartitions, setEditPartitions] = useState<{ id: string; name: string }[]>([]);
   const [editStaff, setEditStaff] = useState<EditBillPerson[]>([]);
   const [editing, setEditing] = useState(false);
+  const [printCancelKot, setPrintCancelKot] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [thermal, setThermal] = useState<{
@@ -342,6 +343,16 @@ export function BillsPage() {
       editAdds.some((a) => addQtyIssue(a) != null) ||
       (selected.items.every((i) => !i.id || (editQty[i.id] ?? i.quantity) <= 0) && !editAdds.length));
 
+  const editHasKitchenShrink =
+    !!selected?.tableId &&
+    editing &&
+    selected.items.some(
+      (i) =>
+        !!i.id &&
+        i.lineKind !== "PER_HEAD" &&
+        (editQty[i.id] ?? i.quantity) + 0.0001 < i.quantity
+    );
+
   useEffect(() => {
     if (!selected?.id || editing) return;
     let cancelled = false;
@@ -384,6 +395,7 @@ export function BillsPage() {
     setEditQtyDraft(draft);
     setEditAdds([]);
     setAddSearch("");
+    setPrintCancelKot(false);
     try {
       const menu = await api<MenuRow[]>("/menu");
       setEditMenu(menu);
@@ -509,6 +521,7 @@ export function BillsPage() {
           ...(editMeta?.cashierId ? { assignedCashierId: editMeta.cashierId } : {}),
           ...(editMeta?.supervisorId ? { waiterId: editMeta.supervisorId } : {}),
           servedByName: editMeta?.servedBy ?? "",
+          ...(editHasKitchenShrink ? { printCancelKot } : {}),
         }),
       });
       toast.push(t("bills.editSaved"), "ok");
@@ -517,6 +530,7 @@ export function BillsPage() {
       setEditAdds([]);
       setEditQtyDraft({});
       setAddSearch("");
+      setPrintCancelKot(false);
       const qty: Record<string, number> = {};
       for (const i of updated.items) {
         if (i.id) qty[i.id] = i.quantity;
@@ -597,8 +611,9 @@ export function BillsPage() {
         body: JSON.stringify({ reason }),
       });
       toast.push(t("bills.reversed", { n: res.orderNo }), "ok");
-      setSelected(null);
+      setSelected(res);
       setEditing(false);
+      if (filter === "PAID") setFilter("UNPAID");
       void load();
     } catch (e) {
       toast.push(e instanceof Error ? e.message : t("bills.reverseFailed"), "err");
@@ -654,7 +669,7 @@ export function BillsPage() {
           <p>
             {t("bills.subtitle")}
             <span className="tiny muted" style={{ display: "block" }}>
-              {t("cash.businessDayHint", { start: dayStart })}
+              {t("cash.businessDayHint", { start: dayStart, end: dayClose })}
               {" · "}
               {t("bills.historyDayHint")}
             </span>
@@ -1287,6 +1302,16 @@ export function BillsPage() {
                 selected.paymentStatus !== "PAID" &&
                 (editing ? (
                   <>
+                    {editHasKitchenShrink && (
+                      <label className="switch-row" style={{ marginRight: "auto" }}>
+                        <input
+                          type="checkbox"
+                          checked={printCancelKot}
+                          onChange={(e) => setPrintCancelKot(e.target.checked)}
+                        />
+                        <span>{t("bills.printCancelKotOnEdit")}</span>
+                      </label>
+                    )}
                     <button
                       type="button"
                       className="btn"
@@ -1303,6 +1328,7 @@ export function BillsPage() {
                         setEditAdds([]);
                         setEditQtyDraft({});
                         setAddSearch("");
+                        setPrintCancelKot(false);
                       }}
                     >
                       {t("common.cancel")}

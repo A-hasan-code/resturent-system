@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, dialog, Notification } = require("electron");
 const fs = require("fs");
 const path = require("path");
 const { discover, probe } = require("./discovery");
@@ -251,6 +251,25 @@ function createWindow() {
 
 ipcMain.on("hotel:reconnect", () => void connect());
 ipcMain.handle("hotel:server-url", () => current);
+
+ipcMain.handle("hotel:notify", (_e, payload) => {
+  const title = typeof payload?.title === "string" ? payload.title : "PixalBotics Restaurant";
+  const body = typeof payload?.body === "string" ? payload.body : "";
+  if (!Notification.isSupported()) return false;
+  const n = new Notification({
+    title,
+    body,
+    icon: path.join(__dirname, "..", "assets", "icon.png"),
+  });
+  n.on("click", () => {
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
+  n.show();
+  return true;
+});
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();

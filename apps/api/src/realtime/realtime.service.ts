@@ -19,15 +19,13 @@ export class RealtimeService {
 
   orderChanged(o: OrderEvent, reason: string) {
     this.gw.emit(ROOM.all, "orders.changed", { ...o, reason });
-    // Takeaway (no table) belongs to Main Cashier — do not ping kitchen board.
+    // Tables + takeaway → kitchen board ping (held reservations wait until seated).
     const toKitchen =
-      !!o.tableId &&
       !o.kitchenHold &&
       reason !== "reservation-hold" &&
       (reason === "created" ||
         reason === "items-added" ||
         reason === "cancelled" ||
-        reason === "reversed" ||
         reason === "edited");
     if (toKitchen) {
       this.gw.emit(ROOM.kitchen, "kitchen.new", { ...o, reason });

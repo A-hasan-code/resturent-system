@@ -5,7 +5,8 @@ import { useToast } from "../toast";
 import { SearchField, matchesSearch } from "../components/SearchField";
 import { Pagination, paginate } from "../components/Pagination";
 import { useSocketEvent } from "../socket";
-import { alertBeep, serverPrint } from "../printing";
+import { pushNotify } from "../notify";
+import { serverPrint } from "../printing";
 import { useI18n, useT } from "../i18n";
 import { loadKitchenStations, type KitchenStationRow } from "../kitchenStations";
 
@@ -182,8 +183,9 @@ export function KitchenPage() {
           : o.reason === "edited"
             ? t("kitchen.orderEdited")
             : t("kitchen.newOrder");
-    toast.push(`${kind}: ${o.tableNo || t("common.walkIn")} · #${o.orderNo}`, "info");
-    alertBeep();
+    const body = `${o.tableNo || t("common.walkIn")} · #${o.orderNo}`;
+    toast.push(`${kind}: ${body}`, "info");
+    void pushNotify(kind, body);
   });
 
   async function reprint(id: string) {

@@ -134,6 +134,35 @@ export type BillEditConfirmPayload = {
   logoPath?: string | null;
 };
 
+/** Credit account settlement slip (paid / partial collection). */
+export type CreditSlipPayload = {
+  restaurant: Restaurant;
+  customer: { name: string; phone: string; address: string | null; cnic: string | null };
+  collectedBy: string;
+  paidAt: string;
+  days: {
+    date: string;
+    total: number;
+    invoices: {
+      orderNo: number;
+      tableNo: string | null;
+      total: number;
+      paid: number;
+      dueAfter: number;
+      items: { name: string; quantity: number; unit: string; amount: number }[];
+    }[];
+  }[];
+  total: number;
+  outstandingBefore: number;
+  remaining: number;
+  cleared: boolean;
+  showLogo?: boolean;
+  showName?: boolean;
+  showPhone?: boolean;
+  showAddress?: boolean;
+  logoPath?: string | null;
+};
+
 export type TestPayload = {
   printerName: string;
   serverName: string;
@@ -886,6 +915,64 @@ export function renderBillEditConfirm(p: BillEditConfirmPayload, paperWidth: num
   e.line("Admin / SM confirm: __________");
   e.line("");
   e.align("center").line("Keep with day close report");
+  e.line(VENDOR.line);
+  return e.feed(4).cut();
+}
+
+export function renderCreditSlip(p: CreditSlipPayload, paperWidth: number) {
+  const e = new EscPos(columnsFor(paperWidth));
+  const dots = paperDotsFor(paperWidth);
+  const showLogo = p.showLogo !== false;
+  const showName = p.showName !== false;
+  const showPhone = p.showPhone !== false;
+  const showAddress = p.showAddress !== false;
+  const stamp = p.cleared ? "PAID" : "PARTIAL PAYMENT";
+
+  e.align("center");
+  if (showLogo && p.logoPath) {
+    const img = logoRasterFromFile(p.logoPath, logoMaxDots(paperWidth), {
+      centerOnPaperDots: dots,
+      frame: false,
+      mode: "logo",
+      maxHeight: logoMaxDots(paperWidth),
+    });
+    if (img) e.raster(img);
+  }
+  if (showName && p.restaurant?.name) e.bold().wrapped(p.restaurant.name).bold(false);
+  if (p.restaurant?.tagline) e.wrapped(p.restaurant.tagline);
+  if (showAddress && p.restaurant?.address) e.wrapped(p.restaurant.address);
+  if (showPhone && p.restaurant?.phone) e.line(`Tel ${p.restaurant.phone}`);
+  e.rule();
+  e.bold().big().line(stamp).big(false).bold(false);
+  e.bold().line("CREDIT SETTLEMENT").bold(false);
+  e.align("left").line("");
+
+  e.bold().line(p.customer.name).bold(false);
+  if (p.customer.phone) e.line(p.customer.phone);
+  if (p.customer.address) e.wrapped(p.customer.address);
+  if (p.customer.cnic) e.line(`CNIC ${p.customer.cnic}`);
+  e.line(when(p.paidAt));
+  e.line(`Collected by: ${p.collectedBy}`);
+
+  for (const day of p.days) {
+    e.rule();
+    e.pair(day.date, money(day.total));
+    for (const inv of day.invoices) {
+      const dueBit = inv.dueAfter > 0 ? ` · due ${money(inv.dueAfter)}` : "";
+      e.line(`#${inv.orderNo} · ${inv.tableNo || "—"} · paid ${money(inv.paid)}${dueBit}`);
+      for (const item of inv.items) {
+        e.line(item.name);
+        e.pair(`  ${qty(item.quantity, item.unit)}`, money(item.amount));
+      }
+    }
+  }
+
+  e.rule();
+  e.pair("Was due:", money(p.outstandingBefore));
+  e.pair("Paid now:", money(p.total));
+  e.pair("Remaining:", money(p.remaining));
+  e.rule("=");
+  e.align("center").bold().line(`*** ${stamp} ***`).bold(false);
   e.line(VENDOR.line);
   return e.feed(4).cut();
 }

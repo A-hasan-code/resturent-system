@@ -4,7 +4,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { FinanceService } from "../finance/finance.service";
 import { SettingsService } from "../system/settings.service";
 import { toNumber } from "../common/units";
-import { businessQueryRange } from "../common/business-day";
+import { businessDateOf, businessDayStamp, businessQueryRange } from "../common/business-day";
 import {
   CreateLedgerEntryDto,
   CreateSalaryPaymentDto,
@@ -27,10 +27,6 @@ const MANUAL_KINDS: WorkerLedgerKind[] = [
   WorkerLedgerKind.OPENING_PAYABLE,
   WorkerLedgerKind.OPENING_ADVANCE,
 ];
-
-function dayStamp(isoDate: string) {
-  return new Date(`${isoDate}T12:00:00`);
-}
 
 function localDate(d: Date) {
   const y = d.getFullYear();
@@ -104,9 +100,19 @@ export class WorkersService {
     private readonly settings: SettingsService
   ) {}
 
+  private async stamp(isoDate: string) {
+    const start = await this.settings.dayStart();
+    return businessDayStamp(isoDate, start.h, start.m, start.closeH, start.closeM);
+  }
+
+  private async businessToday() {
+    const start = await this.settings.dayStart();
+    return businessDateOf(new Date(), start.h, start.m, start.closeH, start.closeM);
+  }
+
   private async businessRange(from: string, to: string) {
     const start = await this.settings.dayStart();
-    const range = businessQueryRange(from, to, start.h, start.m);
+    const range = businessQueryRange(from, to, start.h, start.m, start.closeH, start.closeM);
     return { start: range.gte, end: range.lt };
   }
 
@@ -178,7 +184,7 @@ export class WorkersService {
     openingPayable: number,
     userId?: string
   ) {
-    const today = dayStamp(localDate(new Date()));
+    const today = await this.stamp(await this.businessToday());
     await tx.workerLedgerEntry.deleteMany({
       where: {
         workerId,
@@ -547,7 +553,7 @@ export class WorkersService {
     if (!worker) throw new NotFoundException("Worker not found");
     if (!worker.active) throw new BadRequestException("Worker is inactive");
 
-    const entryOn = dayStamp(dto.entryOn);
+    const entryOn = await this.stamp(dto.entryOn);
     await this.finance.assertNotLocked(entryOn);
     const note = dto.note?.trim() || null;
 
@@ -663,7 +669,7 @@ export class WorkersService {
     }
     await this.finance.assertNotLocked(existing.entryOn);
 
-    const entryOn = dto.entryOn ? dayStamp(dto.entryOn) : existing.entryOn;
+    const entryOn = dto.entryOn ? await this.stamp(dto.entryOn) : existing.entryOn;
     if (dto.entryOn) await this.finance.assertNotLocked(entryOn);
     const amount = dto.amount != null ? money2(dto.amount) : toNumber(existing.amount);
     if (amount <= 0) throw new BadRequestException("Amount must be greater than zero");
@@ -826,7 +832,7 @@ export class WorkersService {
     if (!worker) throw new NotFoundException("Worker not found");
     if (!worker.active) throw new BadRequestException("Worker is inactive");
 
-    const paidOn = dayStamp(dto.paidOn);
+    const paidOn = await this.stamp(dto.paidOn);
     await this.finance.assertNotLocked(paidOn);
 
     const bals = (await this.balancesMap([worker.id])).get(worker.id) ?? this.emptyBalances();
@@ -912,7 +918,7 @@ export class WorkersService {
     });
     if (!worker) throw new NotFoundException("Worker not found");
 
-    const paidOn = dto.paidOn ? dayStamp(dto.paidOn) : existing.paidOn;
+    const paidOn = dto.paidOn ? await this.stamp(dto.paidOn) : existing.paidOn;
     if (dto.paidOn) await this.finance.assertNotLocked(paidOn);
 
     const amount = dto.amount != null ? money2(dto.amount) : toNumber(existing.amount);

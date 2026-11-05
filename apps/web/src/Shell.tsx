@@ -13,7 +13,7 @@ import { HotelGateProvider, useHotelGate } from "./hotel-gate";
 import { MessageKey, useT } from "./i18n";
 import { useToast } from "./toast";
 import { useSocketEvent } from "./socket";
-import { alertBeep } from "./printing";
+import { pushNotify } from "./notify";
 import { money } from "./api";
 import { useBrand } from "./brand";
 import { acquireScrollLock, releaseScrollLock } from "./scroll-lock";
@@ -92,30 +92,34 @@ function LiveAlerts() {
   const { user } = useAuth();
 
   useSocketEvent<OrderEv>("bill.requested", (o) => {
-    toast.push(`Bill request: ${o.tableNo || `#${o.orderNo}`}${o.waiter ? ` (${o.waiter})` : ""}`, "info");
-    alertBeep();
+    const where = o.tableNo || `#${o.orderNo}`;
+    const body = `${where}${o.waiter ? ` (${o.waiter})` : ""}`;
+    toast.push(`Bill request: ${body}`, "info");
+    void pushNotify("Bill requested", body);
   });
 
   useSocketEvent<OrderEv>("order.ready", (o) => {
-    toast.push(`Order ready — pick up: ${o.tableNo || "Walk-in"} · #${o.orderNo}`, "ok");
-    if (user?.roleCode === "WAITER" || user?.roleCode === "SUPERVISOR") alertBeep();
+    const body = `${o.tableNo || "Walk-in"} · #${o.orderNo}`;
+    toast.push(`Order ready — pick up: ${body}`, "ok");
+    if (user?.roleCode === "WAITER" || user?.roleCode === "SUPERVISOR") {
+      void pushNotify("Order ready", body);
+    }
   });
 
   useSocketEvent<KitchenSlowEv>("kitchen.pending.slow", (o) => {
     const where = o.tableNo || `Walk-in`;
-    toast.push(`Kitchen delay: ${where} · #${o.orderNo} still pending — start cooking`, "err");
-    alertBeep();
+    const body = `${where} · #${o.orderNo} still pending — start cooking`;
+    toast.push(`Kitchen delay: ${body}`, "err");
+    void pushNotify("Kitchen delay", body);
   });
 
   useSocketEvent<KitchenLateEv>("kitchen.prep.late", (o) => {
     const where = o.tableNo || `Walk-in`;
     const late = o.lateByMinutes ?? 1;
     const target = o.targetMinutes ?? 15;
-    toast.push(
-      `Kitchen late: ${where} · #${o.orderNo} — ${late}m over target (${target}m)`,
-      "err"
-    );
-    alertBeep();
+    const body = `${where} · #${o.orderNo} — ${late}m over target (${target}m)`;
+    toast.push(`Kitchen late: ${body}`, "err");
+    void pushNotify("Kitchen late", body);
   });
 
   useSocketEvent<PrintEv>("print.failed", (j) => {
@@ -128,8 +132,9 @@ function LiveAlerts() {
   });
 
   useSocketEvent<CashEv>("cash.handover", (p) => {
-    toast.push(`${p.from} handed you ${money(p.amount)} for bill #${p.orderNo} — confirm in Billing`, "info");
-    alertBeep();
+    const body = `${p.from} handed you ${money(p.amount)} for bill #${p.orderNo}`;
+    toast.push(`${body} — confirm in Billing`, "info");
+    void pushNotify("Cash handover", body);
   });
 
   useSocketEvent<CashEv>("cash.confirmed", (p) => {

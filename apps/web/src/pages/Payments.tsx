@@ -56,7 +56,7 @@ function statusOf(p: PaymentRow): Exclude<Status, ""> {
 export function PaymentsPage() {
   const toast = useToast();
   const t = useT();
-  const { businessDate, dayStart } = useBusinessDay();
+  const { businessDate, dayStart, dayClose } = useBusinessDay();
   const [from, setFrom] = useState(businessDate);
   const [to, setTo] = useState(businessDate);
   const [rangeTouched, setRangeTouched] = useState(false);
@@ -190,7 +190,7 @@ export function PaymentsPage() {
           <p>
             {t("payments.subtitle")}
             <span className="tiny muted" style={{ display: "block" }}>
-              {t("cash.businessDayHint", { start: dayStart })}
+              {t("cash.businessDayHint", { start: dayStart, end: dayClose })}
             </span>
           </p>
         </div>

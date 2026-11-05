@@ -25,6 +25,8 @@ declare global {
       isDesktop: true;
       reconnect: () => void;
       serverUrl: () => Promise<string | null>;
+      /** Windows Action Center toast (Electron). */
+      notify?: (title: string, body: string) => Promise<boolean>;
     };
   }
 }

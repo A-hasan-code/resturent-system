@@ -7,6 +7,7 @@ import { businessDateOf, businessQueryWindow } from "../common/business-day";
 import { AuthUser } from "../common/decorators";
 import { SaveDayCashCloseDto } from "./close.dto";
 import { renderClosePdf } from "./close-pdf";
+import { renderMenuSalesPdf } from "./menu-sales-pdf";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const money2 = (n: number) => Math.round(n * 100) / 100;
@@ -43,16 +44,17 @@ export class CloseService {
   private async clock(dateStr?: string) {
     const start = await this.settings.dayStart();
     const now = new Date();
-    const today = businessDateOf(now, start.h, start.m);
+    const today = businessDateOf(now, start.h, start.m, start.closeH, start.closeM);
     const businessDate = dateStr?.trim() || today;
     if (!DATE_RE.test(businessDate)) throw new BadRequestException("Invalid business date");
-    // Exact from/to for sheet labels; gte/lt TZ-padded for payment/order queries (same as Bills).
-    const window = businessQueryWindow(businessDate, start.h, start.m);
+    // Exact shift open → close for labels and payment/order queries (same as Bills).
+    const window = businessQueryWindow(businessDate, start.h, start.m, start.closeH, start.closeM);
     return {
       ...start,
       businessDate,
       today,
       isToday: businessDate === today,
+      dayClose: start.closeLabel,
       from: window.from,
       to: window.to,
       gte: window.gte,
@@ -110,8 +112,16 @@ export class CloseService {
         where: { createdAt: { gte, lt }, status: { not: "CANCELLED" } },
         include: {
           items: {
-            where: { lineKind: "MENU" },
-            select: { name: true, quantity: true, amount: true },
+            select: {
+              name: true,
+              quantity: true,
+              amount: true,
+              ratePerUnit: true,
+              unitCost: true,
+              costAmount: true,
+              lineKind: true,
+              menuItem: { select: { category: true } },
+            },
           },
           ...orderStaffInclude,
         },
@@ -208,18 +218,63 @@ export class CloseService {
         (o.paymentStatus === PaymentStatus.UNPAID || o.paymentStatus === PaymentStatus.PARTIAL)
     );
 
-    const soldMap = new Map<string, { name: string; qty: number; amount: number }>();
-    for (const o of paidOrders) {
+    // Paid walk-in + same-day credit invoices (open unpaid tables excluded).
+    const soldSourceOrders = orders.filter(
+      (o) => o.paymentStatus === PaymentStatus.PAID || !!o.creditCustomerId
+    );
+    type SoldAgg = {
+      name: string;
+      category: string;
+      qty: number;
+      amount: number;
+      tPurchase: number;
+    };
+    const soldMap = new Map<string, SoldAgg>();
+    for (const o of soldSourceOrders) {
       for (const it of o.items) {
-        const cur = soldMap.get(it.name) ?? { name: it.name, qty: 0, amount: 0 };
-        cur.qty += toNumber(it.quantity);
-        cur.amount = money2(cur.amount + toNumber(it.amount));
-        soldMap.set(it.name, cur);
+        const category =
+          it.lineKind === "PER_HEAD"
+            ? "Per Head"
+            : it.menuItem?.category?.trim() || "Uncategorized";
+        const key = `${category}\0${it.name}`;
+        const qty = toNumber(it.quantity);
+        const amount = toNumber(it.amount);
+        const tPurchase = toNumber(it.costAmount);
+        const cur = soldMap.get(key) ?? {
+          name: it.name,
+          category,
+          qty: 0,
+          amount: 0,
+          tPurchase: 0,
+        };
+        cur.qty += qty;
+        cur.amount = money2(cur.amount + amount);
+        cur.tPurchase = money2(cur.tPurchase + tPurchase);
+        soldMap.set(key, cur);
       }
     }
     const soldItems = [...soldMap.values()]
-      .map((x) => ({ ...x, qty: Math.round(x.qty * 1000) / 1000 }))
-      .sort((a, b) => b.amount - a.amount);
+      .map((x) => {
+        const qty = Math.round(x.qty * 1000) / 1000;
+        const sale = qty > 0 ? money2(x.amount / qty) : x.amount;
+        const purchase = qty > 0 ? money2(x.tPurchase / qty) : 0;
+        return {
+          name: x.name,
+          category: x.category,
+          qty,
+          amount: x.amount,
+          sale,
+          purchase,
+          tPurchase: x.tPurchase,
+          profit: money2(x.amount - x.tPurchase),
+        };
+      })
+      .sort((a, b) => {
+        if (a.category === "Per Head" && b.category !== "Per Head") return -1;
+        if (b.category === "Per Head" && a.category !== "Per Head") return 1;
+        const c = a.category.localeCompare(b.category);
+        return c !== 0 ? c : b.amount - a.amount;
+      });
 
     const invoiceNet = (o: { total: unknown; discountAmount?: unknown; taxAmount?: unknown }) =>
       money2(Math.max(0, toNumber(o.total) - toNumber(o.discountAmount ?? 0) + toNumber(o.taxAmount ?? 0)));
@@ -410,14 +465,9 @@ export class CloseService {
     const collectedCash = money2(counters.reduce((s, c) => s + c.collectedCash, 0));
     const missCash = money2(Math.max(0, expectedCash - collectedCash));
     const surplusCash = money2(Math.max(0, collectedCash - expectedCash));
-    const frozenSold =
-      saved && !clock.isToday && saved.soldItems?.length
-        ? saved.soldItems.map((i) => ({
-            name: i.name,
-            qty: toNumber(i.qty),
-            amount: toNumber(i.amount),
-          }))
-        : soldItems;
+    // Always build from live order lines so category / cost stay correct on Menu sales PDF
+    // (legacy DayCashCloseSoldItem rows only store name/qty/amount).
+    const frozenSold = soldItems;
 
     const locked = !!saved?.lockedAt;
 
@@ -454,6 +504,7 @@ export class CloseService {
       today: clock.today,
       isToday: clock.isToday,
       dayStart: clock.label,
+      dayClose: clock.closeLabel,
       canEdit: !locked && clock.isToday,
       /** Frontend + save(): Admin may edit unlocked past days. */
       canAdminEditPast: !locked && !clock.isToday,
@@ -534,6 +585,32 @@ export class CloseService {
   async toPdf(date?: string) {
     const sheet = await this.liveSheet(date);
     return renderClosePdf(sheet, await this.settings.restaurant());
+  }
+
+  async toMenuSalesPdf(date?: string) {
+    const sheet = await this.liveSheet(date);
+    const soldItems = sheet.soldItems.map((i) => {
+      const qty = i.qty || 0;
+      const amount = i.amount || 0;
+      const sale = "sale" in i && typeof i.sale === "number" ? i.sale : qty > 0 ? amount / qty : amount;
+      const purchase = "purchase" in i && typeof i.purchase === "number" ? i.purchase : 0;
+      const tPurchase =
+        "tPurchase" in i && typeof i.tPurchase === "number" ? i.tPurchase : purchase * qty;
+      const profit = "profit" in i && typeof i.profit === "number" ? i.profit : amount - tPurchase;
+      const category =
+        "category" in i && typeof i.category === "string" && i.category ? i.category : "Menu";
+      return { name: i.name, category, qty, sale, amount, purchase, tPurchase, profit };
+    });
+    return renderMenuSalesPdf(
+      {
+        businessDate: sheet.businessDate,
+        dayStart: sheet.dayStart,
+        dayClose: sheet.dayClose,
+        isToday: sheet.isToday,
+        soldItems,
+      },
+      await this.settings.restaurant()
+    );
   }
 
   async history(limit = 60) {

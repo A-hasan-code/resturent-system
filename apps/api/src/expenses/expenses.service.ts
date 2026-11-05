@@ -4,16 +4,12 @@ import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
 import { FinanceService } from "../finance/finance.service";
 import { toNumber } from "../common/units";
-import { businessQueryRange } from "../common/business-day";
+import { businessDayStamp, businessQueryRange } from "../common/business-day";
 import { CreateExpenseCategoryDto, CreateHotelExpenseDto, UpdateHotelExpenseDto } from "./expenses.dto";
 
 const money2 = (n: number) => Math.round(n * 100) / 100;
 
-function dayStamp(isoDate: string) {
-  return new Date(`${isoDate}T12:00:00`);
-}
-
-/** Calendar date of a noon-stamped spentAt (matches the business date the form saved). */
+/** Calendar date of a shift-stamped spentAt (matches the business date the form saved). */
 function localDate(d: Date) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -74,11 +70,16 @@ export class ExpensesService {
     private readonly finance: FinanceService
   ) {}
 
-  /** Inclusive business-day range → [from, to) using restaurant day-start (+ TZ pad). */
+  /** Inclusive business-day range → [open, close). */
   private async businessRange(from: string, to: string) {
     const start = await this.settings.dayStart();
-    const range = businessQueryRange(from, to, start.h, start.m);
+    const range = businessQueryRange(from, to, start.h, start.m, start.closeH, start.closeM);
     return { start: range.gte, end: range.lt };
+  }
+
+  private async stamp(isoDate: string) {
+    const start = await this.settings.dayStart();
+    return businessDayStamp(isoDate, start.h, start.m, start.closeH, start.closeM);
   }
 
   private row(e: {
@@ -469,7 +470,7 @@ export class ExpensesService {
     const title = dto.title.trim();
     if (!title) throw new BadRequestException("Title / name required");
     const category = dto.category?.trim() || null;
-    const spentAt = dayStamp(dto.spentOn);
+    const spentAt = await this.stamp(dto.spentOn);
     await this.finance.assertNotLocked(spentAt);
 
     const created = await this.prisma.hotelExpense.create({
@@ -508,7 +509,7 @@ export class ExpensesService {
     }
 
     const nextCategory = dto.category !== undefined ? dto.category.trim() || null : undefined;
-    const nextSpent = dto.spentOn ? dayStamp(dto.spentOn) : null;
+    const nextSpent = dto.spentOn ? await this.stamp(dto.spentOn) : null;
     if (nextSpent) await this.finance.assertNotLocked(nextSpent);
 
     try {

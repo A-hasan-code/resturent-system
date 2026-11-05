@@ -204,7 +204,7 @@ export class OrdersService {
       const fromDay = from || to!;
       const toDay = to || from!;
       // TZ-padded (same helper as Dashboard / Close / Payments)
-      const q = businessQueryRange(fromDay, toDay, day.h, day.m);
+      const q = businessQueryRange(fromDay, toDay, day.h, day.m, day.closeH, day.closeM);
       range = { gte: q.gte, lt: q.lt };
     }
 
@@ -303,7 +303,7 @@ export class OrdersService {
     return orders.map((o) => this.toDto(o, canSeeCost(user)));
   }
 
-  /** Full kitchen board — table tickets only (takeaway stays with Main Cashier). */
+  /** Full kitchen board — tables + takeaway (food tickets waiting / cooking / ready). */
   async listKitchen(user: AuthUser) {
     if (!user.permissions.includes("kitchen.view")) {
       throw new ForbiddenException("Kitchen view required");
@@ -311,7 +311,6 @@ export class OrdersService {
     const orders = await this.prisma.order.findMany({
       where: {
         status: { in: KITCHEN_ACTIVE },
-        tableId: { not: null },
         kitchenHold: false,
       },
       include: orderInclude,
@@ -372,8 +371,8 @@ export class OrdersService {
       ? await this.resolveCreditCustomer(user, dto.creditCustomerId)
       : null;
     const servedByName = cleanName(dto.servedByName);
-    // Takeaway is counter work for Main Cashier — no kitchen board / KOT.
-    const hasKitchen = !isTakeaway && lines.some((l) => l.lineKind === "MENU");
+    // Takeaway with menu food → kitchen + KOT (same as tables). Per-head-only stay READY.
+    const hasKitchen = lines.some((l) => l.lineKind === "MENU");
     const now = new Date();
 
     // Soft table hold → copy guest onto the order, then clear the hold.
@@ -430,7 +429,8 @@ export class OrdersService {
         partySize,
         reservedFor,
         kitchenHold,
-        status: isTakeaway ? "READY" : "PENDING",
+        // Food → PENDING for kitchen; takeaway with only per-head stays READY at counter.
+        status: isTakeaway && !hasKitchen ? "READY" : "PENDING",
         paymentStatus: "UNPAID",
         subtotal,
         total: subtotal,
@@ -440,7 +440,7 @@ export class OrdersService {
         servedByName,
         creditCustomerId,
         kotRounds: hasKitchen ? 1 : 0,
-        ...(isTakeaway ? { readyAt: now, preparingAt: now } : {}),
+        ...(isTakeaway && !hasKitchen ? { readyAt: now, preparingAt: now } : {}),
         items: {
           create: lines.map(({ recipeId: _r, dealTakes, ...rest }) => ({
             lineKind: rest.lineKind,
@@ -568,11 +568,12 @@ export class OrdersService {
     const perHeadLines = lines.filter((l) => l.lineKind === "PER_HEAD");
     await this.ensureStock(menuLines);
     const servedByName = dto.servedByName !== undefined ? cleanName(dto.servedByName) : undefined;
-    const isTakeaway = !order.tableId;
     // First kitchen send on an order that only had per-head: kotRounds was 0 → become 1
-    // Takeaway never goes to kitchen — no KOT rounds.
-    const nextRound =
-      !isTakeaway && menuLines.length ? (order.kotRounds < 1 ? 1 : order.kotRounds + 1) : order.kotRounds;
+    const nextRound = menuLines.length
+      ? order.kotRounds < 1
+        ? 1
+        : order.kotRounds + 1
+      : order.kotRounds;
 
     if (perHeadLines.length) {
       const addQty = perHeadLines.reduce((s, l) => s + l.quantity, 0);
@@ -624,7 +625,7 @@ export class OrdersService {
           notes: rest.notes ?? null,
           modifiersJson: rest.modifiersJson ?? undefined,
           dealTakesJson: rest.dealTakes ?? undefined,
-          kotRound: isTakeaway ? 0 : nextRound,
+          kotRound: nextRound,
           addedById: user.id,
         })),
       });
@@ -637,27 +638,24 @@ export class OrdersService {
     await this.prisma.order.update({
       where: { id },
       data: {
-        ...(!isTakeaway && menuLines.length ? { kotRounds: nextRound } : {}),
+        ...(menuLines.length ? { kotRounds: nextRound } : {}),
         subtotal: sum,
         total: sum,
         costTotal: costSum,
         discountAmount: Math.min(toNumber(order.discountAmount), Math.max(0, sum - toNumber(order.paidAmount))),
         billRequestedAt: null,
-        // Takeaway stays READY with cashier — never bounce back to kitchen PENDING.
-        // Held pre-orders: do not touch kitchen timers until guest is seated.
-        ...(isTakeaway
-          ? order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED"
-            ? {}
-            : { status: "READY" as const, readyAt: new Date(), preparingAt: new Date() }
-          : order.kitchenHold
-            ? {}
-            : order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED"
+        // New food → kitchen PENDING again (tables + takeaway). Held pre-orders wait for guest.
+        ...(order.kitchenHold
+          ? {}
+          : order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED"
+            ? menuLines.length
               ? kitchenPendingReset()
-              : menuLines.length && order.status === "PENDING"
-                ? { pendingAt: new Date(), pendingAlertedAt: null }
-                : menuLines.length && order.status === "PREPARING"
-                  ? { lateAlertedAt: null }
-                  : {}),
+              : {}
+            : menuLines.length && order.status === "PENDING"
+              ? { pendingAt: new Date(), pendingAlertedAt: null }
+              : menuLines.length && order.status === "PREPARING"
+                ? { lateAlertedAt: null }
+                : {}),
         paymentStatus: toNumber(order.paidAmount) > 0 ? "PARTIAL" : order.paymentStatus,
         ...(order.waiterId ? {} : { waiterId: user.id }),
         ...(servedByName !== undefined ? { servedByName } : {}),
@@ -690,7 +688,7 @@ export class OrdersService {
       }
       throw e;
     }
-    if (!order.kitchenHold && !isTakeaway && dto.printKot !== false && menuLines.length) {
+    if (!order.kitchenHold && dto.printKot !== false && menuLines.length) {
       await this.queueKot(id, nextRound, user.id);
     }
     const full = await this.prisma.order.findUniqueOrThrow({ where: { id }, include: orderInclude });
@@ -747,8 +745,8 @@ export class OrdersService {
 
     let printQueued = 0;
     let printError: string | null = null;
-    // Takeaway never hits kitchen — skip cancel KOT.
-    const hasKitchen = !!order.tableId && order.items.some((i) => i.lineKind !== "PER_HEAD");
+    // Kitchen cancel slip for any food ticket (table or takeaway).
+    const hasKitchen = order.items.some((i) => i.lineKind !== "PER_HEAD");
     if (hasKitchen) {
       try {
         const jobs = await this.print.enqueueKot(id, {
@@ -771,8 +769,10 @@ export class OrdersService {
   }
 
   /**
-   * Main cashier: reverse a paid (or partially paid) bill — wipe payments/tips,
-   * restore stock, mark VOID/CANCELLED. No kitchen cancel slip.
+   * Main cashier: reverse payment only.
+   * Same order + items + stock stay. Payment/TipShare rows deleted so Close /
+   * Finance / Payments totals drop. Bill → UNPAID (editable). If pay had closed
+   * the visit (COMPLETED), reopen so the same table stays active on this order.
    */
   async reverse(user: AuthUser, id: string, dto: CancelOrderDto) {
     if (!user.permissions.includes("order.edit")) {
@@ -785,7 +785,6 @@ export class OrdersService {
     const order = await this.prisma.order.findUnique({
       where: { id },
       include: {
-        items: true,
         payments: { select: { id: true } },
       },
     });
@@ -798,7 +797,21 @@ export class OrdersService {
       throw new BadRequestException("Nothing to reverse — bill has no payment");
     }
 
-    await this.restoreStockForOrder(order.id, order.orderNo);
+    const beforePaid = toNumber(order.paidAmount);
+    const beforeTotal = toNumber(order.total);
+    const beforeDiscount = toNumber(order.discountAmount);
+    const beforeNet = Math.max(0, Math.round((beforeTotal - beforeDiscount) * 100) / 100);
+    // Only reopen when payment had closed the ticket — otherwise keep kitchen status.
+    const reopenStatus: OrderStatus | null =
+      order.status === "COMPLETED"
+        ? !order.tableId
+          ? "READY"
+          : order.readyAt
+            ? "SERVED"
+            : order.preparingAt
+              ? "PREPARING"
+              : "PENDING"
+        : null;
 
     await this.prisma.$transaction(async (tx) => {
       await tx.payment.deleteMany({ where: { orderId: id } });
@@ -806,15 +819,28 @@ export class OrdersService {
       await tx.order.update({
         where: { id },
         data: {
-          status: "CANCELLED",
-          paymentStatus: "VOID",
+          paymentStatus: "UNPAID",
           paidAmount: 0,
           tenderedAmount: 0,
           tipAmount: 0,
-          billRequestedAt: null,
-          cancelReason: reason,
-          cancelledAt: new Date(),
-          cancelledById: user.id,
+          ...(reopenStatus ? { status: reopenStatus } : {}),
+          cancelReason: null,
+          cancelledAt: null,
+          cancelledById: null,
+        },
+      });
+      await tx.orderBillEdit.create({
+        data: {
+          orderId: id,
+          reason: `Payment reversed: ${reason}`,
+          beforeTotal,
+          afterTotal: beforeTotal,
+          beforeNet,
+          afterNet: beforeNet,
+          beforePaidAmount: beforePaid,
+          afterPaidAmount: 0,
+          editedById: user.id,
+          editedByName: user.name,
         },
       });
     });
@@ -839,9 +865,6 @@ export class OrdersService {
     if (order.status !== "CANCELLED") {
       throw new BadRequestException("Only cancelled orders can print a cancel kitchen slip");
     }
-    if (!order.tableId) {
-      throw new BadRequestException("Takeaway orders have no kitchen slip");
-    }
     const hasKitchen = order.items.some((i) => i.lineKind !== "PER_HEAD");
     if (!hasKitchen) throw new BadRequestException("No kitchen items on this order");
     const jobs = await this.print.enqueueKot(id, {
@@ -865,7 +888,14 @@ export class OrdersService {
     }
     const order = await this.prisma.order.findUnique({
       where: { id },
-      include: { items: true, payments: { orderBy: { createdAt: "desc" } } },
+      include: {
+        items: {
+          include: {
+            menuItem: { select: { category: true, kitchenStation: true } },
+          },
+        },
+        payments: { orderBy: { createdAt: "desc" } },
+      },
     });
     if (!order) throw new NotFoundException("Order not found");
     await this.finance.assertNotLocked(order.createdAt);
@@ -888,6 +918,26 @@ export class OrdersService {
         return !!line && change.quantity > toNumber(line.quantity) + 0.0001;
       });
     if (growing) await this.assertAcceptingOrders();
+
+    // Snapshot kitchen lines being reduced/removed BEFORE DB changes (for cancel slip).
+    const cancelLines = (dto.items ?? [])
+      .map((change) => {
+        const line = order.items.find((i) => i.id === change.id);
+        if (!line?.menuItemId || line.lineKind === "PER_HEAD") return null;
+        const oldQty = toNumber(line.quantity);
+        const newQty = Math.max(0, change.quantity);
+        const removed = Math.round((oldQty - newQty) * 1000) / 1000;
+        if (removed <= 0) return null;
+        return {
+          name: line.name,
+          quantity: removed,
+          unit: String(line.sellUnit),
+          notes: line.notes,
+          category: line.menuItem?.category ?? undefined,
+          station: line.menuItem?.kitchenStation ?? undefined,
+        };
+      })
+      .filter((l): l is NonNullable<typeof l> => !!l);
 
     const round2 = (n: number) => Math.round(n * 100) / 100;
     const beforeTotal = toNumber(order.total);
@@ -947,6 +997,18 @@ export class OrdersService {
       );
     }
 
+    // Kitchen fire: new menu lines / qty-up get a fresh kotRound so only those
+    // items print (same as waiter addItems) — not a full-order reprint. Tables + takeaway.
+    const menuQtyUp = (dto.items ?? []).some((change) => {
+      const line = order.items.find((i) => i.id === change.id);
+      return (
+        !!line?.menuItemId &&
+        line.lineKind !== "PER_HEAD" &&
+        change.quantity > toNumber(line.quantity) + 0.0001
+      );
+    });
+    let fireRound: number | null = null;
+
     const trackStock = await this.settings.enforceRecipeStock();
     for (const change of dto.items) {
       const line = order.items.find((i) => i.id === change.id);
@@ -992,16 +1054,49 @@ export class OrdersService {
 
       const oldGrams = toNumber(line.batchGrams);
       let nextBatchGrams = oldGrams;
+      let fireGrams = 0;
       if (trackStock && line.specialProductId && oldQty > 0 && oldGrams > 0 && qtyDiff !== 0) {
         if (qtyDiff > 0) {
-          const addGrams = (oldGrams / oldQty) * qtyDiff;
-          await this.specials.assertAndTake(line.specialProductId, addGrams);
-          nextBatchGrams = oldGrams + addGrams;
+          fireGrams = (oldGrams / oldQty) * qtyDiff;
+          await this.specials.assertAndTake(line.specialProductId, fireGrams);
+          nextBatchGrams = oldGrams; // original line unchanged when we fire a new round line
         } else {
           const remGrams = newQty <= 0 ? oldGrams : (oldGrams / oldQty) * -qtyDiff;
           await this.specials.restoreGrams(line.specialProductId, remGrams);
           nextBatchGrams = newQty <= 0 ? 0 : Math.max(0, oldGrams - remGrams);
         }
+      }
+
+      // Kitchen qty-up → new line on next KOT round (slip shows only the add). Tables + takeaway.
+      const fireAsNewRound =
+        qtyDiff > 0 && !!line.menuItemId && line.lineKind !== "PER_HEAD";
+      if (fireAsNewRound) {
+        if (fireRound == null) {
+          fireRound = order.kotRounds < 1 ? 1 : order.kotRounds + 1;
+        }
+        await this.prisma.orderItem.create({
+          data: {
+            orderId: id,
+            lineKind: line.lineKind,
+            menuItemId: line.menuItemId,
+            name: line.name,
+            sellUnit: line.sellUnit,
+            quantity: qtyDiff,
+            ratePerUnit: rate,
+            amount: rate * qtyDiff,
+            unitCost,
+            costAmount: unitCost * qtyDiff,
+            batchGrams: fireGrams,
+            specialProductId: line.specialProductId,
+            saleMode: line.saleMode,
+            notes: line.notes,
+            modifiersJson: line.modifiersJson ?? undefined,
+            dealTakesJson: line.dealTakesJson ?? undefined,
+            kotRound: fireRound,
+            addedById: user.id,
+          },
+        });
+        continue;
       }
 
       if (newQty <= 0) {
@@ -1013,7 +1108,7 @@ export class OrdersService {
             quantity: newQty,
             amount: rate * newQty,
             costAmount: unitCost * newQty,
-            batchGrams: nextBatchGrams,
+            batchGrams: qtyDiff > 0 ? oldGrams + fireGrams : nextBatchGrams,
           },
         });
       }
@@ -1032,7 +1127,15 @@ export class OrdersService {
         }))
       );
       await this.ensureStock(built.lines);
+      const kitchenAdds = built.lines.filter((l) => l.lineKind === "MENU");
+      if (kitchenAdds.length && fireRound == null) {
+        fireRound = order.kotRounds < 1 ? 1 : order.kotRounds + 1;
+      }
       for (const line of built.lines) {
+        const lineRound =
+          line.lineKind === "PER_HEAD"
+            ? 0
+            : fireRound ?? (order.kotRounds < 1 ? 1 : order.kotRounds);
         await this.prisma.orderItem.create({
           data: {
             orderId: id,
@@ -1051,7 +1154,7 @@ export class OrdersService {
             notes: line.notes,
             modifiersJson: line.modifiersJson ?? undefined,
             dealTakesJson: line.dealTakes ?? undefined,
-            kotRound: order.kotRounds,
+            kotRound: lineRound,
             addedById: user.id,
           },
         });
@@ -1074,6 +1177,11 @@ export class OrdersService {
         subDelta += line.amount;
         costDelta += line.costAmount;
       }
+    }
+
+    // Qty-up without addItems still needs a fire round for the KOT.
+    if (menuQtyUp && fireRound == null) {
+      fireRound = order.kotRounds < 1 ? 1 : order.kotRounds + 1;
     }
 
     const remaining = await this.prisma.orderItem.count({ where: { orderId: id } });
@@ -1113,7 +1221,6 @@ export class OrdersService {
       nextDiscount = Math.min(beforeDiscount, Math.max(0, nextTotal - beforePaidAmount));
     }
 
-    const isTakeaway = !order.tableId;
     const updated = await this.prisma.order.update({
       where: { id },
       data: {
@@ -1123,34 +1230,30 @@ export class OrdersService {
         discountAmount: nextDiscount,
         paidAmount: nextPaid,
         paymentStatus: nextPaymentStatus,
-        // Takeaway stays with cashier (READY) — never bounce back to kitchen PENDING.
-        ...(isTakeaway
-          ? growing && order.status !== "READY" && order.status !== "SERVED" && order.status !== "COMPLETED"
-            ? { status: "READY" as const, readyAt: order.readyAt ?? new Date() }
-            : {}
-          : growing &&
-              (order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED")
-            ? kitchenPendingReset()
-            : {}),
+        ...(fireRound != null ? { kotRounds: fireRound } : {}),
+        // Extra food after Ready/Served → back to kitchen PENDING (tables + takeaway).
+        ...(growing &&
+        (order.status === "READY" || order.status === "SERVED" || order.status === "COMPLETED")
+          ? kitchenPendingReset()
+          : {}),
         ...billMeta,
       },
       include: orderInclude,
     });
 
-    this.realtime.orderChanged(this.event(updated), "edited");
-    // Qty-down / remove: reprint cancel-style KOT so kitchen stops wrong lines (tables only).
-    const shrunkKitchen = (dto.items ?? []).some((change) => {
-      const line = order.items.find((i) => i.id === change.id);
-      return !!line?.menuItemId && change.quantity + 0.0001 < toNumber(line.quantity);
-    });
-    if (!isTakeaway && shrunkKitchen) {
+    this.realtime.orderChanged(this.event(updated), fireRound != null ? "items-added" : "edited");
+    // Qty-down: cancel slip only when cashier opts in — only the removed qty lines.
+    if (cancelLines.length && dto.printCancelKot === true) {
       void this.print.enqueueKot(id, {
         cancelled: true,
         cancelReason: "Bill edited — check quantities",
+        cancelLines,
         requestedById: user.id,
       });
-    } else if (!isTakeaway && growing) {
-      void this.print.enqueueKot(id, { reprint: true, requestedById: user.id });
+    }
+    // New / extra kitchen items → only this round's slip (order # + new lines).
+    if (fireRound != null) {
+      await this.queueKot(id, fireRound, user.id);
     }
     return this.toDto(updated, canSeeCost(user));
   }
@@ -1187,10 +1290,13 @@ export class OrdersService {
   }
 
   async printKot(user: AuthUser, id: string, round?: number, reprint = true) {
-    const order = await this.prisma.order.findUnique({ where: { id }, select: { tableId: true } });
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+      select: { tableId: true, items: { select: { lineKind: true } } },
+    });
     if (!order) throw new NotFoundException("Order not found");
-    if (!order.tableId) {
-      throw new BadRequestException("Takeaway orders have no kitchen slip");
+    if (!order.items.some((i) => i.lineKind !== "PER_HEAD")) {
+      throw new BadRequestException("No kitchen items on this order");
     }
     const jobs = await this.print.enqueueKot(id, { round, reprint, requestedById: user.id });
     return { queued: jobs.length, jobs: jobs.map((j) => ({ id: j.id, status: j.status, error: j.lastError })) };
@@ -1245,6 +1351,14 @@ export class OrdersService {
     const paymentStatus: PaymentStatus = fullyPaid ? "PAID" : pay > 0 ? "PARTIAL" : order.paymentStatus;
     const tipAmount = round2(toNumber(order.tipAmount) + tip);
     const tenderedAmount = round2(toNumber(order.tenderedAmount) + tendered);
+    // Setting ON: full pay closes kitchen ticket immediately (served / off the board).
+    const payClosesKitchen = fullyPaid && (await this.settings.payClosesKitchen());
+    const shouldComplete =
+      fullyPaid &&
+      (!order.tableId ||
+        order.status === "READY" ||
+        order.status === "SERVED" ||
+        payClosesKitchen);
 
     let servedByName = order.servedByName;
     if (dto.servedByName !== undefined) {
@@ -1296,11 +1410,8 @@ export class OrdersService {
           paymentStatus,
           servedByName,
           cashierId: order.cashierId ?? handedTo?.id ?? user.id,
-          status:
-            fullyPaid &&
-            (!order.tableId || order.status === "READY" || order.status === "SERVED")
-              ? "COMPLETED"
-              : order.status,
+          status: shouldComplete ? "COMPLETED" : order.status,
+          ...(shouldComplete && !order.readyAt ? { readyAt: new Date() } : {}),
         },
         include: orderInclude,
       });
@@ -1390,14 +1501,8 @@ export class OrdersService {
       servedByName = cleanName(dto.servedByName);
     }
 
-    const releaseTable = !!dto.releaseTable;
-    // Takeaway has no kitchen step — cashier may close anytime. Tables still need READY/SERVED.
-    if (releaseTable && order.tableId && order.status !== "READY" && order.status !== "SERVED") {
-      throw new BadRequestException(
-        "Wait until kitchen marks Ready (or Served) before freeing the table for the next guest"
-      );
-    }
-
+    // Credit always closes the visit: frees the table and drops the ticket from kitchen
+    // (same as a fully paid takeaway). Bill stays receivable until Credit Customers settle.
     const updated = await this.prisma.order.update({
       where: { id },
       data: {
@@ -1406,11 +1511,12 @@ export class OrdersService {
         taxAmount,
         taxPercent,
         servedByName,
-        ...(releaseTable ? { status: "COMPLETED" as const } : {}),
+        status: "COMPLETED",
+        ...(order.readyAt ? {} : { readyAt: new Date() }),
       },
       include: orderInclude,
     });
-    this.realtime.orderChanged(this.event(updated), releaseTable ? "status" : "credit");
+    this.realtime.orderChanged(this.event(updated), "status");
     return this.toDto(updated, canSeeCost(user));
   }
 
@@ -1424,15 +1530,9 @@ export class OrdersService {
       return this.toDto(order, canSeeCost(user));
     }
     await this.finance.assertNotLocked(order.createdAt);
-    // Tables: wait for kitchen. Takeaway is cashier counter — close anytime.
-    if (order.tableId && order.status !== "READY" && order.status !== "SERVED") {
-      throw new BadRequestException(
-        "Wait until kitchen marks Ready (or Served) before freeing the table for the next guest"
-      );
-    }
     const updated = await this.prisma.order.update({
       where: { id },
-      data: { status: "COMPLETED" },
+      data: { status: "COMPLETED", ...(order.readyAt ? {} : { readyAt: new Date() }) },
       include: orderInclude,
     });
     this.realtime.orderChanged(this.event(updated), "status");

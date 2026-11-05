@@ -4,11 +4,13 @@ import { businessDateOf, localIsoDay, parseDayStart } from "./businessDay";
 import { useSocketEvent } from "./socket";
 
 export type HotelStatus = {
-  /** Server time from Settings. Only admin saves it. */
+  /** @deprecated alias of dayStart — kept for older clients */
   closeTime: string;
-  /** Current business day YYYY-MM-DD (dayStart → next dayStart). */
+  /** Current business day YYYY-MM-DD (open → close shift). */
   businessDate?: string;
   dayStart?: string;
+  /** Shift end HH:mm (next morning if overnight, e.g. 03:00). */
+  dayClose?: string;
   manuallyClosed: boolean;
   closedAt: string | null;
   closedBy: string | null;
@@ -64,19 +66,21 @@ export function useShiftOpen() {
 
 /**
  * Current restaurant business day for cash/history pickers.
- * Prefers server hotel.businessDate; falls back to local clock + dayStart.
+ * Prefers server hotel.businessDate; falls back to local clock + open/close shift.
  */
 export function useBusinessDay() {
   const { gate } = useHotelGate();
+  const dayStart = gate?.dayStart || gate?.closeTime || "11:00";
+  const dayClose = gate?.dayClose || "03:00";
   if (gate?.businessDate) {
-    return {
-      businessDate: gate.businessDate,
-      dayStart: gate.dayStart || gate.closeTime || "11:00",
-    };
+    return { businessDate: gate.businessDate, dayStart, dayClose };
   }
-  const start = parseDayStart(gate?.dayStart || gate?.closeTime);
+  const open = parseDayStart(dayStart);
+  const close = parseDayStart(dayClose);
   return {
-    businessDate: businessDateOf(new Date(), start.h, start.m) || localIsoDay(),
-    dayStart: start.label,
+    businessDate:
+      businessDateOf(new Date(), open.h, open.m, close.h, close.m) || localIsoDay(),
+    dayStart: open.label,
+    dayClose: close.label,
   };
 }

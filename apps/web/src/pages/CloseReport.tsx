@@ -71,6 +71,7 @@ type Sheet = {
   today: string;
   isToday: boolean;
   dayStart: string;
+  dayClose?: string;
   canEdit?: boolean;
   /** Admin may edit unlocked past days. */
   adminPastEdit?: boolean;
@@ -83,7 +84,16 @@ type Sheet = {
   closedByName: string | null;
   closedAt: string | null;
   counters: Counter[];
-  soldItems: { name: string; qty: number; amount: number }[];
+  soldItems: {
+    name: string;
+    qty: number;
+    amount: number;
+    category?: string;
+    sale?: number;
+    purchase?: number;
+    tPurchase?: number;
+    profit?: number;
+  }[];
   pendingBills: {
     orderNo: number;
     tableNo: string | null;
@@ -355,6 +365,7 @@ export function CloseReportPage() {
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [menuPdfBusy, setMenuPdfBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [note, setNote] = useState("");
   const [openingFloat, setOpeningFloat] = useState("0");
@@ -710,6 +721,22 @@ export function CloseReportPage() {
     }
   }
 
+  async function downloadMenuSalesPdf() {
+    if (!sheet) return;
+    setMenuPdfBusy(true);
+    try {
+      await downloadApi(
+        `/close/menu-sales-export?date=${sheet.businessDate}`,
+        `menu-sales-${sheet.businessDate}.pdf`
+      );
+      toast.push(t("close.menuSalesPdfOk"), "ok");
+    } catch (err) {
+      toast.push(err instanceof Error ? err.message : t("common.failed"), "err");
+    } finally {
+      setMenuPdfBusy(false);
+    }
+  }
+
   async function unlockDay() {
     if (!sheet) return;
     setBusy(true);
@@ -739,7 +766,12 @@ export function CloseReportPage() {
           {!shiftOpen && <p className="page-head-meta tiny muted">{t("hotel.shiftEnded")}</p>}
           {sheet && (
             <p className="page-head-meta tiny">
-              <span>{t("close.dayWindow", { start: sheet.dayStart })}</span>
+              <span>
+                {t("close.dayWindow", {
+                  start: sheet.dayStart,
+                  end: sheet.dayClose || "03:00",
+                })}
+              </span>
               <span>{isToday ? t("close.todayBadge") : t("close.viewOnlyBadge")}</span>
               {locked ? <span className="badge pending">{t("close.lockedBadge")}</span> : null}
               {frozen ? <span className="badge">{t("close.frozenBadge")}</span> : null}
@@ -773,16 +805,24 @@ export function CloseReportPage() {
           <button
             type="button"
             className="btn ghost sm page-head-btn"
-            disabled={!sheet || pdfBusy}
+            disabled={!sheet || pdfBusy || menuPdfBusy}
             onClick={() => void downloadPdf()}
           >
             {pdfBusy ? t("common.loading") : t("close.pdf")}
+          </button>
+          <button
+            type="button"
+            className="btn sm page-head-btn"
+            disabled={!sheet || pdfBusy || menuPdfBusy}
+            onClick={() => void downloadMenuSalesPdf()}
+          >
+            {menuPdfBusy ? t("common.loading") : t("close.menuSalesPdf")}
           </button>
           {sheet && (
             <OtherPrintButton
               path={`/close/print?date=${encodeURIComponent(sheet.businessDate)}`}
               className="btn ghost sm page-head-btn"
-              disabled={pdfBusy}
+              disabled={pdfBusy || menuPdfBusy}
             />
           )}
           {locked && canUnlock && (
@@ -1507,7 +1547,20 @@ export function CloseReportPage() {
       </form>
       <div className="grid-2" style={{ marginTop: "0.85rem" }}>
         <div className="panel panel-pad">
-          <h3 style={{ marginTop: 0 }}>{t("close.itemsSold")}</h3>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: "0.5rem" }}>
+            <h3 style={{ marginTop: 0, marginBottom: 0 }}>{t("close.itemsSold")}</h3>
+            <button
+              type="button"
+              className="btn ghost sm"
+              disabled={!sheet?.soldItems.length || menuPdfBusy}
+              onClick={() => void downloadMenuSalesPdf()}
+            >
+              {menuPdfBusy ? t("common.loading") : t("close.menuSalesPdf")}
+            </button>
+          </div>
+          <p className="tiny muted" style={{ marginTop: "0.35rem" }}>
+            {t("close.itemsSoldHint")}
+          </p>
           {!sheet?.soldItems.length ? (
             <div className="empty">{t("close.noItems")}</div>
           ) : (
@@ -1522,8 +1575,11 @@ export function CloseReportPage() {
                 </thead>
                 <tbody>
                   {paginate(sheet.soldItems, soldPage, PAGE_SIZE).map((i) => (
-                    <tr key={i.name}>
-                      <td>{i.name}</td>
+                    <tr key={`${i.category ?? ""}:${i.name}`}>
+                      <td>
+                        {i.name}
+                        {i.category ? <div className="tiny muted">{i.category}</div> : null}
+                      </td>
                       <td>{i.qty}</td>
                       <td>
                         <strong>{money(i.amount)}</strong>

@@ -37,7 +37,7 @@ export class SpecialsService {
 
   async businessDateNow() {
     const day = await this.settings.dayStart();
-    return businessDateOf(new Date(), day.h, day.m);
+    return businessDateOf(new Date(), day.h, day.m, day.closeH, day.closeM);
   }
 
   private async assertDayNotLocked(businessDate: string) {
@@ -111,10 +111,10 @@ export class SpecialsService {
     if (requested && /^\d{4}-\d{2}-\d{2}$/.test(requested)) {
       target = requested;
     } else {
-      const natural = businessDateOf(now, clock.h, clock.m);
+      const natural = businessDateOf(now, clock.h, clock.m, clock.closeH, clock.closeM);
       const finished =
         (await this.isLeftoverClosed(natural)) || (await this.isDayCashLocked(natural));
-      target = defaultCookBusinessDate(now, clock.h, clock.m, finished);
+      target = defaultCookBusinessDate(now, clock.h, clock.m, finished, clock.closeH, clock.closeM);
     }
     if (await this.isDayCashLocked(target)) {
       throw new BadRequestException(
@@ -1162,10 +1162,10 @@ export class SpecialsService {
   async cookDefaults() {
     const clock = await this.settings.dayStart();
     const now = new Date();
-    const natural = businessDateOf(now, clock.h, clock.m);
+    const natural = businessDateOf(now, clock.h, clock.m, clock.closeH, clock.closeM);
     const finished =
       (await this.isLeftoverClosed(natural)) || (await this.isDayCashLocked(natural));
-    let suggested = defaultCookBusinessDate(now, clock.h, clock.m, finished);
+    let suggested = defaultCookBusinessDate(now, clock.h, clock.m, finished, clock.closeH, clock.closeM);
     for (let i = 0; i < 5; i++) {
       if (
         !(await this.isDayCashLocked(suggested)) &&

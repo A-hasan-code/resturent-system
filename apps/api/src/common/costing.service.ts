@@ -214,6 +214,15 @@ export class CostingService {
     };
   }
 
+  /** Same as menuItemCost, but returns zeros if the recipe/ingredient cannot be costed. */
+  async menuItemCostSafe(menuItemId: string, qty: number) {
+    try {
+      return await this.menuItemCost(menuItemId, qty);
+    } catch {
+      return { unitCost: 0, costAmount: 0 };
+    }
+  }
+
   /** Fix orders saved with costTotal = 0 but menu items have recipes. */
   async repairMissingOrderCosts() {
     const orders = await this.prisma.order.findMany({
@@ -224,27 +233,33 @@ export class CostingService {
 
     let fixed = 0;
     for (const order of orders) {
-      let costTotal = 0;
-      for (const item of order.items) {
-        if (!item.menuItemId) continue;
-        const { unitCost, costAmount } = await this.menuItemCost(
-          item.menuItemId,
-          toNumber(item.quantity)
-        );
-        costTotal += costAmount;
-        if (costAmount > 0 && toNumber(item.costAmount) === 0) {
-          await this.prisma.orderItem.update({
-            where: { id: item.id },
-            data: { unitCost, costAmount },
-          });
+      try {
+        let costTotal = 0;
+        for (const item of order.items) {
+          if (!item.menuItemId) continue;
+          // Skip inactive/broken recipes — never abort the whole repair batch.
+          const { unitCost, costAmount } = await this.menuItemCostSafe(
+            item.menuItemId,
+            toNumber(item.quantity)
+          );
+          if (!(costAmount > 0)) continue;
+          costTotal += costAmount;
+          if (toNumber(item.costAmount) === 0) {
+            await this.prisma.orderItem.update({
+              where: { id: item.id },
+              data: { unitCost, costAmount },
+            });
+          }
         }
-      }
-      if (costTotal > 0) {
-        await this.prisma.order.update({
-          where: { id: order.id },
-          data: { costTotal },
-        });
-        fixed += 1;
+        if (costTotal > 0) {
+          await this.prisma.order.update({
+            where: { id: order.id },
+            data: { costTotal },
+          });
+          fixed += 1;
+        }
+      } catch {
+        // one bad order must not stop the rest
       }
     }
     return fixed;

@@ -134,6 +134,8 @@ enum PrintJobType {
   KOT
   BILL
   BILL_EDIT
+  /// Credit customer settlement / paid slip on cashier bill printer
+  CREDIT_SLIP
   TEST
   /// A4 / office PDF reports (close, audit, kitchen, supplier) via Other print printers
   REPORT
@@ -259,6 +261,8 @@ model Printer {
   /// Comma separated menu categories for KOT routing; empty = all
   categories String      @default("")
   active     Boolean     @default(true)
+  /// Admin added via Settings (not only auto-synced from desktop app)
+  manual     Boolean     @default(false)
   /// Set when kind=AGENT — which Additional PC owns this USB printer
   agentId    String?
   agent      PrintAgent? @relation(fields: [agentId], references: [id], onDelete: Cascade)
@@ -322,6 +326,8 @@ model User {
   /// Default bill printer for this cashier (industrial: each counter → own network printer)
   billPrinterId String?
   billPrinter   Printer? @relation("UserBillPrinter", fields: [billPrinterId], references: [id], onDelete: SetNull)
+  /// Admin grant: Kitchen board Start / Ready / Served (adds kitchen.view + kitchen.update).
+  kitchenBoard  Boolean  @default(false)
   orders            Order[]     @relation("OrderCashier")
   waiterOrders      Order[]     @relation("OrderWaiter")
   assignedOrders    Order[]     @relation("OrderAssignedCashier")

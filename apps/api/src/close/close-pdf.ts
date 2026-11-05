@@ -7,6 +7,7 @@ type Hotel = { name: string; tagline: string; address: string; phone: string };
 export type ClosePdfSheet = {
   businessDate: string;
   dayStart: string;
+  dayClose?: string;
   locked: boolean;
   frozen: boolean;
   saved: boolean;
@@ -30,7 +31,16 @@ export type ClosePdfSheet = {
     creditBillCount?: number;
     creditPaymentCount?: number;
   }[];
-  soldItems: { name: string; qty: number; amount: number }[];
+  soldItems: {
+    name: string;
+    qty: number;
+    amount: number;
+    category?: string;
+    sale?: number;
+    purchase?: number;
+    tPurchase?: number;
+    profit?: number;
+  }[];
   specialsClose?: {
     businessDate: string;
     closedByName: string | null;
@@ -162,7 +172,7 @@ export function renderClosePdf(sheet: ClosePdfSheet, hotel: Hotel): Promise<Buff
       sheet.saved ? "Saved" : "Live preview",
       sheet.locked ? "Day locked" : null,
       sheet.frozen ? "Frozen snapshot" : null,
-      `Business day from ${sheet.dayStart}`,
+      `Shift ${sheet.dayStart} → ${sheet.dayClose || "03:00"}`,
     ].filter(Boolean);
     doc.text(flags.join(" · "));
     if (sheet.closedByName) {
@@ -242,7 +252,7 @@ export function renderClosePdf(sheet: ClosePdfSheet, hotel: Hotel): Promise<Buff
       [0.7, 0.3]
     );
 
-    section(doc, "Items sold", "Paid bills only");
+    section(doc, "Items sold", "Paid bills + credit — menu and Per Head");
     table(
       doc,
       w,

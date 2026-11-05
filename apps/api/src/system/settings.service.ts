@@ -3,9 +3,10 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync,
 import { extname, join } from "path";
 import { PrismaService } from "../prisma/prisma.service";
 import { dataDir } from "../config/env";
-import { businessDateOf, parseDayStart } from "../common/business-day";
+import { businessDateOf, parseDayStart, type ShiftClock } from "../common/business-day";
 import { AuthUser } from "../common/decorators";
 import { buildThermalLogoPng } from "../print/thermal-logo";
+import { MachineLogService } from "./machine-log.service";
 
 export type PerHeadPackageSaved = {
   menuItemId: string;
@@ -53,7 +54,10 @@ const LOGO_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".svg"]);
 
 @Injectable()
 export class SettingsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly machineLogs: MachineLogService
+  ) {}
 
   async get(key: string, fallback = ""): Promise<string> {
     const row = await this.prisma.setting.findUnique({ where: { key } });
@@ -79,6 +83,14 @@ export class SettingsService {
   async setEnforceRecipeStock(on: boolean) {
     await this.set("orders.enforceRecipeStock", on ? "1" : "0");
     return { enforceRecipeStock: on };
+  }
+
+  /**
+   * When true: full cashier payment marks the order COMPLETED (served/closed)
+   * so it leaves the kitchen board immediately. Default off.
+   */
+  async payClosesKitchen(): Promise<boolean> {
+    return (await this.get("billing.payClosesKitchen", "0")) !== "0";
   }
 
   async getMany(prefix: string): Promise<Record<string, string>> {
@@ -161,28 +173,46 @@ export class SettingsService {
       accent: ACCENT_RE.test(s["restaurant.accent"] || "") ? s["restaurant.accent"] : "#0f7a6c",
       logoUrl: logo || null,
       dayStart: parseDayStart(s["restaurant.dayStart"]).label,
+      dayClose: parseDayStart(s["restaurant.dayClose"] || "03:00").label,
     };
   }
 
-  async dayStart() {
-    return parseDayStart(await this.get("restaurant.dayStart", "11:00"));
+  /** Open + close clock for the restaurant shift (HRMS-style). */
+  async dayStart(): Promise<ShiftClock> {
+    const open = parseDayStart(await this.get("restaurant.dayStart", "11:00"));
+    const close = parseDayStart(await this.get("restaurant.dayClose", "03:00"));
+    return {
+      ...open,
+      closeH: close.h,
+      closeM: close.m,
+      closeLabel: close.label,
+    };
   }
 
   /**
    * Close hotel = shift ended: no new orders, no day close, no expenses, no inventory close
    * until the hotel is opened again. Open works at any time if close was a mistake.
    * closedAt / closedBy is the record admin keeps of when the hotel was closed.
+   * Does NOT change businessDate — only dayStart/dayClose clock does.
    */
   async hotelStatus() {
     const s = await this.getMany("hotel.");
-    const close = await this.dayStart();
+    const shift = await this.dayStart();
     const manuallyClosed = (s["hotel.manuallyClosed"] ?? "0") === "1";
-    const businessDate = businessDateOf(new Date(), close.h, close.m);
+    const businessDate = businessDateOf(
+      new Date(),
+      shift.h,
+      shift.m,
+      shift.closeH,
+      shift.closeM
+    );
     return {
-      closeTime: close.label,
-      /** Current restaurant business day (dayStart → next dayStart). */
+      /** @deprecated alias of dayStart — kept for older clients */
+      closeTime: shift.label,
+      /** Current restaurant business day (open → close shift). */
       businessDate,
-      dayStart: close.label,
+      dayStart: shift.label,
+      dayClose: shift.closeLabel,
       manuallyClosed,
       closedAt: s["hotel.closedAt"] || null,
       closedBy: s["hotel.closedBy"] || null,
@@ -210,6 +240,11 @@ export class SettingsService {
     await this.set("hotel.manuallyClosed", "1");
     await this.set("hotel.closedAt", new Date().toISOString());
     await this.set("hotel.closedBy", user.name);
+    this.machineLogs.warn(
+      this.machineLogs.mainId(),
+      "Main server",
+      `Hotel CLOSED by ${user.name}`
+    );
     return this.hotelStatus();
   }
 
@@ -218,6 +253,11 @@ export class SettingsService {
     await this.set("hotel.manuallyClosed", "0");
     await this.set("hotel.openedAt", new Date().toISOString());
     await this.set("hotel.openedBy", user.name);
+    this.machineLogs.info(
+      this.machineLogs.mainId(),
+      "Main server",
+      `Hotel OPENED by ${user.name}`
+    );
     return this.hotelStatus();
   }
 

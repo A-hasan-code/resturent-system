@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("hotelDesktop", {
   isDesktop: true,
   reconnect: () => ipcRenderer.send("hotel:reconnect"),
   serverUrl: () => ipcRenderer.invoke("hotel:server-url"),
+  notify: (title, body) => ipcRenderer.invoke("hotel:notify", { title, body }),
   onStatus: (fn) => {
     const handler = (_e, text) => fn(text);
     ipcRenderer.on("hotel:status", handler);

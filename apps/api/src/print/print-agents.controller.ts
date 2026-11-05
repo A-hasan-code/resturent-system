@@ -1,13 +1,16 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Param,
   Patch,
   Post,
+  Req,
   UseGuards,
 } from "@nestjs/common";
+import type { Request } from "express";
 import { Type } from "class-transformer";
 import {
   IsArray,
@@ -93,10 +96,22 @@ export class PrintAgentsController {
     return this.agents.rename(id, dto.displayName);
   }
 
+  /** Admin: remove Cashier / Additional PC (and its AGENT printers). Main server must not be listed here. */
+  @Delete(":id")
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePerms("printers.manage")
+  remove(@Param("id") id: string) {
+    return this.agents.remove(id);
+  }
+
   /** Desktop Additional PC: register / refresh local USB printers. */
   @Post("register")
-  register(@Body() dto: RegisterAgentDto) {
-    return this.agents.register(dto);
+  register(@Body() dto: RegisterAgentDto, @Req() req: Request) {
+    const fwd = String(req.headers["x-forwarded-for"] || "")
+      .split(",")[0]
+      ?.trim();
+    const clientIp = fwd || req.ip || req.socket?.remoteAddress || "";
+    return this.agents.register(dto, { clientIp });
   }
 
   @Post("heartbeat")

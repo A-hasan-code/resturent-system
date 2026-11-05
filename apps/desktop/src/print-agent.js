@@ -7,6 +7,7 @@
  */
 const { execFile } = require("child_process");
 const crypto = require("crypto");
+const dns = require("dns");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -192,20 +193,79 @@ function localIps() {
   const ips = [];
   for (const list of Object.values(os.networkInterfaces())) {
     for (const a of list || []) {
-      if (a.family === "IPv4" && !a.internal) ips.push(a.address);
+      // Node may report family as "IPv4" or 4
+      const fam = a.family;
+      if ((fam === "IPv4" || fam === 4) && !a.internal) ips.push(a.address);
     }
   }
   return ips;
 }
 
-/** Skip agent when this desktop is the Main server PC (USB already via server WINDOWS). */
-function isServerOnThisMachine(origin) {
+/**
+ * True when this Windows PC has the Main server install (not a cashier-only desktop).
+ * Additional PC install also uses C:\Program Files\HotelSystem\desktop — never treat
+ * the parent HotelSystem folder alone as "main server" or agents stay idle/offline.
+ */
+function thisPcHasMainServerInstall() {
+  const candidates = [
+    path.join(process.env.ProgramData || "C:\\ProgramData", "HotelSystem", "server-info.txt"),
+    path.join(process.env["ProgramFiles"] || "C:\\Program Files", "HotelSystem", "app"),
+    path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "HotelSystem", "app"),
+  ];
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return true;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (process.platform !== "win32") return false;
   try {
-    const host = new URL(origin).hostname.toLowerCase();
-    if (host === "localhost" || host === "127.0.0.1" || host === "::1") return true;
-    return localIps().includes(host);
+    const out = require("child_process").execFileSync(
+      "sc.exe",
+      ["query", "HotelSystemAPI"],
+      { windowsHide: true, encoding: "utf8", timeout: 4000 },
+    );
+    // Only match this service — do not use a bare "STATE :" match (too broad).
+    return /SERVICE_NAME:\s*HotelSystemAPI/i.test(out);
   } catch {
     return false;
+  }
+}
+
+function hostResolvesToLocal(host, ips) {
+  if (!host || !ips.length) return false;
+  try {
+    const resolved = dns.lookupSync(host, { family: 4 });
+    const addr = typeof resolved === "string" ? resolved : resolved?.address;
+    return !!(addr && ips.includes(addr));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Skip agent when this desktop is the Main server PC.
+ * USB / Other print on Main use WINDOWS printers — never register as Cashier agent.
+ * Covers: localhost, LAN IP, Windows hostname (e.g. siteserver), hotel.local, DNS→local IP,
+ * and any PC that has the HotelSystem server install.
+ */
+function isServerOnThisMachine(origin) {
+  try {
+    // Installed Main PC (ProgramData / service) — never act as Cashier agent.
+    if (thisPcHasMainServerInstall()) return true;
+    const host = new URL(origin).hostname.toLowerCase().replace(/\.local$/i, "");
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") return true;
+    const ips = localIps();
+    if (ips.includes(host)) return true;
+    const myHost = os.hostname().toLowerCase().replace(/\.local$/i, "");
+    const myShort = myHost.split(".")[0];
+    if (host === myHost || host === myShort || host === `${myShort}.local`) return true;
+    if (hostResolvesToLocal(host, ips)) return true;
+    if (hostResolvesToLocal(`${host}.local`, ips)) return true;
+    return false;
+  } catch {
+    return thisPcHasMainServerInstall();
   }
 }
 
@@ -399,6 +459,13 @@ class PrintAgent {
       throw new Error(`register failed (${res.status})${detail ? `: ${detail.slice(0, 120)}` : ""}`);
     }
     const data = await res.json();
+    // Server rejected Main PC registering as Cashier agent
+    if (data?.idle || data?.mainServer) {
+      this.running = false;
+      this.token = null;
+      this.status("Print agent idle (this PC is the main server)");
+      return;
+    }
     this.token = data.token;
     this.running = true;
     this.lastHeartbeatAt = Date.now();

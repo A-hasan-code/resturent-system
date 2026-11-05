@@ -1,0 +1,46 @@
+Hotel System v1.4.58 — Offline release
+======================================
+Date: 2026-10-16
+No internet required on the hotel PCs.
+
+BUILD (on your build machine)
+-----------------------------
+  pnpm release
+  or:  .\packaging\windows\Build-Release.ps1 -SkipAndroid
+  → releases\v1.4.58\HotelSystem-Setup-1.4.58.exe
+
+INSTALL / UPGRADE (Main PC)
+--------------------------
+  1. Copy HotelSystem-Setup-1.4.58.exe to USB or LAN share.
+  2. On Main server PC: run as Administrator.
+  3. Do NOT uninstall first — install over the existing copy.
+  4. Live data is kept.
+
+AFTER UPGRADE
+-------------
+  Reverse payment (Billing)
+  • Reverse payment clears cash/card/tip and puts the bill back on Unpaid.
+  • Bill stays open — edit items, then pay again (not cancelled).
+  • Stock stays on the bill; no kitchen cancel slip.
+  • If the table already has another open bill, reverse is blocked until that bill is free/moved.
+
+  Takeaway / kitchen (from 1.4.57)
+  • Takeaway order → kitchen slip (KOT) + Kitchen board.
+  • Kitchen slip goes to kitchen printers — not cashier / Other-print.
+  • Full pay on takeaway closes the ticket; paying a cooking table marks Served.
+
+  Notifications (phone / tablet APK)
+  • My account → Notifications → On / Off.
+
+  Cashier kitchen access (admin)
+  • Users → edit cashier → Kitchen board access → On.
+
+  Menu sales PDF
+  • Close → Menu sales PDF (paid + credit), including Per Head section.
+
+ADDITIONAL / CASHIER PCs (other counters only)
+----------------------------------------------
+  Open Hotel desktop app (not browser only).
+  Not the Main server PC.
+
+Full notes: docs\RELEASE-NOTES.md
