@@ -28,9 +28,15 @@ export async function migrateDeploy(opts: {
   if (!prismaJs) {
     throw new Error(`Prisma CLI missing (tried: ${candidates.join(", ")})`);
   }
+  const directUrl =
+    process.env.DIRECT_DATABASE_URL ||
+    (databaseUrl.includes("-pooler.")
+      ? databaseUrl.replace("-pooler.", ".")
+      : databaseUrl);
   const env = {
     ...process.env,
     DATABASE_URL: databaseUrl,
+    DIRECT_DATABASE_URL: directUrl,
     CHECKPOINT_DISABLE: "1",
     PRISMA_HIDE_UPDATE_MESSAGE: "1",
   };

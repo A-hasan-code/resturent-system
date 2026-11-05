@@ -1780,6 +1780,91 @@ const PARTITIONS: { name: string; sortOrder: number; tableCount: number }[] = [
   { name: "Roof Top", sortOrder: 3, tableCount: 8 },
 ];
 
+/** Default kitchen stations for KOT routing + Store → Kitchen transfer. */
+const KITCHEN_STATIONS = [
+  { code: "BEVERAGES", name: "Beverages", sortOrder: 1 },
+  { code: "COOKING", name: "Cooking", sortOrder: 2 },
+  { code: "BBQ", name: "BBQ", sortOrder: 3 },
+] as const;
+
+/** Demo store → kitchen stock so Transfer / kitchen closing screens are usable on first boot. */
+const DEMO_KITCHEN_TRANSFERS: { key: string; station: string; qty: number }[] = [
+  { key: "chicken", station: "COOKING", qty: 5 },
+  { key: "onion", station: "COOKING", qty: 3 },
+  { key: "tomato", station: "COOKING", qty: 2 },
+  { key: "oil", station: "COOKING", qty: 2 },
+  { key: "beef", station: "BBQ", qty: 3 },
+  { key: "chicken", station: "BBQ", qty: 2 },
+  { key: "tea", station: "BEVERAGES", qty: 1 },
+  { key: "milk", station: "BEVERAGES", qty: 5 },
+  { key: "sugar", station: "BEVERAGES", qty: 2 },
+];
+
+async function seedKitchenStations() {
+  for (const s of KITCHEN_STATIONS) {
+    await prisma.kitchenStationDef.upsert({
+      where: { code: s.code },
+      create: {
+        code: s.code,
+        name: s.name,
+        sortOrder: s.sortOrder,
+        system: true,
+        active: true,
+      },
+      update: {
+        name: s.name,
+        sortOrder: s.sortOrder,
+        system: true,
+        active: true,
+      },
+    });
+  }
+}
+
+/**
+ * One-time demo kitchen transfers (idempotent: skips when any kitchen stock already exists).
+ * Moves qty from store → kitchen station and writes KITCHEN_TRANSFER movements.
+ */
+async function seedDemoKitchenTransfers(storeIds: Record<string, string>) {
+  const existing = await prisma.kitchenStock.count();
+  if (existing > 0) return { transferred: 0, skipped: true as const };
+
+  let transferred = 0;
+  for (const line of DEMO_KITCHEN_TRANSFERS) {
+    const storeItemId = storeIds[line.key];
+    if (!storeItemId) continue;
+    const item = await prisma.storeItem.findUnique({ where: { id: storeItemId } });
+    if (!item || !item.active) continue;
+    const onHand = Number(item.quantityOnHand);
+    const qty = Math.min(line.qty, Math.max(0, onHand));
+    if (!(qty > 0)) continue;
+
+    await prisma.$transaction(async (tx) => {
+      await tx.storeItem.update({
+        where: { id: storeItemId },
+        data: { quantityOnHand: { decrement: qty } },
+      });
+      await tx.kitchenStock.upsert({
+        where: { storeItemId_station: { storeItemId, station: line.station } },
+        create: { storeItemId, station: line.station, quantityOnHand: qty },
+        update: { quantityOnHand: { increment: qty } },
+      });
+      await tx.stockMovement.create({
+        data: {
+          storeItemId,
+          type: "KITCHEN_TRANSFER",
+          quantity: -qty,
+          ratePerUnit: item.ratePerUnit,
+          note: `Seed transfer · ${line.station}`,
+          kitchenStation: line.station,
+        },
+      });
+    });
+    transferred += 1;
+  }
+  return { transferred, skipped: false as const };
+}
+
 async function ensurePartitionTables(partitionId: string, area: string, count: number) {
   const have = new Set(
     (await prisma.restaurantTable.findMany({ where: { partitionId }, select: { name: true } })).map(
@@ -1850,6 +1935,9 @@ async function seedCatalog() {
     const row = await upsertStoreItem(cats[def.cat].id, def);
     storeIds[def.key] = row.id;
   }
+
+  await seedKitchenStations();
+  const kitchenXfer = await seedDemoKitchenTransfers(storeIds);
 
   const recipeIds: Record<string, string> = {};
   for (const def of RECIPES) {
@@ -2110,6 +2198,8 @@ async function seedCatalog() {
     menuKg,
     partitions: PARTITIONS.length,
     tables: tableCount,
+    kitchenStations: KITCHEN_STATIONS.length,
+    kitchenTransfers: kitchenXfer.skipped ? "already-had-stock" : kitchenXfer.transferred,
   };
 }
 

@@ -252,6 +252,7 @@ $tz = if ($old.TZ) { $old.TZ } else { "Asia/Karachi" }
   "PG_PORT=$pgPort"
   "DB_PASSWORD=$dbPassword"
   "DATABASE_URL=$databaseUrl"
+  "DIRECT_DATABASE_URL=$databaseUrl"
   "JWT_SECRET=$jwtSecret"
   "HOTEL_DATA_DIR=$DataDir"
   "PG_BIN=$PgBin"

@@ -2,6 +2,11 @@
 # Build web + API for a single Render web service (API serves apps/web/dist).
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Prisma schema requires DIRECT_DATABASE_URL even for `prisma generate`.
+# shellcheck source=neon-direct-url.sh
+source "$ROOT/scripts/neon-direct-url.sh"
+
 corepack enable
 corepack prepare pnpm@9.15.0 --activate
 

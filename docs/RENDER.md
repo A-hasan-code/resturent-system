@@ -6,7 +6,7 @@ Single **Web Service** + **Postgres**. The API serves the built React app (same 
 
 1. Open [https://dashboard.render.com](https://dashboard.render.com) → **New** → **Blueprint**
 2. Connect GitHub repo `A-hasan-code/resturent-system`
-3. Select branch `improve-the-system` (or the branch that has `render.yaml`)
+3. Select branch `master` (or the branch that has `render.yaml`)
 4. Apply the Blueprint — Render creates:
    - Postgres `hotel-db`
    - Web service `hotel-system`
@@ -16,16 +16,37 @@ Single **Web Service** + **Postgres**. The API serves the built React app (same 
 
 | Variable | Source |
 |----------|--------|
-| `DATABASE_URL` | From `hotel-db` connection string |
+| `DATABASE_URL` | From `hotel-db` connection string (or Neon pooled URL) |
+| `DIRECT_DATABASE_URL` | Same DB, **non-pooler** URL — required for `prisma migrate deploy` |
 | `JWT_SECRET` | Auto-generated |
 | `NODE_ENV` | `production` |
 | `DISCOVERY_DISABLED` | `1` (no LAN/mDNS on cloud) |
+| `HOTEL_SKIP_SCHEMA_HEAL` | `1` (start script owns migrate; avoids double lock) |
 | `HOTEL_DATA_DIR` | `/var/data` (persistent disk) |
 | `WEB_DIST` | `../web/dist` |
 | `HOTEL_SEED_ON_BOOT` | `1` first time — **set to `0` after first successful login** |
 | `TZ` | `Asia/Karachi` |
 
 You do not need to paste secrets manually when using the Blueprint.
+
+### Neon external DB (pooler)
+
+If `DATABASE_URL` contains `-pooler.` (Neon), migrate fails with:
+
+`Invariant violation: migration persistence is not initialized`
+
+**Fix:** set `DIRECT_DATABASE_URL` to the **direct** connection string (same host **without** `-pooler`).  
+`scripts/render-start.sh` / `render-build.sh` also auto-strip `-pooler.` when `DIRECT_DATABASE_URL` is empty.
+
+### Start command (must match repo)
+
+Dashboard → service → **Settings** → **Start Command** must be:
+
+```bash
+bash scripts/render-start.sh
+```
+
+Do **not** keep an old inline `cd apps/api && pnpm exec prisma migrate deploy && …` command — that skips Neon direct-URL handling and `HOTEL_SKIP_SCHEMA_HEAL`.
 
 ## 3. After first deploy
 
@@ -55,6 +76,7 @@ The web UI only continues after `GET /api/health` succeeds. On Render that must 
 3. After first successful login, set `HOTEL_SEED_ON_BOOT=0` and redeploy — seed on every boot delays listen and can trip health checks.
 4. Dashboard → service → **Health Check** grace period: raise to **60–120s** so migrate+seed can finish before Render marks the deploy unhealthy.
 5. Hard-refresh or clear site data for that URL (stale `hotel.serverOrigin` from local LAN testing).
-6. Branch: Blueprint deploys `improve-the-system`. Deploying another branch without the Render scripts will not boot correctly.
+6. Branch: Blueprint deploys `master`. Deploying another branch without the Render scripts will not boot correctly.
+7. Migrate error `migration persistence is not initialized`: almost always Neon **pooler** URL — set `DIRECT_DATABASE_URL` (non-pooler) and use `bash scripts/render-start.sh`.
 
 **Android / desktop apps** cannot auto-discover a Render URL (UDP/mDNS is LAN-only). Use the browser on the Render link, or enter the HTTPS address manually.
