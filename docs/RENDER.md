@@ -22,7 +22,7 @@ Single **Web Service** + **Postgres**. The API serves the built React app (same 
 | `NODE_ENV` | `production` |
 | `DISCOVERY_DISABLED` | `1` (no LAN/mDNS on cloud) |
 | `HOTEL_SKIP_SCHEMA_HEAL` | `1` (start script owns migrate; avoids double lock) |
-| `HOTEL_DATA_DIR` | `/var/data` (persistent disk) |
+| `HOTEL_DATA_DIR` | `/var/data` if disk attached; start script falls back to `/tmp/hotel-data` (Neon-only OK) |
 | `WEB_DIST` | `../web/dist` |
 | `HOTEL_SEED_ON_BOOT` | `1` first time — **set to `0` after first successful login** |
 | `TZ` | `Asia/Karachi` |
@@ -38,15 +38,18 @@ If `DATABASE_URL` contains `-pooler.` (Neon), migrate fails with:
 **Fix:** set `DIRECT_DATABASE_URL` to the **direct** connection string (same host **without** `-pooler`).  
 `scripts/render-start.sh` / `render-build.sh` also auto-strip `-pooler.` when `DIRECT_DATABASE_URL` is empty.
 
-### Start command (must match repo)
+### Build / Start commands (must match repo)
 
-Dashboard → service → **Settings** → **Start Command** must be:
+Dashboard → service → **Settings**:
 
-```bash
-bash scripts/render-start.sh
-```
+| Setting | Value |
+|---------|--------|
+| **Build Command** | `bash scripts/render-build.sh` |
+| **Start Command** | `bash scripts/render-start.sh` |
 
-Do **not** keep an old inline `cd apps/api && pnpm exec prisma migrate deploy && …` command — that skips Neon direct-URL handling and `HOTEL_SKIP_SCHEMA_HEAL`.
+Do **not** keep old overrides like `pnpm install; pnpm run build` or inline `cd apps/api && prisma migrate …` — those skip Neon direct-URL handling and the `/var/data` fallback.
+
+If you use **Neon only** (no Render disk), `/var/data` is not writable; the start script automatically uses `/tmp/hotel-data`.
 
 ## 3. After first deploy
 

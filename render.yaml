@@ -43,6 +43,7 @@ services:
         value: "1"
       - key: HOTEL_SKIP_SCHEMA_HEAL
         value: "1"
+      # Prefer /var/data when a Render disk is attached; start script falls back to /tmp if not.
       - key: HOTEL_DATA_DIR
         value: /var/data
       - key: WEB_DIST
