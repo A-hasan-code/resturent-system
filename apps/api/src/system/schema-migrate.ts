@@ -43,7 +43,13 @@ export async function migrateDeploy(opts: {
   const schema = "prisma/schema.prisma";
   const deployArgs = [prismaJs, "migrate", "deploy", "--schema", schema];
 
-  const first = await runCapture(node, deployArgs, { cwd: apiRoot, env });
+  let first = await runCapture(node, deployArgs, { cwd: apiRoot, env });
+  for (let attempt = 1; first.code !== 0 && attempt < 5; attempt++) {
+    if (!/P1002|advisory lock|timed out trying to acquire/i.test(first.text)) break;
+    log(`P1002 advisory lock timeout — retry ${attempt}/4…`);
+    await sleep(attempt * 4000);
+    first = await runCapture(node, deployArgs, { cwd: apiRoot, env });
+  }
   if (first.code === 0) {
     log("migrate deploy OK");
     return;
@@ -127,6 +133,10 @@ function trimErr(text: string) {
     .filter(Boolean)
     .slice(-8)
     .join(" ");
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function runCapture(

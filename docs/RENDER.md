@@ -81,5 +81,6 @@ The web UI only continues after `GET /api/health` succeeds. On Render that must 
 5. Hard-refresh or clear site data for that URL (stale `hotel.serverOrigin` from local LAN testing).
 6. Branch: Blueprint deploys `master`. Deploying another branch without the Render scripts will not boot correctly.
 7. Migrate error `migration persistence is not initialized`: almost always Neon **pooler** URL — set `DIRECT_DATABASE_URL` (non-pooler) and use `bash scripts/render-start.sh`.
+8. Migrate error `P1002` / advisory lock timeout: Neon cold start or a previous deploy still holding the lock. Start script wakes the DB, retries, and sets `PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK=1`. Raise health-check grace to **120s**.
 
 **Android / desktop apps** cannot auto-discover a Render URL (UDP/mDNS is LAN-only). Use the browser on the Render link, or enter the HTTPS address manually.
