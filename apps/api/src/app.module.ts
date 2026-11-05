@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { APP_INTERCEPTOR } from "@nestjs/core";
 import { PrismaModule } from "./prisma/prisma.module";
 import { CommonModule } from "./common/common.module";
 import { SystemModule } from "./system/system.module";
@@ -20,6 +21,7 @@ import { CreditModule } from "./credit/credit.module";
 import { SpecialsModule } from "./specials/specials.module";
 import { FinanceModule } from "./finance/finance.module";
 import { WorkersModule } from "./workers/workers.controller";
+import { MachineActivityInterceptor } from "./common/machine-activity.interceptor";
 
 @Module({
   imports: [
@@ -45,5 +47,6 @@ import { WorkersModule } from "./workers/workers.controller";
     SpecialsModule,
     FinanceModule,
   ],
+  providers: [{ provide: APP_INTERCEPTOR, useClass: MachineActivityInterceptor }],
 })
 export class AppModule {}

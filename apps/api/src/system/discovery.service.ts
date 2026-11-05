@@ -21,7 +21,15 @@ export class DiscoveryService implements OnApplicationBootstrap, OnModuleDestroy
   constructor(private readonly identity: ServerIdentityService) {}
 
   onApplicationBootstrap() {
-    if (process.env.DISCOVERY_DISABLED === "1") return;
+    // Cloud (Render sets RENDER=true) has no LAN peers — UDP/mDNS only wastes ports/logs.
+    if (process.env.DISCOVERY_DISABLED === "1" || process.env.RENDER === "true") {
+      this.log.log(
+        process.env.RENDER === "true"
+          ? "Discovery disabled (Render cloud)"
+          : "Discovery disabled (DISCOVERY_DISABLED=1)"
+      );
+      return;
+    }
     this.startBeacon();
     this.startProbeResponder();
     this.startMdns();

@@ -17,6 +17,7 @@ type StaffUser = {
   active: boolean;
   protected?: boolean;
   hasPin: boolean;
+  kitchenBoard?: boolean;
   billPrinterId: string | null;
   billPrinterName: string | null;
   roleCode: string;
@@ -77,6 +78,7 @@ type Draft = {
   removePin: boolean;
   active: boolean;
   hasPin: boolean;
+  kitchenBoard: boolean;
   billPrinterId: string;
 };
 
@@ -100,8 +102,11 @@ const EMPTY: Draft = {
   removePin: false,
   active: true,
   hasPin: false,
+  kitchenBoard: false,
   billPrinterId: "",
 };
+
+const KITCHEN_BOARD_ROLES = new Set(["MAIN_CASHIER", "CASHIER", "WAITER", "SUPERVISOR"]);
 
 function errMsg(e: unknown, fallback: string) {
   return e instanceof Error ? e.message : fallback;
@@ -212,6 +217,7 @@ export function UsersPage() {
       removePin: false,
       active: u.active,
       hasPin: u.hasPin,
+      kitchenBoard: !!u.kitchenBoard,
       billPrinterId: u.billPrinterId ?? "",
     });
   }
@@ -228,6 +234,7 @@ export function UsersPage() {
           roleCode: draft.roleCode,
           active: draft.active,
           billPrinterId: draft.billPrinterId || null,
+          kitchenBoard: draft.kitchenBoard,
         };
         if (draft.password) body.password = draft.password;
         if (draft.removePin) body.pin = null;
@@ -244,6 +251,7 @@ export function UsersPage() {
             password: draft.password,
             pin: draft.pin || undefined,
             billPrinterId: draft.billPrinterId || undefined,
+            kitchenBoard: draft.kitchenBoard,
           }),
         });
         toast.push(t("users.created", { name: draft.username }), "ok");
@@ -459,6 +467,10 @@ export function UsersPage() {
                   <div className="user-detail-meta-wide">
                     <dt>{t("users.billPrinter")}</dt>
                     <dd>{detail.billPrinterName || t("users.billPrinterDefault")}</dd>
+                    <dt>{t("users.kitchenBoard")}</dt>
+                    <dd>
+                      {detail.kitchenBoard ? t("users.kitchenBoardOn") : t("users.kitchenBoardOff")}
+                    </dd>
                   </div>
                 </dl>
               </section>
@@ -696,6 +708,26 @@ export function UsersPage() {
                 </label>
               )}
             </section>
+
+            {KITCHEN_BOARD_ROLES.has(draft.roleCode) && (
+              <section className="form-section">
+                <h3>{t("users.kitchenBoard")}</h3>
+                <p className="hint">{t("users.kitchenBoardHint")}</p>
+                <label className="switch-row">
+                  <input
+                    type="checkbox"
+                    checked={draft.kitchenBoard}
+                    onChange={(e) => setDraft({ ...draft, kitchenBoard: e.target.checked })}
+                  />
+                  <span>
+                    <strong>
+                      {draft.kitchenBoard ? t("users.kitchenBoardOn") : t("users.kitchenBoardOff")}
+                    </strong>
+                    <small>{t("users.kitchenBoardHelp")}</small>
+                  </span>
+                </label>
+              </section>
+            )}
 
             <section className="form-section">
               <h3>{t("users.billPrinter")}</h3>

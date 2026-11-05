@@ -3,10 +3,12 @@ import { PaymentMethod, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
 import { FinanceService } from "../finance/finance.service";
+import { PrintService } from "../print/print.service";
+import { CreditSlipPayload } from "../print/receipts";
 import { businessDateOf } from "../common/business-day";
 import { toNumber } from "../common/units";
 import { AuthUser } from "../common/decorators";
-import { CreditCustomerDto } from "./dto";
+import { CreditCustomerDto, PrintCreditSlipDto } from "./dto";
 import { RealtimeService } from "../realtime/realtime.service";
 
 const openCredit: Prisma.OrderWhereInput = {
@@ -25,7 +27,8 @@ export class CreditService {
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
     private readonly finance: FinanceService,
-    private readonly realtime: RealtimeService
+    private readonly realtime: RealtimeService,
+    private readonly print: PrintService
   ) {}
 
   async list(q?: string) {
@@ -155,7 +158,7 @@ export class CreditService {
       }
     >();
     for (const order of customer.orders) {
-      const date = businessDateOf(order.createdAt, day.h, day.m);
+      const date = businessDateOf(order.createdAt, day.h, day.m, day.closeH, day.closeM);
       const row = byDate.get(date) ?? { date, invoices: [], total: 0, outstanding: 0 };
       const invoice = this.invoice(order, taxCfg.percent);
       row.invoices.push(invoice);
@@ -240,6 +243,7 @@ export class CreditService {
 
     const day = await this.settings.dayStart();
     const restaurant = await this.settings.restaurant();
+    const payClosesKitchen = await this.settings.payClosesKitchen();
     const paidAt = new Date();
     const days = new Map<
       string,
@@ -283,9 +287,14 @@ export class CreditService {
         const pay = Math.min(due, left);
         const paidAmount = Math.round((already + pay) * 100) / 100;
         const paymentStatus = paidAmount + 0.001 >= dueBase ? "PAID" : "PARTIAL";
-        // Mirror cash pay — never yank cooking tickets off the kitchen board.
+        // Mirror cash pay(): takeaway always closes when paid; tables wait Ready/Served
+        // unless Settings → Payment closes kitchen is on.
         const status =
-          paymentStatus === "PAID" && (order.status === "READY" || order.status === "SERVED")
+          paymentStatus === "PAID" &&
+          (!order.tableId ||
+            order.status === "READY" ||
+            order.status === "SERVED" ||
+            payClosesKitchen)
             ? "COMPLETED"
             : order.status;
 
@@ -314,7 +323,7 @@ export class CreditService {
         left = Math.round((left - pay) * 100) / 100;
         total = Math.round((total + pay) * 100) / 100;
         const dueAfter = Math.max(0, Math.round((dueBase - paidAmount) * 100) / 100);
-        const date = businessDateOf(order.createdAt, day.h, day.m);
+        const date = businessDateOf(order.createdAt, day.h, day.m, day.closeH, day.closeM);
         const bucket = days.get(date) ?? { date, total: 0, invoices: [] };
         bucket.total = Math.round((bucket.total + pay) * 100) / 100;
         bucket.invoices.push({
@@ -380,6 +389,56 @@ export class CreditService {
       outstandingBefore: outstanding,
       remaining,
       cleared: remaining <= 0,
+    };
+  }
+
+  /** Queue the credit paid slip on the cashier's bill printer. */
+  async printSlip(user: AuthUser, id: string, dto: PrintCreditSlipDto) {
+    if (!user.permissions.includes("print.bill") && !user.permissions.includes("order.pay")) {
+      throw new BadRequestException("No permission to print credit slips");
+    }
+    await this.ensure(id);
+    if (!dto.days?.length || !(dto.total > 0)) {
+      throw new BadRequestException("Nothing to print on this slip");
+    }
+    const slip: CreditSlipPayload = {
+      restaurant: dto.restaurant,
+      customer: {
+        name: dto.customer.name,
+        phone: dto.customer.phone,
+        address: dto.customer.address ?? null,
+        cnic: dto.customer.cnic ?? null,
+      },
+      collectedBy: dto.collectedBy,
+      paidAt: dto.paidAt,
+      days: dto.days.map((day) => ({
+        date: day.date,
+        total: day.total,
+        invoices: day.invoices.map((inv) => ({
+          orderNo: inv.orderNo,
+          tableNo: inv.tableNo ?? null,
+          total: inv.total,
+          paid: inv.paid,
+          dueAfter: inv.dueAfter,
+          items: inv.items.map((item) => ({
+            name: item.name,
+            quantity: item.quantity,
+            unit: item.unit,
+            amount: item.amount,
+          })),
+        })),
+      })),
+      total: dto.total,
+      outstandingBefore: dto.outstandingBefore,
+      remaining: dto.remaining,
+      cleared: dto.cleared,
+    };
+    const jobs = await this.print.enqueueCreditSlip(slip, user.id);
+    const failed = jobs.find((j) => j.status === "FAILED");
+    return {
+      queued: jobs.filter((j) => j.status !== "FAILED").length,
+      jobs: jobs.map((j) => ({ id: j.id, status: j.status, error: j.lastError })),
+      ...(failed ? { printError: failed.lastError } : {}),
     };
   }
 

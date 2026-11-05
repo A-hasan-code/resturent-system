@@ -176,7 +176,7 @@ export class OrdersController {
   }
 
   @Patch(":id/status")
-  @RequirePerms("kitchen.update")
+  @RequirePerms("kitchen.update", "order.pay")
   updateStatus(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() dto: UpdateStatusDto) {
     return this.orders.updateStatus(user, id, dto);
   }

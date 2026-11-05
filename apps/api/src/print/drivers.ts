@@ -125,10 +125,37 @@ export async function printPdfToWindowsPrinter(printerName: string, pdf: Buffer)
   }
 }
 
+function parseNetworkTarget(target: string): { host: string; port: number } {
+  const trimmed = target.trim();
+  const colon = trimmed.lastIndexOf(":");
+  if (colon > 0 && /^\d+$/.test(trimmed.slice(colon + 1))) {
+    return { host: trimmed.slice(0, colon), port: Number(trimmed.slice(colon + 1)) || 9100 };
+  }
+  return { host: trimmed, port: 9100 };
+}
+
+/** Quick TCP reachability check for LAN printers (port 9100 by default). */
+export function probeNetworkPrinter(target: string, timeoutMs = 2000): Promise<boolean> {
+  const { host, port } = parseNetworkTarget(target);
+  if (!host) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    const sock = new Socket();
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      sock.destroy();
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs, () => finish(false));
+    sock.once("error", () => finish(false));
+    sock.connect(port, host, () => finish(true));
+  });
+}
+
 /** LAN thermal printers accept raw ESC/POS on TCP 9100. */
 export function sendToNetworkPrinter(target: string, data: Buffer, timeoutMs = 6000) {
-  const [host, portStr] = target.trim().split(":");
-  const port = Number(portStr || 9100);
+  const { host, port } = parseNetworkTarget(target);
   return new Promise<void>((resolve, reject) => {
     const sock = new Socket();
     const fail = (msg: string) => {
@@ -153,7 +180,15 @@ export function writePreviewFile(folder: string, name: string, text: string) {
   return file;
 }
 
-export type SystemPrinter = { name: string; driver: string; port: string; status: string; isDefault: boolean };
+export type SystemPrinter = {
+  name: string;
+  driver: string;
+  port: string;
+  status: string;
+  isDefault: boolean;
+  /** False when Windows "Use Printer Offline" or spooler Offline. */
+  online: boolean;
+};
 
 export type SystemUsbDevice = {
   name: string;
@@ -163,13 +198,27 @@ export type SystemUsbDevice = {
   problem: boolean;
 };
 
+/** Win32 PrinterStatus: 3 Idle, 4 Printing, 5 Warmup = OK; 7 Offline. */
+function windowsPrinterOnline(status: string, workOffline?: boolean): boolean {
+  if (workOffline === true) return false;
+  const s = String(status || "").trim().toLowerCase();
+  if (!s) return true;
+  if (s === "7" || s.includes("offline") || s.includes("error") || s.includes("unavailable")) return false;
+  // Numeric OK states or Normal / Idle / Printing / etc.
+  if (/^(1|2|3|4|5|6|8|9)$/.test(s)) return s !== "7";
+  if (s.includes("normal") || s.includes("idle") || s.includes("printing") || s.includes("warmup") || s.includes("ready")) {
+    return true;
+  }
+  return !/offline|error|paused|door|paper|jam/i.test(s);
+}
+
 export async function listWindowsPrinters(): Promise<SystemPrinter[]> {
   if (process.platform !== "win32") return [];
   // Win32_Printer first — Get-Printer needs PrintManagement and can return empty on some PCs.
   const commands = [
-    "Get-CimInstance Win32_Printer | ForEach-Object { [pscustomobject]@{ name=$_.Name; driver=$_.DriverName; port=$_.PortName; status=[string]$_.PrinterStatus; isDefault=[bool]$_.Default } } | ConvertTo-Json -Compress",
-    "Get-WmiObject Win32_Printer | ForEach-Object { [pscustomobject]@{ name=$_.Name; driver=$_.DriverName; port=$_.PortName; status=[string]$_.PrinterStatus; isDefault=[bool]$_.Default } } | ConvertTo-Json -Compress",
-    "$d=(Get-CimInstance Win32_Printer | Where-Object Default).Name; Get-Printer | ForEach-Object { [pscustomobject]@{ name=$_.Name; driver=$_.DriverName; port=$_.PortName; status=[string]$_.PrinterStatus; isDefault=($_.Name -eq $d) } } | ConvertTo-Json -Compress",
+    "Get-CimInstance Win32_Printer | ForEach-Object { [pscustomobject]@{ name=$_.Name; driver=$_.DriverName; port=$_.PortName; status=[string]$_.PrinterStatus; workOffline=[bool]$_.WorkOffline; isDefault=[bool]$_.Default } } | ConvertTo-Json -Compress",
+    "Get-WmiObject Win32_Printer | ForEach-Object { [pscustomobject]@{ name=$_.Name; driver=$_.DriverName; port=$_.PortName; status=[string]$_.PrinterStatus; workOffline=[bool]$_.WorkOffline; isDefault=[bool]$_.Default } } | ConvertTo-Json -Compress",
+    "$d=(Get-CimInstance Win32_Printer | Where-Object Default).Name; Get-Printer | ForEach-Object { [pscustomobject]@{ name=$_.Name; driver=$_.DriverName; port=$_.PortName; status=[string]$_.PrinterStatus; workOffline=$false; isDefault=($_.Name -eq $d) } } | ConvertTo-Json -Compress",
   ];
   for (const cmd of commands) {
     try {
@@ -178,7 +227,17 @@ export async function listWindowsPrinters(): Promise<SystemPrinter[]> {
       if (!trimmed) continue;
       const parsed = JSON.parse(trimmed);
       const list = Array.isArray(parsed) ? parsed : [parsed];
-      if (list.length) return list;
+      if (!list.length) continue;
+      return list
+        .filter((p) => p && p.name)
+        .map((p) => ({
+          name: String(p.name),
+          driver: String(p.driver || ""),
+          port: String(p.port || ""),
+          status: String(p.status || ""),
+          isDefault: !!p.isDefault,
+          online: windowsPrinterOnline(String(p.status || ""), !!p.workOffline),
+        }));
     } catch {
       /* try next */
     }
@@ -191,31 +250,36 @@ export async function listUsbDevices(): Promise<SystemUsbDevice[]> {
   if (process.platform !== "win32") return [];
   const commands = [
     String.raw`$ErrorActionPreference='SilentlyContinue';
-$skip='USB Root Hub|Generic USB Hub|USB Composite Device|HID-compliant|USB Input Device|USB Keyboard|USB Mouse|Bluetooth|Webcam|Camera|Audio|Headset|Microphone|Mass Storage|Disk Drive|CD-ROM';
+$skip='USB Root Hub|Generic USB Hub|USB Composite Device|HID-compliant|USB Input Device|USB Keyboard|USB Mouse|PS/2 Compatible Mouse|Standard PS/2 Keyboard|Bluetooth|Webcam|Camera|Audio|Headset|Microphone|Mass Storage|Disk Drive|CD-ROM';
+$skipClass='Mouse|Keyboard|HIDClass|Net|DiskDrive|Volume|Computer|System|Processor|Battery|Display|Monitor|Image|Media|Bluetooth'
 $rows=@()
 try {
   $rows = @(Get-PnpDevice -PresentOnly | Where-Object {
     $id=[string]$_.InstanceId; $cls=[string]$_.Class; $n=[string]$_.FriendlyName; $st=[string]$_.Status
     if ($n -match $skip) { return $false }
-    if ($id -like 'USB*' -or $cls -in @('USB','USBDevice','Printer','PrintQueue','Image','Ports','SoftwareDevice') -or $st -in @('Error','Unknown','Degraded') -or $n -match 'Unknown|USB Printing|POS|Thermal|Receipt|ESC/POS') { return $true }
+    if ($cls -match $skipClass) { return $false }
+    if ($id -like 'USB*' -or $cls -in @('USB','USBDevice','Printer','PrintQueue','Ports','SoftwareDevice') -or $st -in @('Unknown','Degraded') -or $n -match 'Unknown|USB Printing|POS|Thermal|Receipt|ESC/POS') { return $true }
     $false
   } | ForEach-Object {
     $n=$_.FriendlyName; if (-not $n) { $n=$_.InstanceId }
     $st=[string]$_.Status; $cls=[string]$_.Class
-    $problem = ($st -ne 'OK') -or ($n -match 'Unknown') -or ($cls -match 'Unknown') -or ([string]$_.Problem -ne '' -and [string]$_.Problem -ne 'CM_PROB_NONE' -and $_.Problem -ne 0)
+    $isPrinterish = ($cls -match 'Printer|PrintQueue') -or ($n -match 'Printer|POS|Thermal|Receipt|ESC/POS|USB Printing')
+    $problem = $isPrinterish -and (($st -ne 'OK') -or ($n -match 'Unknown') -or ($cls -match 'Unknown') -or ([string]$_.Problem -ne '' -and [string]$_.Problem -ne 'CM_PROB_NONE' -and $_.Problem -ne 0))
     [pscustomobject]@{ name=$n; className=$cls; status=$st; instanceId=[string]$_.InstanceId; problem=[bool]$problem }
   })
 } catch {}
 if (-not $rows.Count) {
   $rows = @(Get-CimInstance Win32_PnPEntity | Where-Object {
-    $id=[string]$_.PNPDeviceID; $n=[string]$_.Name; $st=[string]$_.Status
+    $id=[string]$_.PNPDeviceID; $n=[string]$_.Name; $st=[string]$_.Status; $cls=[string]$_.PNPClass
     if ($n -match $skip) { return $false }
+    if ($cls -match $skipClass) { return $false }
     if ($id -like 'USB*' -or $n -match 'Unknown|USB Printing|Printer|POS|Thermal|Receipt') { return $true }
     $false
   } | Select-Object -First 80 | ForEach-Object {
-    $n=$_.Name; $st=[string]$_.Status
-    $problem = ($st -ne 'OK') -or ($n -match 'Unknown')
-    [pscustomobject]@{ name=$n; className=([string]$_.PNPClass); status=$st; instanceId=[string]$_.PNPDeviceID; problem=[bool]$problem }
+    $n=$_.Name; $st=[string]$_.Status; $cls=[string]$_.PNPClass
+    $isPrinterish = ($cls -match 'Printer|PrintQueue') -or ($n -match 'Printer|POS|Thermal|Receipt|USB Printing')
+    $problem = $isPrinterish -and (($st -ne 'OK') -or ($n -match 'Unknown'))
+    [pscustomobject]@{ name=$n; className=$cls; status=$st; instanceId=[string]$_.PNPDeviceID; problem=[bool]$problem }
   })
 }
 $rows | Select-Object -First 80 | ConvertTo-Json -Compress`,

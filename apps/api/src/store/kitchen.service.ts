@@ -175,12 +175,12 @@ export class KitchenService {
   private async clock(dateStr?: string) {
     const start = await this.settings.dayStart();
     const now = new Date();
-    const today = businessDateOf(now, start.h, start.m);
+    const today = businessDateOf(now, start.h, start.m, start.closeH, start.closeM);
     const businessDate = dateStr?.trim() || today;
     if (!DATE_RE.test(businessDate)) {
       throw new BadRequestException("Invalid business date");
     }
-    const window = businessQueryWindow(businessDate, start.h, start.m);
+    const window = businessQueryWindow(businessDate, start.h, start.m, start.closeH, start.closeM);
     return {
       ...start,
       businessDate,

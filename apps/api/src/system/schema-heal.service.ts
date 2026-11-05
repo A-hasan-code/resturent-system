@@ -23,8 +23,18 @@ export class SchemaHealService implements OnModuleInit {
       this.log.warn("DATABASE_URL missing — skip schema heal");
       return;
     }
-    if (process.env.HOTEL_SKIP_SCHEMA_HEAL === "1") {
-      this.log.warn("HOTEL_SKIP_SCHEMA_HEAL=1 — skip schema heal");
+    // Start script already ran migrate on Render; a second deploy hits P1002 advisory-lock timeout.
+    if (process.env.HOTEL_SKIP_SCHEMA_HEAL === "1" || process.env.RENDER === "true") {
+      this.log.warn(
+        process.env.HOTEL_SKIP_SCHEMA_HEAL === "1"
+          ? "HOTEL_SKIP_SCHEMA_HEAL=1 — skip schema heal"
+          : "RENDER=true — skip duplicate migrate (start script owns it)"
+      );
+      try {
+        await this.ensureKitchenRolePerms();
+      } catch (e) {
+        this.log.warn(`Kitchen role perm sync skipped: ${e instanceof Error ? e.message : e}`);
+      }
       return;
     }
     const apiRoot = join(__dirname, "../..");
@@ -38,10 +48,14 @@ export class SchemaHealService implements OnModuleInit {
       this.log.log("Database schema OK");
       await this.ensureKitchenRolePerms();
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // Another migrate/seed still holds the lock — app can still serve; next boot will retry.
+      if (/P1002|advisory lock/i.test(msg)) {
+        this.log.warn(`Schema heal skipped (DB lock busy): ${msg}`);
+        return;
+      }
       this.log.error(
-        `Schema heal failed — API may error until migrations are applied: ${
-          e instanceof Error ? e.message : e
-        }`
+        `Schema heal failed — API may error until migrations are applied: ${msg}`
       );
     }
   }

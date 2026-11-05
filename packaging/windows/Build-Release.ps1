@@ -132,8 +132,12 @@ if (-not $SkipInstall) {
 
 if (-not $SkipBuild) {
   Step "Build API + web"
+  # Generate once — `pnpm build` also runs db:generate and can EPERM-rename the
+  # query engine DLL when Defender / a leftover node process holds the file.
   Invoke-Checked "pnpm" @("db:generate")
-  Invoke-Checked "pnpm" @("build")
+  Start-Sleep -Seconds 2
+  Invoke-Checked "pnpm" @("--filter", "@hotel/api", "run", "build")
+  Invoke-Checked "pnpm" @("--filter", "@hotel/web", "run", "build")
 }
 
 Step "Prepare stage folder"
@@ -242,7 +246,17 @@ if (-not $SkipDesktop) {
       Write-Host "Using local Electron: $electronDist" -ForegroundColor Green
       $builderArgs += "-c.electronDist=$electronDist"
     }
-    Invoke-Checked "pnpm" $builderArgs
+    # icon-tool (png→ico) can OOM on low-memory machines without a larger heap.
+    $prevNodeOpts = $env:NODE_OPTIONS
+    if (-not ($env:NODE_OPTIONS -match "max-old-space-size")) {
+      $env:NODE_OPTIONS = (($env:NODE_OPTIONS, "--max-old-space-size=8192") | Where-Object { $_ }) -join " "
+    }
+    try {
+      Invoke-Checked "pnpm" $builderArgs
+    } finally {
+      if ($null -ne $prevNodeOpts) { $env:NODE_OPTIONS = $prevNodeOpts }
+      else { Remove-Item Env:NODE_OPTIONS -ErrorAction SilentlyContinue }
+    }
   } finally {
     if ($prevCsc) { $env:CSC_LINK = $prevCsc }
   }
@@ -447,8 +461,8 @@ NOTES
 "@
 Set-Content -Path (Join-Path $versionDir "README.txt") -Value $readme -Encoding utf8
 
-# Ship docs next to the installer
-foreach ($doc in @("INDUSTRIAL-SETUP.md", "RELEASE-NOTES.md", "NETWORKING.md", "CODE-SIGNING.md")) {
+# Ship docs next to the installer (offline USB / LAN drop)
+foreach ($doc in @("INDUSTRIAL-SETUP.md", "RELEASE-NOTES.md", "NETWORKING.md", "CODE-SIGNING.md", "OFFLINE-RELEASE-1.4.66.txt")) {
   $src = Join-Path $Root "docs\$doc"
   if (Test-Path $src) { Copy-Item $src (Join-Path $versionDir $doc) -Force }
 }

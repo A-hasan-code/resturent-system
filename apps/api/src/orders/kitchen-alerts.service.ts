@@ -44,7 +44,6 @@ export class KitchenAlertsService implements OnModuleInit, OnModuleDestroy {
     const rows = await this.prisma.order.findMany({
       where: {
         status: "PENDING",
-        tableId: { not: null },
         kitchenHold: false,
         pendingAlertedAt: null,
         pendingAt: { lte: cutoff },
@@ -86,7 +85,6 @@ export class KitchenAlertsService implements OnModuleInit, OnModuleDestroy {
     const rows = await this.prisma.order.findMany({
       where: {
         status: "PREPARING",
-        tableId: { not: null },
         kitchenHold: false,
         lateAlertedAt: null,
         preparingAt: { not: null },

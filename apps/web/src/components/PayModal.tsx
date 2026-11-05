@@ -66,9 +66,6 @@ export function PayModal({
   const [creditQ, setCreditQ] = useState("");
   const [creditHits, setCreditHits] = useState<CreditHit[]>([]);
   const [creditLookup, setCreditLookup] = useState<"idle" | "loading" | "done">("idle");
-  /** null = not answered yet — required before put-on-credit (table / takeaway close). */
-  const [freeTable, setFreeTable] = useState<boolean | null>(null);
-
   const discountValue = Math.min(Math.max(0, round2(Number(discount) || 0)), Math.max(0, round2(gross)));
   const foodNet = Math.max(0, round2(gross - discountValue));
   const taxAmount = taxPercent > 0 ? round2((foodNet * taxPercent) / 100) : 0;
@@ -76,9 +73,6 @@ export function PayModal({
   const due = Math.max(0, round2(dueBase - prevPaid));
   const needsHandover = settleMode === "CASH" && method === "CASH" && !keepsCash;
   const onCredit = settleMode === "CREDIT";
-  // Takeaway is cashier counter work (not kitchen) — always allowed to close.
-  const canFreeTable =
-    isTakeaway || order?.status === "READY" || order?.status === "SERVED";
 
   useEffect(() => {
     if (!order) return;
@@ -92,7 +86,6 @@ export function PayModal({
     setCreditQ("");
     setCreditHits([]);
     setCreditLookup("idle");
-    setFreeTable(null);
     setServedByName((order.servedByName || order.servedBy || "").trim());
     api<{ billing?: { taxEnabled?: boolean; taxPercent?: number } }>("/system/settings")
       .then((s) => {
@@ -154,12 +147,6 @@ export function PayModal({
   async function submitCredit() {
     if (!order) return;
     if (!creditPick) return toast.push(t("pay.creditNeed"), "err");
-    if (freeTable === null) {
-      return toast.push(isTakeaway ? t("pay.closeTakeawayNeed") : t("pay.freeTableNeed"), "err");
-    }
-    if (freeTable && !canFreeTable) {
-      return toast.push(isTakeaway ? t("pay.closeTakeawayWaitKitchen") : t("pay.freeTableWaitKitchen"), "err");
-    }
     setBusy(true);
     try {
       await api(`/orders/${order.id}/put-on-credit`, {
@@ -168,18 +155,16 @@ export function PayModal({
           creditCustomerId: creditPick.id,
           discount: discountValue,
           servedByName: servedByName.trim() || undefined,
-          releaseTable: freeTable,
+          releaseTable: true,
         }),
       });
       toast.push(
-        freeTable
-          ? isTakeaway
-            ? t("pay.creditSavedTakeawayClosed", { name: creditPick.name })
-            : t("pay.creditSavedFreed", { name: creditPick.name })
-          : t("pay.creditSaved", { name: creditPick.name }),
+        isTakeaway
+          ? t("pay.creditSavedTakeawayClosed", { name: creditPick.name })
+          : t("pay.creditSavedFreed", { name: creditPick.name }),
         "ok"
       );
-      onPaid(false, true, freeTable);
+      onPaid(false, true, true);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
       if (/locked after day close/i.test(msg)) toast.push(t("pay.dayLocked"), "err");
@@ -189,13 +174,8 @@ export function PayModal({
     }
   }
 
-  async function submit(e: FormEvent) {
-    e.preventDefault();
+  async function submitPay(opts: { printReceipt: boolean }) {
     if (!order) return;
-    if (onCredit) {
-      await submitCredit();
-      return;
-    }
     if (order.status === "CANCELLED" || order.paymentStatus === "VOID") {
       return toast.push(t("bills.payCancelledBlocked"), "err");
     }
@@ -228,7 +208,7 @@ export function PayModal({
       if (needsHandover && handedTo) localStorage.setItem(`handover:${user?.id}`, handedTo);
       const to = cashiers.find((c) => c.id === handedTo)?.name;
       toast.push(to ? t("pay.savedHanded", { name: to }) : t("pay.saved"), "ok");
-      if (fullyPaid && can("print.bill")) {
+      if (opts.printReceipt && fullyPaid && can("print.bill")) {
         try {
           await serverPrint("bill", order.id);
           toast.push(t("pay.paidReceiptPrinted"), "ok");
@@ -244,6 +224,17 @@ export function PayModal({
     } finally {
       setBusy(false);
     }
+  }
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!order) return;
+    if (onCredit) {
+      await submitCredit();
+      return;
+    }
+    // Enter / primary submit = pay + print when allowed.
+    await submitPay({ printReceipt: can("print.bill") });
   }
 
   const value = Number(amount) || 0;
@@ -351,35 +342,9 @@ export function PayModal({
                     )}
                   </>
                 )}
-                <div className="field" style={{ marginTop: "0.75rem" }}>
-                  <label>{isTakeaway ? t("pay.closeTakeaway") : t("pay.freeTable")}</label>
-                  <p className="tiny muted" style={{ margin: "0 0 0.35rem" }}>
-                    {isTakeaway
-                      ? canFreeTable
-                        ? t("pay.closeTakeawayHint")
-                        : t("pay.closeTakeawayWaitKitchen")
-                      : canFreeTable
-                        ? t("pay.freeTableHint")
-                        : t("pay.freeTableWaitKitchen")}
-                  </p>
-                  <div className="btn-row" style={{ flexWrap: "wrap", gap: 6 }}>
-                    <button
-                      type="button"
-                      className={`btn sm ${freeTable === false ? "" : "ghost"}`}
-                      onClick={() => setFreeTable(false)}
-                    >
-                      {isTakeaway ? t("pay.keepTakeawayOpen") : t("pay.keepTable")}
-                    </button>
-                    <button
-                      type="button"
-                      className={`btn sm ${freeTable === true ? "" : "ghost"}`}
-                      disabled={!canFreeTable}
-                      onClick={() => setFreeTable(true)}
-                    >
-                      {isTakeaway ? t("pay.closeTakeawayBtn") : t("pay.releaseTable")}
-                    </button>
-                  </div>
-                </div>
+                <p className="tiny muted" style={{ marginTop: "0.75rem" }}>
+                  {isTakeaway ? t("pay.closeTakeawayHint") : t("pay.freeTableHint")}
+                </p>
               </div>
             ) : (
               <div className="field">
@@ -521,22 +486,35 @@ export function PayModal({
             <button type="button" className="btn ghost" onClick={onClose}>
               {t("common.cancel")}
             </button>
-            <button
-              type="submit"
-              className="btn ok"
-              disabled={
-                busy ||
-                (onCredit
-                  ? !creditPick || freeTable === null || (freeTable === true && !canFreeTable)
-                  : needsHandover && collect > 0 && (!handedTo || !handedOver))
-              }
-            >
-              {busy
-                ? t("common.saving")
-                : onCredit
-                  ? t("pay.putOnCredit")
-                  : `${t("pay.markPaid")} ${money(collect)}`}
-            </button>
+            {onCredit ? (
+              <button type="submit" className="btn ok" disabled={busy || !creditPick}>
+                {busy ? t("common.saving") : t("pay.putOnCredit")}
+              </button>
+            ) : (
+              <>
+                {can("print.bill") && (
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    disabled={busy || (needsHandover && collect > 0 && (!handedTo || !handedOver))}
+                    onClick={() => void submitPay({ printReceipt: false })}
+                  >
+                    {busy ? t("common.saving") : t("pay.markPaidNoPrint")}
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  className="btn ok"
+                  disabled={busy || (needsHandover && collect > 0 && (!handedTo || !handedOver))}
+                >
+                  {busy
+                    ? t("common.saving")
+                    : can("print.bill")
+                      ? `${t("pay.markPaidPrint")} ${money(collect)}`
+                      : `${t("pay.markPaid")} ${money(collect)}`}
+                </button>
+              </>
+            )}
           </div>
         </form>
       )}

@@ -43,6 +43,17 @@ export class CloseController {
     });
   }
 
+  @Get("menu-sales-export")
+  @RequirePerms("close.view", "close.manage")
+  async menuSalesExport(@Query("date") date?: string) {
+    const sheet = await this.close.preview(date);
+    const pdf = await this.close.toMenuSalesPdf(date);
+    return new StreamableFile(pdf, {
+      type: "application/pdf",
+      disposition: `attachment; filename="menu-sales-${sheet.businessDate}.pdf"`,
+    });
+  }
+
   @Post("print")
   @RequirePerms("close.view", "close.manage")
   async printPdf(

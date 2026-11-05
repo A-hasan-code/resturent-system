@@ -60,8 +60,13 @@ export class PaymentsService {
     const start = await this.settings.dayStart();
     const fromDay = fromStr || toStr!;
     const toDay = toStr || fromStr!;
-    const range = businessQueryRange(fromDay, toDay, start.h, start.m);
-    return { gte: range.gte, lt: range.lt, dayStart: start.label };
+    const range = businessQueryRange(fromDay, toDay, start.h, start.m, start.closeH, start.closeM);
+    return {
+      gte: range.gte,
+      lt: range.lt,
+      dayStart: start.label,
+      dayClose: start.closeLabel,
+    };
   }
 
   /** People a manager can hand collected cash to. */
@@ -190,6 +195,7 @@ export class PaymentsService {
       },
       /** Same clock as Close report — UI should label pickers as business day. */
       dayStart: day.label,
+      dayClose: day.closeLabel,
       from: f.from ?? null,
       to: f.to ?? null,
     };

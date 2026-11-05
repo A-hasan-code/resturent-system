@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { apiBase, serverOrigin } from "../server";
 
 export type ThermalPreviewData = {
@@ -44,6 +44,38 @@ type ViewBlock =
   | Segment
   | { kind: "stampOverlay"; stamp: "paid" | "unpaid"; text: string; where: "items" | "totals" };
 
+/** Scale the fixed-ch slip down so the full bill fits the available width. */
+function useFitScale(deps: unknown[]) {
+  const shellRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+  const [slotH, setSlotH] = useState<number | undefined>(undefined);
+
+  useLayoutEffect(() => {
+    const shell = shellRef.current;
+    const inner = innerRef.current;
+    if (!shell || !inner) return;
+
+    const measure = () => {
+      const avail = shell.clientWidth;
+      const need = inner.scrollWidth;
+      const next = need > 0 && avail > 0 ? Math.min(1, avail / need) : 1;
+      setScale(next);
+      setSlotH(Math.ceil(inner.offsetHeight * next));
+    };
+
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(shell);
+    ro.observe(inner);
+    return () => ro.disconnect();
+    // deps intentionally from caller (bill text / paper size / assets)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+
+  return { shellRef, innerRef, scale, slotH };
+}
+
 /** Same characters the thermal printer gets — images stand in for raster markers. */
 export function ThermalPreview({
   text,
@@ -69,99 +101,108 @@ export function ThermalPreview({
   const paid = brandingUrl(paidStampUrl || "/branding/paid-stamp.png");
   const unpaid = brandingUrl(unpaidStampUrl || "/branding/unpaid-stamp.png");
   const cancelled = brandingUrl(cancelledStampUrl || "/branding/cancelled-stamp.png");
+  const { shellRef, innerRef, scale, slotH } = useFitScale([text, mm, logo, blocks.length]);
 
   return (
     <div className="receipt-wrap">
       <div className="thermal-slip-meta no-print">
         <span className="thermal-slip-size">{mm} mm slip</span>
       </div>
-      <div
-        className={`thermal-slip receipt--mm${mm} thermal-slip--${mm <= 58 ? "narrow" : "wide"}`}
-        id="bill-print-area"
-        style={{ ["--preview-mm" as string]: `${mm}mm` }}
-      >
-        {blocks.map((seg, i) => {
-          if (seg.kind === "logo") {
-            return logo ? (
-              <div key={`logo-${logo}`} className="thermal-slip-img thermal-slip-logo">
-                <img src={logo} alt="" />
-              </div>
-            ) : null;
-          }
-          if (seg.kind === "stampOverlay") {
-            const src = seg.stamp === "paid" ? paid : unpaid;
-            const label = seg.stamp === "paid" ? "PAID" : "UNPAID";
-            return (
-              <div
-                key={i}
-                className={`thermal-slip-items-overlay thermal-slip-stamp-on-${seg.where}`}
-              >
-                <pre className="thermal-slip-text">{seg.text}</pre>
-                {src ? (
-                  <div className="thermal-slip-stamp-overlay" aria-hidden>
-                    <img src={src} alt="" />
+      <div className="thermal-slip-scale" ref={shellRef} style={slotH ? { height: slotH } : undefined}>
+        <div
+          className="thermal-slip-scale__inner"
+          ref={innerRef}
+          style={{ transform: `scale(${scale})` }}
+        >
+          <div
+            className={`thermal-slip receipt--mm${mm} thermal-slip--${mm <= 58 ? "narrow" : "wide"}`}
+            id="bill-print-area"
+            style={{ ["--preview-mm" as string]: `${mm}mm` }}
+          >
+            {blocks.map((seg, i) => {
+              if (seg.kind === "logo") {
+                return logo ? (
+                  <div key={`logo-${logo}`} className="thermal-slip-img thermal-slip-logo">
+                    <img src={logo} alt="" />
+                  </div>
+                ) : null;
+              }
+              if (seg.kind === "stampOverlay") {
+                const src = seg.stamp === "paid" ? paid : unpaid;
+                const label = seg.stamp === "paid" ? "PAID" : "UNPAID";
+                return (
+                  <div
+                    key={i}
+                    className={`thermal-slip-items-overlay thermal-slip-stamp-on-${seg.where}`}
+                  >
+                    <pre className="thermal-slip-text">{seg.text}</pre>
+                    {src ? (
+                      <div className="thermal-slip-stamp-overlay" aria-hidden>
+                        <img src={src} alt="" />
+                      </div>
+                    ) : (
+                      <div className="thermal-slip-stamp-overlay thermal-slip-stamp-overlay--text" aria-hidden>
+                        {label}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+              if (seg.kind === "paid") {
+                return paid ? (
+                  <div key={i} className="thermal-slip-img thermal-slip-stamp thermal-slip-stamp--small">
+                    <img src={paid} alt="PAID" />
                   </div>
                 ) : (
-                  <div className="thermal-slip-stamp-overlay thermal-slip-stamp-overlay--text" aria-hidden>
-                    {label}
+                  <pre key={i} className="thermal-slip-text">
+                    *** PAID ***
+                  </pre>
+                );
+              }
+              if (seg.kind === "unpaid") {
+                return unpaid ? (
+                  <div key={i} className="thermal-slip-img thermal-slip-stamp thermal-slip-stamp--small">
+                    <img src={unpaid} alt="UNPAID" />
                   </div>
-                )}
-              </div>
-            );
-          }
-          if (seg.kind === "paid") {
-            return paid ? (
-              <div key={i} className="thermal-slip-img thermal-slip-stamp thermal-slip-stamp--small">
-                <img src={paid} alt="PAID" />
-              </div>
-            ) : (
-              <pre key={i} className="thermal-slip-text">
-                *** PAID ***
-              </pre>
-            );
-          }
-          if (seg.kind === "unpaid") {
-            return unpaid ? (
-              <div key={i} className="thermal-slip-img thermal-slip-stamp thermal-slip-stamp--small">
-                <img src={unpaid} alt="UNPAID" />
-              </div>
-            ) : (
-              <pre key={i} className="thermal-slip-text">
-                *** UNPAID ***
-              </pre>
-            );
-          }
-          if (seg.kind === "cancelled") {
-            return cancelled ? (
-              <div key={i} className="thermal-slip-img thermal-slip-stamp">
-                <img src={cancelled} alt="CANCELLED" />
-              </div>
-            ) : (
-              <pre key={i} className="thermal-slip-text">
-                *** CANCELLED ***
-              </pre>
-            );
-          }
-          if (seg.kind === "tableBadge") {
-            return (
-              <pre key={i} className="thermal-slip-text thermal-slip-table-badge">
-                {seg.value.trim()}
-              </pre>
-            );
-          }
-          if (seg.kind === "staffBlock") {
-            return (
-              <div key={i} className="thermal-slip-staff-block">
-                <pre className="thermal-slip-text thermal-slip-staff-block__body">{seg.value}</pre>
-              </div>
-            );
-          }
-          return (
-            <pre key={i} className="thermal-slip-text">
-              {seg.value}
-            </pre>
-          );
-        })}
+                ) : (
+                  <pre key={i} className="thermal-slip-text">
+                    *** UNPAID ***
+                  </pre>
+                );
+              }
+              if (seg.kind === "cancelled") {
+                return cancelled ? (
+                  <div key={i} className="thermal-slip-img thermal-slip-stamp">
+                    <img src={cancelled} alt="CANCELLED" />
+                  </div>
+                ) : (
+                  <pre key={i} className="thermal-slip-text">
+                    *** CANCELLED ***
+                  </pre>
+                );
+              }
+              if (seg.kind === "tableBadge") {
+                return (
+                  <pre key={i} className="thermal-slip-text thermal-slip-table-badge">
+                    {seg.value.trim()}
+                  </pre>
+                );
+              }
+              if (seg.kind === "staffBlock") {
+                return (
+                  <div key={i} className="thermal-slip-staff-block">
+                    <pre className="thermal-slip-text thermal-slip-staff-block__body">{seg.value}</pre>
+                  </div>
+                );
+              }
+              return (
+                <pre key={i} className="thermal-slip-text">
+                  {seg.value}
+                </pre>
+              );
+            })}
+          </div>
+        </div>
       </div>
     </div>
   );

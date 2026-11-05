@@ -5,7 +5,7 @@ import { Modal } from "../components/Modal";
 import { useConfirm } from "../components/ConfirmModal";
 import { DateField } from "../components/DateField";
 import { SearchField, matchesSearch } from "../components/SearchField";
-import { useShiftOpen } from "../hotel-gate";
+import { useBusinessDay, useShiftOpen } from "../hotel-gate";
 import { useT } from "../i18n";
 import { useToast } from "../toast";
 
@@ -67,11 +67,6 @@ type LedgerResult = {
 
 type EntryMode = "SALARY_CREDIT" | "SALARY_CASH" | "ADVANCE" | "OTHER_DEBIT" | null;
 
-function isoDay(d = new Date()) {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
 function statusColor(status: BalanceStatus) {
   if (status === "JAMA") return "var(--ok)";
   if (status === "BANAM") return "var(--danger)";
@@ -86,6 +81,7 @@ export function WorkersPage() {
   const canManage = can("expense.manage");
   const shiftOpen = useShiftOpen();
   const canEditShift = canManage && shiftOpen;
+  const { businessDate } = useBusinessDay();
 
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [q, setQ] = useState("");
@@ -107,7 +103,7 @@ export function WorkersPage() {
 
   const [entryMode, setEntryMode] = useState<EntryMode>(null);
   const [editLine, setEditLine] = useState<LedgerLine | null>(null);
-  const [eDate, setEDate] = useState(isoDay());
+  const [eDate, setEDate] = useState(businessDate);
   const [eAmount, setEAmount] = useState("");
   const [eDetail, setEDetail] = useState("");
 
@@ -260,7 +256,7 @@ export function WorkersPage() {
     } else {
       setEditLine(null);
       setEntryMode(mode);
-      setEDate(isoDay());
+      setEDate(businessDate);
       setEAmount(selectedWorker?.rate ? String(selectedWorker.rate) : "");
       if (mode === "SALARY_CREDIT") setEDetail(t("workers.detailSalary"));
       else if (mode === "SALARY_CASH") setEDetail(t("workers.detailSalaryCash"));

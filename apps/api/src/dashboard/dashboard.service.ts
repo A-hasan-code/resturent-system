@@ -44,7 +44,7 @@ export class DashboardService {
     const now = new Date();
     // Must use restaurant business date (not calendar midnight) — mornings before dayStart
     // still belong to yesterday; calendar "today" totals were empty until dayStart.
-    const today = businessDateOf(now, day.h, day.m);
+    const today = businessDateOf(now, day.h, day.m, day.closeH, day.closeM);
     const [by, bm] = today.split("-").map(Number);
     const monthFrom = `${String(by).padStart(4, "0")}-${String(bm).padStart(2, "0")}-01`;
     const monthTo = isoDay(new Date(by, bm, 0));
@@ -90,14 +90,14 @@ export class DashboardService {
     const role = (user.roleCode || "UNKNOWN").toUpperCase();
     const day = await this.settings.dayStart();
     const now = new Date();
-    const bizDate = businessDateOf(now, day.h, day.m);
-    // Same TZ pad as Bills — without it, installed Windows servers show empty today stats.
-    const win = businessQueryWindow(bizDate, day.h, day.m);
+    const bizDate = businessDateOf(now, day.h, day.m, day.closeH, day.closeM);
+    // Exact shift window open → close (same as Close / Bills / Audit).
+    const win = businessQueryWindow(bizDate, day.h, day.m, day.closeH, day.closeM);
     const inBizDay = { gte: win.gte, lt: win.lt };
     const staleBefore = new Date(Date.now() - STALE_MINUTES * 60 * 1000);
 
-    // Older/demo orders often saved costTotal=0 — fill from recipes first
-    await this.costing.repairMissingOrderCosts();
+    // Backfill missing order costs in the background — never block sales/stats.
+    void this.costing.repairMissingOrderCosts().catch(() => undefined);
 
     const [
       pendingKitchen,

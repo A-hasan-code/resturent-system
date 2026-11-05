@@ -2368,6 +2368,13 @@ tr.bill-requested-row td {
   scrollbar-color: #d5dde5 transparent;
 }
 
+/* Bill / thermal previews: scroll inside frame instead of clipping past the modal */
+.modal-scroll .bill-design-preview-frame,
+.modal-scroll .receipt-wrap {
+  max-width: 100%;
+  min-width: 0;
+}
+
 .modal-scroll::-webkit-scrollbar {
   width: 6px;
 }
@@ -2470,7 +2477,14 @@ tr.bill-requested-row td {
 
 .receipt-wrap {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  /* flex-start + auto margins on children: centers when it fits, never clips the start edge */
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 0.35rem;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   background: #f0f3f6;
   border-radius: 12px;
   padding: 1rem;
@@ -2478,6 +2492,13 @@ tr.bill-requested-row td {
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
   max-width: 100%;
+}
+
+.receipt-wrap > .thermal-slip-meta,
+.receipt-wrap > .thermal-slip-scale,
+.receipt-wrap > .thermal-slip,
+.receipt-wrap > .receipt {
+  margin-inline: auto;
 }
 
 .receipt {
@@ -2989,12 +3010,19 @@ tr.bill-requested-row td {
 .bill-design-preview-frame {
   width: 100%;
   max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
   overflow-y: visible;
   background: #e8eef3;
   border-radius: 10px;
   padding: 0.75rem;
   display: block;
+  box-sizing: border-box;
+}
+
+.bill-design-preview-frame .receipt-wrap {
+  background: transparent;
+  padding: 0;
 }
 
 .bill-design-preview-frame .print-preview,
@@ -3020,16 +3048,35 @@ tr.bill-requested-row td {
   padding: 0.15rem 0.55rem;
 }
 
+/* Outer box that can shrink; slip inside is scaled to fit so nothing clips. */
+.thermal-slip-scale {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.thermal-slip-scale__inner {
+  display: block;
+  width: max-content;
+  max-width: none;
+  margin-inline: auto;
+  transform-origin: top center;
+  will-change: transform;
+}
+
 .thermal-slip {
   /* content-box so padding does NOT steal characters from the 32/48/64 grid. */
   box-sizing: content-box;
-  margin: 0 auto;
+  margin: 0;
   background: #fff;
   /* Pure black — matches thermal Font A / SoftInfinity design (not gray/dim). */
   color: #000;
   padding: 6px 8px 10px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
   font-family: "Courier New", Courier, monospace;
+  /* Keep font-size in sync with .thermal-slip-text so `ch` width matches glyphs. */
   font-size: 11px;
   line-height: 1.2;
   letter-spacing: 0;
@@ -3044,6 +3091,7 @@ tr.bill-requested-row td {
 .thermal-slip.receipt--mm58 {
   width: 32ch;
   min-width: 32ch;
+  font-size: 10px;
 }
 
 .thermal-slip.receipt--mm72 {
@@ -3064,11 +3112,6 @@ tr.bill-requested-row td {
 
 .thermal-slip--narrow {
   padding: 3px 3px 6px;
-  font-size: 8px;
-}
-
-.thermal-slip--wide {
-  font-size: 9px;
 }
 
 .thermal-slip--narrow .thermal-slip-logo img {
@@ -3094,6 +3137,8 @@ tr.bill-requested-row td {
 .thermal-slip-text {
   margin: 0;
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   font-family: "Courier New", Courier, monospace;
   font-size: inherit;
   line-height: inherit;
@@ -3102,6 +3147,7 @@ tr.bill-requested-row td {
   overflow-wrap: normal;
   word-break: keep-all;
   tab-size: 1;
+  text-align: left;
 }
 
 .thermal-slip-text.thermal-slip-table-badge {
@@ -3148,17 +3194,17 @@ tr.bill-requested-row td {
 
 .thermal-slip--narrow .thermal-slip-text,
 .thermal-slip.receipt--mm58 .thermal-slip-text {
-  font-size: 10px;
+  font-size: inherit;
   color: #000;
 }
 
 .thermal-slip--wide .thermal-slip-text {
-  font-size: 11px;
+  font-size: inherit;
   color: #000;
 }
 
 .thermal-slip.receipt--mm112 .thermal-slip-text {
-  font-size: 11px;
+  font-size: inherit;
 }
 
 .thermal-slip-img {
@@ -3943,14 +3989,27 @@ tr.bill-requested-row td {
     display: block !important;
   }
 
+  .thermal-slip-scale,
+  .thermal-slip-scale__inner {
+    display: block !important;
+    width: auto !important;
+    max-width: none !important;
+    height: auto !important;
+    overflow: visible !important;
+    transform: none !important;
+    margin: 0 !important;
+  }
+
   #bill-print-area {
     position: absolute;
     left: 0;
     top: 0;
     width: 80mm !important;
+    min-width: 0 !important;
     max-width: 80mm !important;
     box-shadow: none !important;
     padding: 2mm 3mm !important;
+    transform: none !important;
   }
 
   .modal-backdrop {

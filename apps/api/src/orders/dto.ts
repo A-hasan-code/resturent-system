@@ -235,6 +235,14 @@ export class EditOrderDto {
   @IsOptional()
   @IsString()
   servedByName?: string;
+
+  /**
+   * When qty is reduced/removed on a table order: print a CANCELLED-style kitchen
+   * slip so staff stop those lines. Default off — only print when the cashier asks.
+   */
+  @IsOptional()
+  @IsBoolean()
+  printCancelKot?: boolean;
 }
 
 export class AddItemsDto {
@@ -325,7 +333,10 @@ export class PutOnCreditDto {
   @IsOptional()
   servedByName?: string;
 
-  /** If true, mark COMPLETED so the table frees (guest left). Kitchen must be Ready/Served. */
+  /**
+   * Legacy flag — put-on-credit always completes (frees table / leaves kitchen).
+   * Kept so older clients that still send it do not fail validation.
+   */
   @IsOptional()
   @IsBoolean()
   releaseTable?: boolean;

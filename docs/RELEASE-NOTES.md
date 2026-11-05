@@ -1,12 +1,12 @@
-# Hotel System v1.4.52 - Release Notes
+# Hotel System v1.4.69 - Release Notes
 
-**Date:** 2026-10-15  
+**Date:** 2026-11-02  
 **Targets:** Windows installer + Desktop (Electron) + Android APK + Web/PWA  
 **Branch:** `improve-the-system`
 
 ### Data safety (upgrade confirmation)
 
-**Updating to v1.4.52 will NOT remove your live data.**
+**Updating to v1.4.69 will NOT remove your live data.**
 
 | What happens on upgrade | Result |
 |-------------------------|--------|
@@ -16,6 +16,90 @@
 | Pre-upgrade backup | Written under `C:\ProgramData\HotelSystem\backups` (`*-pre-upgrade.dump`) |
 
 **Do not uninstall first.** Run the newer Setup over the existing install as Administrator (Main PC → server mode). Schema migrate only; live hotel data stays in place.
+
+### Offline install / upgrade
+
+1. Build on a machine with Node: `pnpm release` (or `.\packaging\windows\Build-Release.ps1 -SkipAndroid`)
+2. Copy `releases\v1.4.69\HotelSystem-Setup-1.4.69.exe` to the hotel (USB / LAN share) — **no internet required** on the client.
+3. On Main PC: run Setup as Administrator over the existing install.
+4. After upgrade: open desktop app on each Cashier / Additional PC so print agent reconnects (USB bill printers).
+5. Additional PCs: can pull `desktop-update.zip` from the Main server over LAN.
+
+### v1.4.69
+- **Bill / KOT preview fit:** Thermal preview no longer clips left text or shows an inner horizontal scrollbar. Slip width matches Courier character grid; preview scales to fit Bills / Settings / KOT modals. Browser/printer print unchanged.
+
+### v1.4.68
+- **Kitchen printer stations (multi-select):** Settings → printer → Kitchen slip shows dynamic station checkboxes (from Store → Kitchen stations). Tick several on one printer = **one** KOT slip; put a far station (e.g. BBQ) on its own printer for a separate slip. No more typing `beverages, cooking, bbq`.
+
+### v1.4.67
+- **Menu sales PDF — real categories:** Close → Menu sales PDF groups each product under its menu category (Karahi, Drinks, …), not a single “Menu” bucket. Includes paid + credit; Per Head stays its own section; purchase/profit from order costs.
+
+### v1.4.66
+- **Takeaway → kitchen again:** Takeaway with menu food goes PENDING, prints KOT, appears on the Kitchen board (Start / Ready / Served). Add/edit/cancel kitchen slips work like tables. Bill still prefers Main Cashier; per-head-only takeaway stays READY at counter.
+
+### v1.4.65
+- **Print agent — Additional PC false idle fix:** Cashier/Additional desktops no longer treat `C:\Program Files\HotelSystem` alone as “Main server” (that folder exists for desktop-only installs too). Agent only idles on real server signals (`server-info.txt`, `HotelSystem\app`, `HotelSystemAPI`). Fixes all Cashier PCs stuck Offline and USB bill print not claiming jobs while kitchen LAN KOTs still worked.
+
+### v1.4.64
+- **Bill edit cancel slip fix:** When “Print cancel slip to kitchen” is on, the slip lists only the removed/reduced quantities — not the remaining order items stamped CANCELLED.
+
+### v1.4.63
+- **Reverse payment:** Clears payment/tip only — same order stays Unpaid and editable; Close/Finance/Payments totals drop; table reopens if the visit was completed. No cancel/void, no stock restore.
+- **Bill edit → kitchen:** New / extra items print only that KOT round (order # + new lines), not a full-order reprint.
+- **Bill edit qty down/remove:** Optional “Print cancel slip to kitchen” checkbox (default off).
+
+### v1.4.62
+- **Settings → Payment closes kitchen:** Optional toggle (default off). When on, a full cashier payment marks the order completed/served and removes it from the kitchen board immediately.
+
+### v1.4.61
+- **Settings → Network health & machine logs:** Check DB, LAN IPs, mDNS, Cashier PCs online/offline, LAN printer TCP reachability. Per-machine logs (Main + Additional PCs) for login, hotel open/close, API actions (orders/pay/settings…), printer Active on/off, print OK/FAIL, Cashier register/reconnect.
+- **Readable log panel** on light background.
+
+### v1.4.60
+- **Business shift open → close (HRMS-style):** Settings → **Shift opens** + **Shift closes** (e.g. 10:00 → 03:00). Dashboard, Audit, Close, Billing, Payments, Finance, Expenses, Menu sales use that window only — not open→next-open 24h. Stops overnight mix (15th into 16th).
+- **Hotel Open/Close ≠ day change:** Manual hotel close does not move the business date; only the open/close clocks do.
+- **Gap after close:** Between shift close and next open, activity belongs to the upcoming day (out of yesterday’s locked report).
+
+### v1.4.59
+- **Business day boundary (no previous-day mix):** “Today” is Settings → **Business day starts** (opening) until the next opening — not calendar midnight and not a widened ±14h pad. Dashboard, Sale Audit, Close, Menu sales PDF, Billing, Payments/Cash, Finance, Hotel Expenses, Store purchases, and Workers all use the same window.
+- **Menu sales PDF:** Close → Menu sales PDF lists paid + credit items for that business day only (Per Head section unchanged); previous business day dishes stay out.
+- **Expense / purchase / worker date stamps:** Saved on dayStart of the chosen business date so they never fall into yesterday when day start is afternoon.
+- **UI defaults:** Purchasing, Workers, Hotel Expenses month/year, Audit year presets use the current business date.
+
+### v1.4.58
+- **Reverse payment → Unpaid:** Main Cashier reverse clears payments/tips and reopens the bill as **Unpaid** (editable / payable again). No cancel, no stock restore, no kitchen cancel slip. Closed (Completed) bills reopen as Served; blocked if the table already has another open bill.
+
+### v1.4.57
+- **Takeaway → kitchen:** New / added takeaway items print KOT and ping the Kitchen board (was blocked before). Cancel / bill-edit kitchen slips work for takeaway too.
+- **Takeaway KOT printers:** Kitchen slips skip cashier / counter / Other-print printers; prefer station-tagged or kitchen-named printers.
+- **Kitchen board:** Takeaway tickets appear on Kitchen (Start / Ready / Served); Main Cashier still has the same buttons on Waiter.
+- **Pay → Served:** Full payment on takeaway closes as Completed; paying a table still cooking moves it to **Served**.
+- **Notifications On/Off:** My account → Notifications — system alerts for bill requests / kitchen (phone & tablet APK). Default On.
+- **Admin → cashier kitchen access:** Users → edit cashier/waiter → **Kitchen board access** On — they can Start / Ready / Served on the Kitchen screen (no role change to Kitchen).
+
+### v1.4.56
+- **Close — Menu sales PDF:** Download **Menu sales PDF** on Close — category-wise product report (Qty, Sale, T.Sale, Purchase, Profit). Includes **paid + credit** sales up to that moment; open table unpaid excluded. **Per Head** cover charges get their own section.
+- **Close — Items sold:** List now counts credit invoices as sold (not only PAID bills).
+- **Admin dashboard — sales/values blank:** Cost repair no longer blocks `/dashboard`. Inactive store ingredients (e.g. Cooking Oil on a recipe) are skipped so Orders / Sales / Tips / Overview cards load again.
+
+### v1.4.55
+- **Print — Main server ≠ Cashier PC (hard block):** Reject register when hostname is this server or the request comes from this PC’s own IP; purge on every Settings refresh. Desktop idles when HotelSystem server install / hostname / hotel.local / LAN IP matches.
+- **Print — Windows / USB Online status:** Server Windows printers show Online from spooler (not stuck Offline waiting for desktop agent). AGENT printers also Online if the same name exists on Main PC.
+- **Print — USB list noise:** Mouse/keyboard no longer flagged as “need printer driver”.
+- **Takeaway — cashier kitchen steps:** Takeaway starts PENDING; cashier can Start → Ready → Served on the order screen (same as kitchen). Close takeaway only after Ready/Served.
+- **Bill edit — total & stock:** Removing/reducing a line recalculates bill total from line amounts (modifiers included); MIX/deal stock restores like cancel; live total while editing.
+- **Bill edit — kitchen slips:** Removed/qty-down lines print a CANCELLED kitchen slip, then a reprint of remaining items.
+
+### v1.4.54
+- **Print — Main server is never a Cashier PC:** Desktop agent idles when this PC has the HotelSystem server install, or when the URL is hostname / hotel.local / LAN IP of this machine. Fixes `siteserver` appearing under Cashier PCs.
+- **Print — auto-purge self-agent:** On API start, any print agent whose hostname matches the Main server is deleted (and its AGENT printers).
+- **Print — server rejects self-register:** Register from Main hostname returns idle (no Cashier row).
+- **Settings — Remove PC:** Delete a Cashier / Additional PC from Cashier PCs (and its AGENT printers).
+
+### v1.4.53
+- **Print — manual Additional PC printers:** Settings → + Add printer → **USB (Additional PC)**. Pick Cashier PC + Windows printer name. Still needs desktop app Online to print; auto-sync remains.
+- **Print — LAN Online/Offline:** LAN (IP) printers show Online when TCP port 9100 answers, or Offline with a clear hint. Refreshes with the printers list (~15s).
+- **Print — manual flag:** Admin-added Additional PC printers are not auto-removed when USB briefly disconnects from that PC.
 
 ### v1.4.52
 - **Table reservation (Supervisor / Cashier / Admin):** Hold a free table for a guest (name, phone, party, arrival time, notes). Waiter cannot reserve. Board shows Reserved (blue). Long-press / right-click a free table, or use Reserve on the order screen. Admin can view and edit.

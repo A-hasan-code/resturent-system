@@ -6,6 +6,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { toNumber, unpackPurchase } from "../common/units";
 import { dataDir } from "../config/env";
 import { SettingsService } from "../system/settings.service";
+import { businessDateOf, businessDayStamp, businessQueryWindow } from "../common/business-day";
 import { CreatePurchaseDto, CreateSupplierDto, SupplierPaymentDto, UpdateSupplierDto } from "./dto";
 import { renderSupplierLedgerPdf } from "./supplier-pdf";
 
@@ -28,18 +29,6 @@ function supplierDue(p: {
         : toNumber(p.extraExpense ?? 0)
       : 0;
   return money2(inv + extra);
-}
-
-/** Local calendar day, matching how purchase timestamps are stored (noon local). */
-function dayStamp(isoDate: string) {
-  return new Date(`${isoDate}T12:00:00`);
-}
-
-function dayRange(isoDate: string) {
-  return {
-    start: new Date(`${isoDate}T00:00:00`),
-    end: new Date(`${isoDate}T23:59:59.999`),
-  };
 }
 
 function localDate(d: Date) {
@@ -115,6 +104,16 @@ export class PurchasesService {
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService
   ) {}
+
+  private async stamp(isoDate: string) {
+    const start = await this.settings.dayStart();
+    return businessDayStamp(isoDate, start.h, start.m, start.closeH, start.closeM);
+  }
+
+  private async businessToday() {
+    const start = await this.settings.dayStart();
+    return businessDateOf(new Date(), start.h, start.m, start.closeH, start.closeM);
+  }
 
   billsDir() {
     return dataDir("purchase-bills");
@@ -384,7 +383,7 @@ export class PurchasesService {
     }
     paid = Math.min(paid, due);
 
-    const purchasedAt = dayStamp(dto.purchasedOn);
+    const purchasedAt = await this.stamp(dto.purchasedOn);
 
     const purchase = await this.prisma.$transaction(async (tx) => {
       const created = await tx.purchase.create({
@@ -519,12 +518,13 @@ export class PurchasesService {
       throw new BadRequestException(`Payment is more than outstanding (Rs ${bal.outstanding})`);
     }
 
+    const paidAt = await this.stamp(dto.paidOn || (await this.businessToday()));
     await this.prisma.$transaction(async (tx) => {
       await tx.supplierPayment.create({
         data: {
           supplierId: id,
           amount,
-          paidAt: dayStamp(dto.paidOn || localDate(new Date())),
+          paidAt,
           note: dto.note?.trim() || null,
           allocated: false,
         },
@@ -590,9 +590,10 @@ export class PurchasesService {
 
   async daily(date: string) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new BadRequestException("Date must be YYYY-MM-DD");
-    const { start, end } = dayRange(date);
+    const start = await this.settings.dayStart();
+    const win = businessQueryWindow(date, start.h, start.m, start.closeH, start.closeM);
     const rows = await this.prisma.purchase.findMany({
-      where: { purchasedAt: { gte: start, lte: end } },
+      where: { purchasedAt: { gte: win.gte, lt: win.lt } },
       orderBy: { createdAt: "asc" },
       include: {
         supplier: { select: { id: true, name: true } },

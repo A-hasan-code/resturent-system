@@ -7,6 +7,8 @@ import { SeedService } from "./seed.service";
 import { DeveloperShellService } from "./developer-shell.service";
 import { TipService } from "./tip.service";
 import { SchemaHealService } from "./schema-heal.service";
+import { MachineLogService } from "./machine-log.service";
+import { NetworkHealthService } from "./network-health.service";
 import { HealthController, SystemController } from "./system.controller";
 
 @Global()
@@ -20,8 +22,10 @@ import { HealthController, SystemController } from "./system.controller";
     DeveloperShellService,
     TipService,
     SchemaHealService,
+    MachineLogService,
+    NetworkHealthService,
   ],
   controllers: [HealthController, SystemController],
-  exports: [SettingsService, ServerIdentityService, TipService],
+  exports: [SettingsService, ServerIdentityService, TipService, MachineLogService],
 })
 export class SystemModule {}

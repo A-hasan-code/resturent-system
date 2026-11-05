@@ -60,17 +60,20 @@ function isoDay(d: Date) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function monthRange(d = new Date()) {
-  const y = d.getFullYear();
-  const m = d.getMonth();
-  const from = `${y}-${String(m + 1).padStart(2, "0")}-01`;
-  const last = new Date(y, m + 1, 0);
-  return { from, to: isoDay(last) };
+/** Month / year bounds from a business YYYY-MM-DD (not wall-clock calendar). */
+function monthRange(businessDate: string) {
+  const [ys, ms] = businessDate.split("-");
+  const y = Number(ys);
+  const m = Number(ms);
+  const from = `${ys}-${ms}-01`;
+  const last = new Date(y, m, 0);
+  const end = isoDay(last);
+  return { from, to: end < businessDate ? end : businessDate };
 }
 
-function yearRange(d = new Date()) {
-  const y = d.getFullYear();
-  return { from: `${y}-01-01`, to: `${y}-12-31` };
+function yearRange(businessDate: string) {
+  const y = businessDate.slice(0, 4);
+  return { from: `${y}-01-01`, to: businessDate };
 }
 
 function sourceLabel(source: Source, t: (k: any) => string) {
@@ -119,7 +122,7 @@ export function HotelExpensesPage() {
   const shiftOpen = useShiftOpen();
   const { businessDate } = useBusinessDay();
   const canEditShift = canManage && shiftOpen;
-  const month = monthRange();
+  const month = monthRange(businessDate);
   const [rangeMode, setRangeMode] = useState<RangeMode>("monthly");
   const [from, setFrom] = useState(month.from);
   const [to, setTo] = useState(month.to);
@@ -172,11 +175,11 @@ export function HotelExpensesPage() {
       setFrom(businessDate);
       setTo(businessDate);
     } else if (mode === "monthly") {
-      const r = monthRange();
+      const r = monthRange(businessDate);
       setFrom(r.from);
       setTo(r.to);
     } else {
-      const r = yearRange();
+      const r = yearRange(businessDate);
       setFrom(r.from);
       setTo(r.to);
     }

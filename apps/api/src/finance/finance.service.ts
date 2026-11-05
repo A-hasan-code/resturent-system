@@ -42,13 +42,13 @@ export class FinanceService {
   private async clock(dateStr?: string) {
     const start = await this.settings.dayStart();
     const now = new Date();
-    const today = businessDateOf(now, start.h, start.m);
+    const today = businessDateOf(now, start.h, start.m, start.closeH, start.closeM);
     const businessDate = dateStr?.trim() || today;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) {
       throw new BadRequestException("Invalid business date");
     }
     // Exact from/to for API labels; gte/lt TZ-padded for Prisma filters (same as Bills).
-    const window = businessQueryWindow(businessDate, start.h, start.m);
+    const window = businessQueryWindow(businessDate, start.h, start.m, start.closeH, start.closeM);
     return {
       businessDate,
       today,
@@ -62,7 +62,7 @@ export class FinanceService {
 
   async assertNotLocked(orderCreatedAt: Date) {
     const start = await this.settings.dayStart();
-    const businessDate = businessDateOf(orderCreatedAt, start.h, start.m);
+    const businessDate = businessDateOf(orderCreatedAt, start.h, start.m, start.closeH, start.closeM);
     const close = await this.prisma.dayCashClose.findUnique({
       where: { businessDate },
       select: { lockedAt: true },
@@ -214,7 +214,7 @@ export class FinanceService {
       throw new BadRequestException("Invalid from/to date");
     }
     const start = await this.settings.dayStart();
-    const range = businessQueryRange(fromStr, toStr, start.h, start.m);
+    const range = businessQueryRange(fromStr, toStr, start.h, start.m, start.closeH, start.closeM);
     const { gte, lt } = range;
 
     const [cancels, edits, heavyDiscount, voids] = await Promise.all([

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, money, unitLabel } from "../api";
+import { useAuth } from "../auth";
 import { useBrand } from "../brand";
 import { PoweredBy } from "../components/PoweredBy";
 import { Modal } from "../components/Modal";
@@ -398,7 +399,11 @@ export function CreditCustomersPage() {
           )}
         </section>
       </div>
-      <CreditPaidModal slip={preview} onClose={() => setPreview(null)} />
+      <CreditPaidModal
+        customerId={account?.id ?? selectedId}
+        slip={preview}
+        onClose={() => setPreview(null)}
+      />
       <Modal
         open={!!moveBill}
         title={t("credit.changePerson")}
@@ -474,13 +479,44 @@ export function CreditCustomersPage() {
   );
 }
 
-function CreditPaidModal({ slip, onClose }: { slip: Slip | null; onClose: () => void }) {
+function CreditPaidModal({
+  customerId,
+  slip,
+  onClose,
+}: {
+  customerId: string | null;
+  slip: Slip | null;
+  onClose: () => void;
+}) {
   const t = useT();
+  const toast = useToast();
+  const { can } = useAuth();
   const { locale } = useI18n();
   const { brand, logoSrc } = useBrand();
+  const [printing, setPrinting] = useState(false);
   const dateLocale = locale === "ur" ? "ur-PK" : "en-PK";
   const when = slip ? new Date(slip.paidAt) : new Date();
   const cleared = !!slip?.cleared;
+  const canPrinter = can("print.bill") || can("order.pay");
+
+  async function printOnPrinter() {
+    if (!slip || !customerId) return;
+    setPrinting(true);
+    try {
+      const res = await api<{ queued: number; jobs: { status: string; error: string | null }[]; printError?: string }>(
+        `/credit-customers/${customerId}/print-slip`,
+        { method: "POST", body: JSON.stringify(slip) }
+      );
+      if ((res.queued ?? 0) <= 0) {
+        throw new Error(res.printError || res.jobs.find((j) => j.error)?.error || t("common.printFailed"));
+      }
+      toast.push(t("credit.printing"), "ok");
+    } catch (e) {
+      toast.push(e instanceof Error ? e.message : t("common.printFailed"), "err");
+    } finally {
+      setPrinting(false);
+    }
+  }
 
   return (
     <Modal open={!!slip} title={t("credit.paidSlip")} onClose={onClose}>
@@ -576,8 +612,13 @@ function CreditPaidModal({ slip, onClose }: { slip: Slip | null; onClose: () => 
             <button type="button" className="btn ghost" onClick={onClose}>
               {t("common.close")}
             </button>
-            <button type="button" className="btn" onClick={() => window.print()}>
-              {t("common.print")}
+            {canPrinter && (
+              <button type="button" className="btn" disabled={printing} onClick={() => void printOnPrinter()}>
+                {printing ? t("common.saving") : t("common.printOnPrinter")}
+              </button>
+            )}
+            <button type="button" className="btn ghost" onClick={() => window.print()}>
+              {t("common.browserPrint")}
             </button>
           </div>
         </>

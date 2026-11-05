@@ -14,7 +14,19 @@ import { RealtimeService } from "../realtime/realtime.service";
 import { toNumber } from "../common/units";
 import { TipService } from "../system/tip.service";
 import { FinanceService } from "../finance/finance.service";
-import { BillEditConfirmPayload, BillPayload, KotPayload, renderBill, renderBillEditConfirm, renderKot, renderTest, TestPayload } from "./receipts";
+import { MachineLogService } from "../system/machine-log.service";
+import {
+  BillEditConfirmPayload,
+  BillPayload,
+  CreditSlipPayload,
+  KotPayload,
+  renderBill,
+  renderBillEditConfirm,
+  renderCreditSlip,
+  renderKot,
+  renderTest,
+  TestPayload,
+} from "./receipts";
 import {
   listWindowsPrinters,
   printPdfToWindowsPrinter,
@@ -44,6 +56,18 @@ type KotOptions = {
   /** Shown on the cancel kitchen slip. */
   cancelReason?: string | null;
   requestedById?: string | null;
+  /**
+   * Bill-edit removals: print these lines on a CANCELLED slip even after they
+   * were deleted from the order (loadKot would otherwise only see remaining items).
+   */
+  cancelLines?: {
+    name: string;
+    quantity: number;
+    unit: string;
+    notes?: string | null;
+    category?: string;
+    station?: string;
+  }[];
 };
 
 @Injectable()
@@ -61,7 +85,8 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     private readonly identity: ServerIdentityService,
     private readonly realtime: RealtimeService,
     private readonly tips: TipService,
-    private readonly finance: FinanceService
+    private readonly finance: FinanceService,
+    private readonly machineLogs: MachineLogService
   ) {}
 
   async onApplicationBootstrap() {
@@ -87,15 +112,19 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   /**
    * KOT routing (per round / reprint set):
    * - No station tags on printers → every KOT printer gets the full slip.
+   * - One printer with several stations in `categories` (e.g. COOKING,BEVERAGES) → those
+   *   lines merge into **one** job on that printer (intentional multi-station assign).
    * - Single station in the order (e.g. only beverages) → only that station’s printer,
    *   with its matching lines.
-   * - Mixed stations in one order (BBQ + cooking + beverage) → each *involved*
-   *   station printer gets the **full** slip (all lines) so pickers see the whole ticket.
+   * - Mixed stations in one order across **different** printers (BBQ + cooking) → each
+   *   *involved* printer gets the **full** slip so distant stations still get a ticket.
    * - Catch-all printers (empty station/categories) get lines no specialized printer claimed.
    */
   async enqueueKot(orderId: string, opts: KotOptions = {}) {
     const kot = await this.loadKot(orderId, opts);
-    const printers = await this.prisma.printer.findMany({ where: { active: true, printsKot: true } });
+    const allKot = await this.prisma.printer.findMany({ where: { active: true, printsKot: true } });
+    // Kitchen slips must not hit cashier / Other-print / bill-counter printers.
+    const printers = this.kotPrinterPool(allKot);
     if (!printers.length) return [await this.noPrinterJob("KOT", orderId, opts.requestedById, kot.orderNo)];
 
     // Cancel / full reprint → all kitchen lines; otherwise only that round's lines.
@@ -124,8 +153,17 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
 
     const matchersOf = (printer: (typeof printers)[number]) => {
       const cats = splitCats(printer.categories);
-      const stationTag = (printer.station || "").trim().toLowerCase();
-      return cats.length ? cats : stationTag ? [stationTag] : [];
+      // Prefer categories (multi-station assign). Station field may be comma-separated legacy.
+      if (cats.length) return cats;
+      return splitCats(printer.station || "");
+    };
+
+    const slipStationLabel = (printer: (typeof printers)[number]) => {
+      const label = (printer.station || "").trim();
+      if (label) return label;
+      const cats = splitCats(printer.categories);
+      if (cats.length) return cats.map((c) => c.toUpperCase()).join(" + ");
+      return printer.name;
     };
 
     const involved = specialized
@@ -139,16 +177,16 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     const routed = new Set<KotLine>();
     for (const { mine } of involved) mine.forEach((i) => routed.add(i));
 
-    // Mixed bill → full slip on every involved station printer.
-    // Single station → only that printer, with its own lines.
+    // Mixed across *printers* → full slip on each involved printer (distant BBQ vs cooking).
+    // Several stations on the *same* printer stay one job (categories multi-select).
     const mixed = involved.length >= 2;
     for (const { printer, mine } of involved) {
       const lines = mixed ? printItems : mine;
-      const payload = kot.payload(lines, printer.station || printer.name);
+      const payload = kot.payload(lines, slipStationLabel(printer));
       jobs.push(await this.createJob("KOT", printer.id, payload, orderId, opts.requestedById));
     }
 
-    // Unmatched lines → catch-all kitchen printers.
+    // Unmatched lines → catch-all, else every kitchen printer (never drop food).
     const leftovers = printItems.filter((i) => !routed.has(i));
     if (leftovers.length && catchAll.length) {
       for (const printer of catchAll) {
@@ -156,17 +194,28 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
           await this.createJob("KOT", printer.id, kot.payload(leftovers, null), orderId, opts.requestedById),
         );
       }
-    } else if (leftovers.length && !involved.length) {
-      // Specialized printers exist but nothing matched — still print somewhere.
-      for (const printer of specialized) {
+    } else if (leftovers.length) {
+      // Specialized tags didn't cover these lines (or matched nothing) — still print.
+      const dump = catchAll.length ? catchAll : printers;
+      for (const printer of dump) {
         jobs.push(
           await this.createJob(
             "KOT",
             printer.id,
-            kot.payload(leftovers, printer.station || printer.name),
+            kot.payload(leftovers, slipStationLabel(printer)),
             orderId,
             opts.requestedById,
           ),
+        );
+      }
+    }
+
+    // Safety: items existed but routing produced zero jobs → print full slip everywhere.
+    if (!jobs.length && printItems.length) {
+      this.log.warn(`KOT routing empty for order ${orderId} — falling back to all kitchen printers`);
+      for (const printer of printers) {
+        jobs.push(
+          await this.createJob("KOT", printer.id, kot.payload(printItems, null), orderId, opts.requestedById),
         );
       }
     }
@@ -285,9 +334,26 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
         round: i.kotRound,
       },
     });
-    const allItems = kitchenRows.map(mapItem);
+    // Edit-remove: caller passes the lines that left the bill (already deleted from DB).
+    const fromCancelLines = (opts.cancelLines || [])
+      .filter((l) => l && l.name && l.quantity > 0)
+      .map((l) => ({
+        category: (l.category || "General").toLowerCase(),
+        station: (l.station || "COOKING").toLowerCase(),
+        takenBy: staffLabel(order.waiter),
+        line: {
+          name: l.name,
+          quantity: l.quantity,
+          unit: l.unit || "plate",
+          notes: l.notes ?? null,
+          round: 0,
+        },
+      }));
+    const allItems = fromCancelLines.length ? fromCancelLines : kitchenRows.map(mapItem);
     const round = opts.round ?? order.kotRounds;
-    const roundItems = kitchenRows.filter((i) => i.kotRound === round).map(mapItem);
+    const roundItems = fromCancelLines.length
+      ? fromCancelLines
+      : kitchenRows.filter((i) => i.kotRound === round).map(mapItem);
     const printable = opts.cancelled || !opts.round ? allItems : roundItems;
     if (!printable.length) throw new BadRequestException("No items to print");
 
@@ -420,6 +486,45 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     return [await this.createJob("BILL_EDIT", printerId ?? printers[0]!.id, payload, edit.order.id, requestedById)];
   }
 
+  /** Credit account paid / partial settlement slip → cashier bill printer. */
+  async enqueueCreditSlip(slip: CreditSlipPayload, requestedById?: string | null) {
+    const printers = await this.prisma.printer.findMany({ where: { active: true, printsBill: true } });
+    if (!printers.length) {
+      const job = await this.prisma.printJob.create({
+        data: {
+          type: "CREDIT_SLIP",
+          status: "FAILED",
+          lastError: "No bill printer set up (Settings → Printers)",
+          payload: slip as unknown as Prisma.InputJsonValue,
+          requestedById: requestedById ?? null,
+        },
+      });
+      this.realtime.printResult(
+        { id: job.id, type: "CREDIT_SLIP", status: "FAILED", error: job.lastError, orderNo: null },
+        requestedById
+      );
+      return [job];
+    }
+    const printerId = await this.resolveBillPrinterId(printers, requestedById, null);
+    const billOpts = await this.tips.printBillOpts();
+    const restaurant = await this.settings.restaurant();
+    const payload: CreditSlipPayload = {
+      ...slip,
+      restaurant: {
+        name: restaurant.name || slip.restaurant.name,
+        tagline: restaurant.tagline || slip.restaurant.tagline,
+        address: restaurant.address || slip.restaurant.address,
+        phone: restaurant.phone || slip.restaurant.phone,
+      },
+      logoPath: this.settings.logoFilePath(),
+      showLogo: billOpts.showLogo,
+      showName: billOpts.showName,
+      showPhone: billOpts.showPhone,
+      showAddress: billOpts.showAddress,
+    };
+    return [await this.createJob("CREDIT_SLIP", printerId ?? printers[0]!.id, payload, null, requestedById)];
+  }
+
   private async loadBillPayload(orderId: string): Promise<BillPayload> {
     const order = await this.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
@@ -489,13 +594,19 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       servedBy: order.servedByName || null,
       receivedBy: collectors.length ? collectors.join(", ") : null,
       time: order.createdAt.toISOString(),
-      items: order.items.map((i) => ({
-        name: i.name,
-        quantity: toNumber(i.quantity),
-        unit: i.sellUnit,
-        rate: toNumber(i.ratePerUnit),
-        amount: toNumber(i.amount),
-      })),
+      // Bill shows cover charge only — package food lines (notes "Per head", Rs 0) stay kitchen-only.
+      items: order.items
+        .filter((i) => {
+          if (i.lineKind === "PER_HEAD") return true;
+          return !/^per\s*head\b/i.test((i.notes || "").trim());
+        })
+        .map((i) => ({
+          name: i.name,
+          quantity: toNumber(i.quantity),
+          unit: i.sellUnit,
+          rate: toNumber(i.ratePerUnit),
+          amount: toNumber(i.amount),
+        })),
       total: toNumber(order.total),
       discountAmount: toNumber(order.discountAmount),
       taxAmount,
@@ -749,13 +860,40 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     return this.localWinCache.names.has(name);
   }
 
+  /** Prefer kitchen printers; exclude Other-print. Always keep at least one printsKot target. */
+  private kotPrinterPool<T extends { name: string; target: string; station: string | null; categories: string | null; printsOther: boolean; printsBill: boolean; printsKot: boolean }>(
+    printers: T[],
+  ): T[] {
+    if (!printers.length) return printers;
+    const keyOf = (p: T) => `${p.target || ""} ${p.name || ""} ${p.station || ""}`.toLowerCase();
+    const looksKitchen = (p: T) =>
+      /kitchen|kot|cook|grill|tandoor|bbq|bar|beverage|drink|chef/.test(keyOf(p)) ||
+      !!(p.station || "").trim() ||
+      splitCats(p.categories || "").length > 0;
+    const looksCashier = (p: T) =>
+      /cashier|counter|pos|reception|billing|front.?desk|main.?pc/.test(keyOf(p)) && !looksKitchen(p);
+
+    // Other-print = A4/PDF reports — never kitchen slips (unless that is the only KOT printer).
+    const noOther = printers.filter((p) => !p.printsOther);
+    const pool = noOther.length ? noOther : printers;
+
+    const kitchen = pool.filter(looksKitchen);
+    if (kitchen.length) return kitchen;
+
+    const notCashier = pool.filter((p) => !looksCashier(p));
+    if (notCashier.length) return notCashier;
+
+    const kotOnly = pool.filter((p) => p.printsKot && !p.printsBill);
+    return kotOnly.length ? kotOnly : pool;
+  }
+
   /**
-   * One-time / boot heal: Kitchen/Bar-named agent printers must print KOT, not guest bills.
-   * (Old sync defaulted every USB printer to bill-only → KOT failed + bills stuck on Kitchen.)
+   * Boot heal (auto-synced only): Kitchen/Bar-named agent printers default to KOT, not bills.
+   * Never touch `manual` printers — Settings choices must stick.
    */
   private async healAgentPrinterRoles() {
     const agents = await this.prisma.printer.findMany({
-      where: { kind: "AGENT", active: true },
+      where: { kind: "AGENT", active: true, manual: false },
       select: { id: true, target: true, name: true, printsKot: true, printsBill: true },
     });
     for (const p of agents) {
@@ -901,7 +1039,10 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   async completeAgentJob(agentId: string, jobId: string) {
     const job = await this.prisma.printJob.findFirst({
       where: { id: jobId, printer: { agentId } },
-      include: { printer: true, order: { select: { orderNo: true } } },
+      include: {
+        printer: { include: { agent: { select: { id: true, displayName: true, hostname: true } } } },
+        order: { select: { orderNo: true } },
+      },
     });
     if (!job) throw new NotFoundException("Print job not found");
     this.agentClaimedAt.delete(job.id);
@@ -910,6 +1051,13 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       data: { status: "DONE", printedAt: new Date(), lastError: null },
     });
     this.notBefore.delete(job.id);
+    const agent = job.printer?.agent;
+    const mName = agent?.displayName || agent?.hostname || job.printer?.name || "Cashier PC";
+    this.machineLogs.info(
+      agentId,
+      mName,
+      `Print OK · ${job.type}${job.order?.orderNo != null ? ` #${job.order.orderNo}` : ""} · ${job.printer?.name || "?"}`
+    );
     this.realtime.printResult(
       {
         id: job.id,
@@ -926,7 +1074,10 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   async failAgentJob(agentId: string, jobId: string, error: string) {
     const job = await this.prisma.printJob.findFirst({
       where: { id: jobId, printer: { agentId } },
-      include: { printer: true, order: { select: { orderNo: true } } },
+      include: {
+        printer: { include: { agent: { select: { id: true, displayName: true, hostname: true } } } },
+        order: { select: { orderNo: true } },
+      },
     });
     if (!job) throw new NotFoundException("Print job not found");
     this.agentClaimedAt.delete(job.id);
@@ -939,6 +1090,13 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     if (final) {
       this.notBefore.delete(job.id);
       this.log.warn(`Agent job ${job.id} failed: ${error}`);
+      const agent = job.printer?.agent;
+      const mName = agent?.displayName || agent?.hostname || job.printer?.name || "Cashier PC";
+      this.machineLogs.error(
+        agentId,
+        mName,
+        `Print FAIL · ${job.type}${job.order?.orderNo != null ? ` #${job.order.orderNo}` : ""} · ${job.printer?.name || "?"} · ${error.slice(0, 160)}`
+      );
       this.realtime.printResult(
         {
           id: job.id,
@@ -969,6 +1127,11 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
         data: { status: "DONE", printedAt: new Date(), lastError: null },
       });
       this.notBefore.delete(job.id);
+      this.machineLogs.info(
+        job.printer.agentId || this.machineLogs.mainId(),
+        job.printer.name,
+        `Print OK · ${job.type}${job.order?.orderNo != null ? ` #${job.order.orderNo}` : ""} · ${job.printer.name}`
+      );
       this.realtime.printResult(
         { id: job.id, type: job.type, status: "DONE", printer: job.printer.name, orderNo: job.order?.orderNo ?? null },
         job.requestedById
@@ -983,6 +1146,11 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
       if (final) {
         this.notBefore.delete(job.id);
         this.log.warn(`Job ${job.id} failed: ${error}`);
+        this.machineLogs.error(
+          job.printer?.agentId || this.machineLogs.mainId(),
+          job.printer?.name || "Main server",
+          `Print FAIL · ${job.type}${job.order?.orderNo != null ? ` #${job.order.orderNo}` : ""} · ${job.printer?.name || "?"} · ${error.slice(0, 160)}`
+        );
         this.realtime.printResult(
           {
             id: job.id,
@@ -1005,6 +1173,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
     if (job.type === "KOT") return renderKot(p as KotPayload, paperWidth);
     if (job.type === "BILL") return renderBill(p as BillPayload, paperWidth);
     if (job.type === "BILL_EDIT") return renderBillEditConfirm(p as BillEditConfirmPayload, paperWidth);
+    if (job.type === "CREDIT_SLIP") return renderCreditSlip(p as CreditSlipPayload, paperWidth);
     return renderTest(p as TestPayload, paperWidth);
   }
 
@@ -1021,7 +1190,7 @@ export class PrintService implements OnApplicationBootstrap, OnModuleDestroy {
   private createJob(
     type: PrintJob["type"],
     printerId: string,
-    payload: KotPayload | BillPayload | BillEditConfirmPayload | TestPayload,
+    payload: KotPayload | BillPayload | BillEditConfirmPayload | CreditSlipPayload | TestPayload,
     orderId: string | null,
     requestedById?: string | null
   ) {
@@ -1060,17 +1229,21 @@ function splitCats(s: string) {
     .filter(Boolean);
 }
 
-/** Match menu category or kitchen station (beverages / cooking / bbq) to printer tags. */
+/** Match menu category or kitchen station codes (BEVERAGES / COOKING / BBQ) to printer tags. */
 function itemMatchesPrinter(
   item: { category: string; station: string },
   matchers: string[],
 ) {
-  return matchers.some(
-    (m) =>
-      m === item.category ||
-      m === item.station ||
-      // allow "Beverages" printer station / shorthand tags
-      item.station.includes(m) ||
-      m.includes(item.station),
-  );
+  const station = (item.station || "").toLowerCase();
+  const category = (item.category || "").toLowerCase();
+  return matchers.some((raw) => {
+    const m = raw.toLowerCase();
+    if (!m) return false;
+    return (
+      m === category ||
+      m === station ||
+      // allow shorthand tags ("bev" / "Beverages" printer labels)
+      (!!station && (station.includes(m) || m.includes(station)))
+    );
+  });
 }

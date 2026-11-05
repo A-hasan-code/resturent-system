@@ -5,7 +5,12 @@ import { PrismaService } from "../prisma/prisma.service";
 import { SettingsService } from "../system/settings.service";
 import { dataDir } from "../config/env";
 import { toNumber } from "../common/units";
-import { businessDateOf, businessQueryRange, businessQueryWindow } from "../common/business-day";
+import {
+  addBusinessDays,
+  businessDateOf,
+  businessQueryRange,
+  businessQueryWindow,
+} from "../common/business-day";
 import { renderAuditPdf } from "./audit-pdf";
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -142,22 +147,25 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
     return dataDir("audit");
   }
 
-  /** Earliest order date in the system (for “all time” filter). */
+  /** Earliest order business date in the system (for “all time” filter). */
   async firstSaleDate(): Promise<string | null> {
     const first = await this.prisma.order.findFirst({
       where: { status: { not: "CANCELLED" } },
       orderBy: { createdAt: "asc" },
       select: { createdAt: true },
     });
-    return first ? isoDay(first.createdAt) : null;
+    if (!first) return null;
+    const day = await this.settings.dayStart();
+    return businessDateOf(first.createdAt, day.h, day.m, day.closeH, day.closeM);
   }
 
   async report(from: string, to: string, staffName?: string): Promise<AuditReport> {
     if (!DATE.test(from) || !DATE.test(to)) throw new BadRequestException("Dates must be YYYY-MM-DD");
     const day = await this.settings.dayStart();
-    const range = businessQueryRange(from, to, day.h, day.m);
-    const start = range.gte;
-    const end = range.lt;
+    const range = businessQueryRange(from, to, day.h, day.m, day.closeH, day.closeM);
+    // Exact shift open → close (no pad).
+    const start = range.from;
+    const end = range.to;
     if (range.to <= range.from) throw new BadRequestException("End date is before the start date");
     if (range.to.getTime() - range.from.getTime() > MAX_DAYS * 86400000) {
       throw new BadRequestException("Date range is too long");
@@ -169,18 +177,18 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
       : undefined;
 
     const now = new Date();
-    const bizToday = businessDateOf(now, day.h, day.m);
+    const bizToday = businessDateOf(now, day.h, day.m, day.closeH, day.closeM);
     const [y, mo] = bizToday.split("-").map(Number);
     const monthFrom = `${String(y).padStart(4, "0")}-${String(mo).padStart(2, "0")}-01`;
     const yearFrom = `${y}-01-01`;
-    const todayWin = businessQueryWindow(bizToday, day.h, day.m);
+    const todayWin = businessQueryWindow(bizToday, day.h, day.m, day.closeH, day.closeM);
     const monthWin = {
-      from: businessQueryWindow(monthFrom, day.h, day.m).gte,
-      to: todayWin.lt,
+      from: businessQueryWindow(monthFrom, day.h, day.m, day.closeH, day.closeM).from,
+      to: todayWin.to,
     };
     const yearWin = {
-      from: businessQueryWindow(yearFrom, day.h, day.m).gte,
-      to: todayWin.lt,
+      from: businessQueryWindow(yearFrom, day.h, day.m, day.closeH, day.closeM).from,
+      to: todayWin.to,
     };
 
     const staffOrderFilter = nameMatch
@@ -279,16 +287,15 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         take: 8000,
       }),
       this.firstSaleDate(),
-      sumPaidFood(todayWin.gte, todayWin.lt),
+      sumPaidFood(todayWin.from, todayWin.to),
       sumPaidFood(monthWin.from, monthWin.to),
       sumPaidFood(yearWin.from, yearWin.to),
     ]);
 
     const days = new Map<string, AuditDay>();
-    for (let t = start.getTime(); t < end.getTime(); t += 86400000) {
-      const date = isoDay(new Date(t));
-      days.set(date, {
-        date,
+    for (let d = from; d <= to; d = addBusinessDays(d, 1)) {
+      days.set(d, {
+        date: d,
         orders: 0,
         cancelled: 0,
         paymentsIn: 0,
@@ -302,7 +309,7 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
         profit: 0,
       });
     }
-    const bucket = (d: Date) => days.get(businessDateOf(d, day.h, day.m));
+    const bucket = (at: Date) => days.get(businessDateOf(at, day.h, day.m, day.closeH, day.closeM));
 
     let cancelled = 0;
     let unpaidAmount = 0;
@@ -495,9 +502,13 @@ export class AuditService implements OnApplicationBootstrap, OnModuleDestroy {
   async refreshStored() {
     const now = new Date();
     try {
-      await this.writeMonth(yearMonth(now), isoDay(now), true);
-      const prev = new Date(now.getFullYear(), now.getMonth(), 0);
-      await this.writeMonth(yearMonth(prev), isoDay(prev), false);
+      const day = await this.settings.dayStart();
+      const bizToday = businessDateOf(now, day.h, day.m, day.closeH, day.closeM);
+      await this.writeMonth(bizToday.slice(0, 7), bizToday, true);
+      const [y, mo] = bizToday.split("-").map(Number);
+      const prev = new Date(y, mo - 1, 0);
+      const prevBiz = businessDateOf(prev, day.h, day.m, day.closeH, day.closeM);
+      await this.writeMonth(prevBiz.slice(0, 7), prevBiz, false);
       this.prune();
     } catch (e) {
       this.log.warn(`Audit PDF failed: ${(e as Error).message}`);

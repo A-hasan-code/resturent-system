@@ -36,6 +36,11 @@ export class CreateUserDto {
   @IsOptional()
   @IsString()
   billPrinterId?: string;
+
+  /** Kitchen board Start / Ready / Served (admin grant). */
+  @IsOptional()
+  @IsBoolean()
+  kitchenBoard?: boolean;
 }
 
 export class UpdateUserDto {
@@ -74,4 +79,9 @@ export class UpdateUserDto {
   @ValidateIf((_, v) => v !== null)
   @IsString()
   billPrinterId?: string | null;
+
+  /** Kitchen board Start / Ready / Served (admin grant). */
+  @IsOptional()
+  @IsBoolean()
+  kitchenBoard?: boolean;
 }
