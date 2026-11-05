@@ -203,6 +203,9 @@ foreach ($pkg in "typescript", ".pnpm") {
 Step "Web app"
 Copy-Item (Join-Path $Root "apps\web\dist") (Join-Path $Stage "app\web\dist") -Recurse
 
+Step "Protect staged API + web (obfuscate + integrity seal)"
+Invoke-Checked "node" @((Join-Path $Root "scripts\protect-release.mjs"), "--stage", $Stage)
+
 if (-not $SkipAndroid) {
   Step "Android app (served to tablets at /downloads)"
   & (Join-Path $Root "packaging\android\Build-Apk.ps1") -SkipWeb
@@ -226,7 +229,14 @@ if (-not $SkipDesktop) {
   $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
   Remove-Item Env:CSC_LINK -ErrorAction SilentlyContinue
   Remove-Item Env:CSC_KEY_PASSWORD -ErrorAction SilentlyContinue
+  $desktopSrc = Join-Path $Root "apps\desktop\src"
+  $desktopSrcBackup = Join-Path $Root "build\desktop-src-backup"
+  if (Test-Path $desktopSrcBackup) { Remove-Item $desktopSrcBackup -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path (Split-Path $desktopSrcBackup) | Out-Null
+  Copy-Item $desktopSrc $desktopSrcBackup -Recurse
   try {
+    Step "Protect desktop src (obfuscate + integrity prelude)"
+    Invoke-Checked "node" @((Join-Path $Root "scripts\protect-release.mjs"), "--desktop-src", $desktopSrc)
     # Unique output dir avoids EBUSY when releases\desktop\win-unpacked is locked (IDE/antivirus).
     $desktopOutRel = "../../releases/desktop-build"
     $desktopOutAbs = Join-Path $Releases "desktop-build"
@@ -259,6 +269,12 @@ if (-not $SkipDesktop) {
     }
   } finally {
     if ($prevCsc) { $env:CSC_LINK = $prevCsc }
+    # Always restore clear desktop sources after release pack.
+    if (Test-Path $desktopSrcBackup) {
+      Remove-Item $desktopSrc -Recurse -Force -ErrorAction SilentlyContinue
+      Copy-Item $desktopSrcBackup $desktopSrc -Recurse
+      Remove-Item $desktopSrcBackup -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
   $unpacked = Join-Path $desktopOutAbs "win-unpacked"
   $desktopExeName = "PixalBotics Restaurant.exe"

@@ -21,8 +21,6 @@ export type PayTarget = {
   paidAmount?: number;
   tenderedAmount?: number;
   tipAmount?: number;
-  servedByName?: string | null;
-  servedBy?: string | null;
   orderedBy?: { id?: string; name: string; roleCode?: string; roleName: string } | null;
 };
 
@@ -59,7 +57,6 @@ export function PayModal({
   const [taxPercent, setTaxPercent] = useState(0);
   const [cashiers, setCashiers] = useState<Cashier[]>([]);
   const [handedTo, setHandedTo] = useState("");
-  const [servedByName, setServedByName] = useState("");
   const [busy, setBusy] = useState(false);
   const [handedOver, setHandedOver] = useState(false);
   const [creditPick, setCreditPick] = useState<CreditHit | null>(null);
@@ -86,7 +83,6 @@ export function PayModal({
     setCreditQ("");
     setCreditHits([]);
     setCreditLookup("idle");
-    setServedByName((order.servedByName || order.servedBy || "").trim());
     api<{ billing?: { taxEnabled?: boolean; taxPercent?: number } }>("/system/settings")
       .then((s) => {
         const pct = s.billing?.taxEnabled ? Number(s.billing.taxPercent) || 0 : 0;
@@ -144,7 +140,7 @@ export function PayModal({
     };
   }, [creditQ, onCredit, creditPick]);
 
-  async function submitCredit() {
+  async function submitCredit(opts: { printReceipt: boolean }) {
     if (!order) return;
     if (!creditPick) return toast.push(t("pay.creditNeed"), "err");
     setBusy(true);
@@ -154,7 +150,6 @@ export function PayModal({
         body: JSON.stringify({
           creditCustomerId: creditPick.id,
           discount: discountValue,
-          servedByName: servedByName.trim() || undefined,
           releaseTable: true,
         }),
       });
@@ -164,6 +159,15 @@ export function PayModal({
           : t("pay.creditSavedFreed", { name: creditPick.name }),
         "ok"
       );
+      // Unpaid credit bill — same cashier printer as cash PAID receipt.
+      if (opts.printReceipt && can("print.bill")) {
+        try {
+          await serverPrint("bill", order.id);
+          toast.push(t("pay.creditReceiptPrinted"), "ok");
+        } catch (printErr) {
+          toast.push(printErr instanceof Error ? printErr.message : t("pay.creditReceiptFailed"), "err");
+        }
+      }
       onPaid(false, true, true);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
@@ -201,7 +205,6 @@ export function PayModal({
           discount: discountValue,
           tip: tipValue,
           method,
-          servedByName: servedByName.trim() || undefined,
           ...(needsHandover && (payAmount > 0 || tipValue > 0) ? { handedToId: handedTo } : {}),
         }),
       });
@@ -230,7 +233,8 @@ export function PayModal({
     e.preventDefault();
     if (!order) return;
     if (onCredit) {
-      await submitCredit();
+      // Enter / primary submit = credit + print when allowed (same as cash).
+      await submitCredit({ printReceipt: can("print.bill") });
       return;
     }
     // Enter / primary submit = pay + print when allowed.
@@ -369,18 +373,6 @@ export function PayModal({
             )}
 
             <div className="field">
-              <label htmlFor="pay-server">{t("pay.servedBy")}</label>
-              <input
-                id="pay-server"
-                value={servedByName}
-                onChange={(e) => setServedByName(e.target.value)}
-                placeholder={t("serve.namePh")}
-                maxLength={80}
-                autoComplete="off"
-              />
-            </div>
-
-            <div className="field">
               <label htmlFor="pay-discount">{t("pay.discount")}</label>
               <input
                 id="pay-discount"
@@ -487,9 +479,25 @@ export function PayModal({
               {t("common.cancel")}
             </button>
             {onCredit ? (
-              <button type="submit" className="btn ok" disabled={busy || !creditPick}>
-                {busy ? t("common.saving") : t("pay.putOnCredit")}
-              </button>
+              <>
+                {can("print.bill") && (
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    disabled={busy || !creditPick}
+                    onClick={() => void submitCredit({ printReceipt: false })}
+                  >
+                    {busy ? t("common.saving") : t("pay.putOnCreditNoPrint")}
+                  </button>
+                )}
+                <button type="submit" className="btn ok" disabled={busy || !creditPick}>
+                  {busy
+                    ? t("common.saving")
+                    : can("print.bill")
+                      ? t("pay.putOnCreditPrint")
+                      : t("pay.putOnCredit")}
+                </button>
+              </>
             ) : (
               <>
                 {can("print.bill") && (

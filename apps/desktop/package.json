@@ -22,6 +22,7 @@
     "appId": "com.pixalbotics.hotelsystem",
     "productName": "PixalBotics Restaurant",
     "electronVersion": "35.7.5",
+    "asar": true,
     "directories": {
       "output": "../../releases/desktop"
     },
@@ -30,6 +31,13 @@
       "assets/**/*",
       "package.json"
     ],
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"

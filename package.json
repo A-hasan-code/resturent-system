@@ -24,6 +24,12 @@
     "hotel:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./scripts/dev-setup.ps1\"",
     "smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./scripts/smoke-test.ps1\"",
     "apk": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./packaging/android/Build-Apk.ps1\"",
-    "release": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./packaging/windows/Build-Release.ps1\""
+    "release": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./packaging/windows/Build-Release.ps1\"",
+    "protect:release": "node ./scripts/protect-release.mjs",
+    "protect:smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./scripts/protect-release-smoke.ps1\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12",
+    "javascript-obfuscator": "^4.2.2"
   }
 }
